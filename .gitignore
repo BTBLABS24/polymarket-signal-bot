@@ -1,0 +1,28 @@
+# Sensitive files
+.env
+*.env
+telegram_sent_log.txt
+sent_alerts.json
+MY_BETS_LOG.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Data files (too large for git)
+*.csv
+*.db
+*.duckdb
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
