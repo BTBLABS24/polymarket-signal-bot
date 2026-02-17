@@ -68,8 +68,7 @@ TRADES_PER_PAGE = 1000
 WINDOW_MINUTES = 60          # 1-hour signal windows
 
 # Trading config
-_dry_run_val = os.environ.get('DRY_RUN', 'true').lower().strip()
-DRY_RUN = _dry_run_val not in ('false', 'flase', 'fals', '0', 'no', 'off')  # Set DRY_RUN=false to go live
+DRY_RUN = False  # LIVE TRADING ENABLED
 MAX_BET_DOLLARS = 50          # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
