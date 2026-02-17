@@ -74,7 +74,7 @@ DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
 MAX_OPEN_POSITIONS = 20       # Cap concurrent positions
 ORDER_WAIT_SECONDS = 5        # Wait for fill after placing order
 MAX_ORDER_RETRIES = 2         # Retry at next price level
-MAX_SLIPPAGE_PCT = 1.0        # Skip if NO price > 1% worse than signal
+MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 
 # Categories to EXCLUDE (prefix-based fast filter + event category fallback)
 EXCLUDED_PREFIXES = [
@@ -821,7 +821,7 @@ class OrderExecutor:
             print(f"    DRY RUN: would buy {contracts} NO @ {no_price_cents}c (${bet_dollars:.2f})")
             return order_info
 
-        # Max price we'll pay: signal NO price + 1% slippage
+        # Max price we'll pay: signal NO price + slippage tolerance
         max_no_price = int(no_price_cents * (1 + MAX_SLIPPAGE_PCT / 100))
 
         # Live order with retries -- track all placed order IDs so we can
@@ -867,7 +867,7 @@ class OrderExecutor:
         for attempt in range(MAX_ORDER_RETRIES + 1):
             price = best_ask_cents + attempt  # Start at best ask, bump 1c each retry
             if price > max_no_price:
-                print(f"    Price {price}c exceeds max {max_no_price}c (1% slip), stopping")
+                print(f"    Price {price}c exceeds max {max_no_price}c ({MAX_SLIPPAGE_PCT:.0f}% slip), stopping")
                 break
             if price >= 99:
                 break
