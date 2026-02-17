@@ -1206,6 +1206,7 @@ class KalshiReversionScanner:
                 await self.notifier.send_24h_exit(pos, exit_info)
 
         print(f"  Open positions: {self.positions.count()} ({self.positions.live_count()} live)")
+        daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
             print(f"  Daily P&L: ${daily_pnl:.2f}")
 
