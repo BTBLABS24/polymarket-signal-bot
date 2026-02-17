@@ -67,7 +67,7 @@ TRADES_PER_PAGE = 1000
 WINDOW_MINUTES = 60          # 1-hour signal windows
 
 # Trading config
-DRY_RUN = True               # True = log orders but don't execute
+DRY_RUN = os.environ.get('DRY_RUN', 'true').lower() not in ('false', '0', 'no')
 MAX_BET_DOLLARS = 10          # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
