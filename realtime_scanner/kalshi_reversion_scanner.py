@@ -45,7 +45,8 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 # Kalshi API auth
 KALSHI_API_KEY_ID = os.environ.get('KALSHI_API_KEY_ID', '')
 KALSHI_PRIVATE_KEY_PATH = os.environ.get('KALSHI_PRIVATE_KEY_PATH', '')
-KALSHI_PRIVATE_KEY = os.environ.get('KALSHI_PRIVATE_KEY', '')  # Raw PEM content (for Railway)
+KALSHI_PRIVATE_KEY = os.environ.get('KALSHI_PRIVATE_KEY', '')  # Raw PEM or base64-encoded PEM
+KALSHI_PRIVATE_KEY_B64 = os.environ.get('KALSHI_PRIVATE_KEY_B64', '')  # Base64-encoded PEM (for Railway)
 
 KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
@@ -134,9 +135,20 @@ class KalshiClient:
         # Debug: show what env vars we got
         print(f"  Auth env: KEY_ID={len(KALSHI_API_KEY_ID)} chars, "
               f"PRIVATE_KEY={len(KALSHI_PRIVATE_KEY)} chars, "
+              f"B64={len(KALSHI_PRIVATE_KEY_B64)} chars, "
               f"PATH={len(KALSHI_PRIVATE_KEY_PATH)} chars")
 
-        # Mode 1: raw PEM content from env var (Railway)
+        # Mode 1a: base64-encoded PEM (best for Railway — no multiline issues)
+        if KALSHI_PRIVATE_KEY_B64:
+            try:
+                pem_data = base64.b64decode(KALSHI_PRIVATE_KEY_B64)
+                self.private_key = serialization.load_pem_private_key(pem_data, password=None)
+                print("  RSA key loaded from KALSHI_PRIVATE_KEY_B64 env var")
+                return
+            except Exception as e:
+                print(f"  WARNING: Failed to load base64 private key: {e}")
+
+        # Mode 1b: raw PEM content from env var
         if KALSHI_PRIVATE_KEY:
             try:
                 pem_data = KALSHI_PRIVATE_KEY.replace('\\n', '\n').encode()
@@ -145,11 +157,10 @@ class KalshiClient:
                 return
             except Exception as e:
                 print(f"  WARNING: Failed to load private key from env var: {e}")
-                return
 
         # Mode 2: file path (local)
         if not KALSHI_PRIVATE_KEY_PATH:
-            print("  WARNING: No KALSHI_PRIVATE_KEY or KALSHI_PRIVATE_KEY_PATH set — trading disabled")
+            print("  WARNING: No KALSHI_PRIVATE_KEY_B64, KALSHI_PRIVATE_KEY, or PATH set — trading disabled")
             return
         key_path = Path(KALSHI_PRIVATE_KEY_PATH).expanduser()
         if not key_path.exists():
