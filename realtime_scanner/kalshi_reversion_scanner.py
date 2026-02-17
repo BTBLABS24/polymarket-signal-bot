@@ -6,7 +6,7 @@ Automated version of the scanner that:
 - Detects retail surge signals (same logic as before)
 - Places real orders on Kalshi via authenticated API
 - Sizes bets dynamically based on orderbook depth
-- Executes stop-loss and 24h exits automatically
+- Executes 24h exits automatically
 - Has DRY_RUN toggle and safety circuit breakers
 
 Uses RSA-PSS signing for Kalshi API authentication.
@@ -57,7 +57,6 @@ MIN_SIDE_RATIO = 0.65       # 65%+ on one side
 MIN_PRICE_MOVE = 0.15       # 15c move
 ENTRY_PRICE_MIN = 0.21
 ENTRY_PRICE_MAX = 0.80
-STOP_LOSS_PCT = -30.0
 HOLD_HOURS = 24
 COOLDOWN_HOURS = 4
 
@@ -532,11 +531,6 @@ class KalshiReversionDetector:
                 fade_action = 'BUY'
                 fade_side = 'yes'
 
-            if fade_action == 'SELL':
-                sl_price = round(p_end * (1 + abs(STOP_LOSS_PCT) / 100), 4)
-            else:
-                sl_price = round(p_end * (1 - abs(STOP_LOSS_PCT) / 100), 4)
-
             retail_volume = sum(t.get('count', 0) for t in small_trades)
 
             self.signal_history[ticker] = now_ts
@@ -556,7 +550,6 @@ class KalshiReversionDetector:
                 'n_total_trades': len(ticker_trades),
                 'retail_contracts': retail_volume,
                 'signal_time': now_ts,
-                'stop_loss_price': sl_price,
             })
 
         return signals
@@ -689,7 +682,6 @@ class KalshiPositionTracker:
             'retail_contracts': signal['retail_contracts'],
             'entry_time': signal['signal_time'],
             'exit_time': signal['signal_time'] + HOLD_HOURS * 3600,
-            'stop_loss_price': signal['stop_loss_price'],
             'status': 'open',
         }
         if order_info:
@@ -704,7 +696,7 @@ class KalshiPositionTracker:
         self._save()
 
     def check(self, client):
-        """Check for stop-loss or 24h expiry. Returns alerts list."""
+        """Check for 24h expiry. Returns alerts list."""
         now = time.time()
         alerts = []
         still_open = []
@@ -726,16 +718,6 @@ class KalshiPositionTracker:
                 pos['close_time'] = now
                 self.closed.append(pos)
                 alerts.append(('24h_exit', pos))
-                continue
-
-            # Stop-loss
-            if roi is not None and roi <= STOP_LOSS_PCT:
-                pos['exit_price'] = current
-                pos['roi_pct'] = roi
-                pos['status'] = 'stopped_out'
-                pos['close_time'] = now
-                self.closed.append(pos)
-                alerts.append(('stop_loss', pos))
                 continue
 
             still_open.append(pos)
@@ -1024,7 +1006,6 @@ class KalshiNotifier:
 
     async def send_signal(self, sig, order_info=None):
         entry_cents = int(sig['entry_price'] * 100)
-        sl_cents = int(sig['stop_loss_price'] * 100)
         exit_time = datetime.fromtimestamp(
             sig['signal_time'] + HOLD_HOURS * 3600, tz=timezone.utc
         ).strftime('%b %d %H:%M UTC')
@@ -1059,7 +1040,6 @@ class KalshiNotifier:
             f"Ticker: {sig['ticker']}\n\n"
             f"ACTION: {action}\n\n"
             f"Yes price: {entry_cents}c\n"
-            f"Stop-loss: {sl_cents}c ({STOP_LOSS_PCT:.0f}%)\n"
             f"Exit: {exit_time} (24h hold)\n\n"
             f"Why: {sig['n_small_trades']} small trades {move_dir} "
             f"by {abs(sig['price_move'])*100:.0f}c in 1hr "
@@ -1067,32 +1047,6 @@ class KalshiNotifier:
             f"Backtest (60d): 58% WR, +27% avg ROI"
             f"{trade_line}"
             f"{url}"
-        )
-        await self._send(msg)
-
-    async def send_stop_loss(self, pos, exit_info=None):
-        held = (pos['close_time'] - pos['entry_time']) / 3600
-        exit_price = pos.get('exit_price', 0) or 0
-        entry_cents = int(pos['entry_price'] * 100)
-        exit_cents = int(exit_price * 100) if exit_price else 0
-
-        if pos['fade_action'] == 'SELL':
-            close = f"SELL your NO position (or buy back YES at {exit_cents}c)"
-        else:
-            close = f"SELL your YES at {exit_cents}c"
-
-        pnl_line = ""
-        if exit_info and 'pnl' in exit_info:
-            pnl_line = f"\nActual P&L: ${exit_info['pnl']:.2f}"
-
-        msg = (
-            f"STOP-LOSS HIT (-30%)\n\n"
-            f"{pos['title']}\n"
-            f"Ticker: {pos['ticker']}\n\n"
-            f"CLOSE NOW: {close}\n\n"
-            f"Entry: {entry_cents}c -> Now: {exit_cents}c\n"
-            f"Loss: {pos.get('roi_pct', 0):+.1f}%{pnl_line}\n"
-            f"Held: {held:.1f}h"
         )
         await self._send(msg)
 
@@ -1130,7 +1084,7 @@ class KalshiNotifier:
             f"Strategy: SELL-only, fade retail buying surges\n"
             f"Params: 12-40 small trades, 15c+ move, 21-80c\n"
             f"Categories: No sports/crypto/financials\n"
-            f"Hold: 24h, -30% stop-loss\n"
+            f"Hold: 24h, no stop-loss\n"
             f"Max bet: ${MAX_BET_DOLLARS}/signal\n"
             f"Max positions: {MAX_OPEN_POSITIONS}\n"
             f"{bal_line}"
@@ -1173,7 +1127,7 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy: Fade retail surges, 24h hold, -30% SL")
+        print(f"Strategy: Fade retail surges, 24h hold, no stop-loss")
         print(f"Max bet: ${MAX_BET_DOLLARS}/signal, Max positions: {MAX_OPEN_POSITIONS}")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
@@ -1240,17 +1194,14 @@ class KalshiReversionScanner:
                 await self.notifier.send_signal(sig, order_info)
                 self.positions.add(sig, order_info)
 
-        # 3. Check positions for stop-loss / 24h exit
+        # 3. Check positions for 24h exit
         alerts = self.positions.check(self.client)
         for atype, pos in alerts:
             exit_info = None
             if pos.get('is_live') and self.client.can_trade:
                 exit_info = self.executor.execute_exit(pos)
 
-            if atype == 'stop_loss':
-                print(f"  STOP-LOSS: '{pos['title'][:50]}' ROI: {pos.get('roi_pct',0):+.1f}%")
-                await self.notifier.send_stop_loss(pos, exit_info)
-            elif atype == '24h_exit':
+            if atype == '24h_exit':
                 print(f"  24h EXIT: '{pos['title'][:50]}' ROI: {pos.get('roi_pct',0):+.1f}%")
                 await self.notifier.send_24h_exit(pos, exit_info)
 
