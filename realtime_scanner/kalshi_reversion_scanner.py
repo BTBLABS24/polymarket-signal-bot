@@ -76,7 +76,7 @@ MAX_DAILY_LOSS = 200          # Stop trading if daily loss exceeds this
 MAX_OPEN_POSITIONS = 20       # Cap concurrent positions
 ORDER_WAIT_SECONDS = 5        # Wait for fill after placing order
 MAX_ORDER_RETRIES = 2         # Retry at next price level
-MAX_SLIPPAGE_PCT = 1.0        # Skip if NO price > 1% worse than signal
+MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 
 # Categories to EXCLUDE (prefix-based fast filter + event category fallback)
 EXCLUDED_PREFIXES = [
