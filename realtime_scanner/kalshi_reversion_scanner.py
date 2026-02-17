@@ -45,8 +45,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 # Kalshi API auth
 KALSHI_API_KEY_ID = os.environ.get('KALSHI_API_KEY_ID', '')
 KALSHI_PRIVATE_KEY_PATH = os.environ.get('KALSHI_PRIVATE_KEY_PATH', '')
-KALSHI_PRIVATE_KEY = os.environ.get('KALSHI_PRIVATE_KEY', '')  # Raw PEM or base64-encoded PEM
-KALSHI_PRIVATE_KEY_B64 = os.environ.get('KALSHI_PRIVATE_KEY_B64', '')  # Base64-encoded PEM (for Railway)
+KALSHI_PRIVATE_KEY = os.environ.get('KALSHI_PRIVATE_KEY', '')  # Raw PEM content (for Railway)
 
 KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
@@ -68,15 +67,14 @@ TRADES_PER_PAGE = 1000
 WINDOW_MINUTES = 60          # 1-hour signal windows
 
 # Trading config
-DRY_RUN = False  # LIVE TRADING ENABLED
-MAX_BET_DOLLARS = 50          # Max per signal
+DRY_RUN = True               # True = log orders but don't execute
+MAX_BET_DOLLARS = 10          # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
-MAX_DAILY_LOSS = 200          # Stop trading if daily loss exceeds this
 MAX_OPEN_POSITIONS = 20       # Cap concurrent positions
 ORDER_WAIT_SECONDS = 5        # Wait for fill after placing order
 MAX_ORDER_RETRIES = 2         # Retry at next price level
-MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
+MAX_SLIPPAGE_PCT = 1.0        # Skip if NO price > 1% worse than signal
 
 # Categories to EXCLUDE (prefix-based fast filter + event category fallback)
 EXCLUDED_PREFIXES = [
@@ -135,24 +133,7 @@ class KalshiClient:
           1. KALSHI_PRIVATE_KEY — raw PEM content (for Railway / cloud)
           2. KALSHI_PRIVATE_KEY_PATH — path to PEM file (for local)
         """
-        # Debug: show what env vars we got
-        print(f"  Auth env: KEY_ID={len(KALSHI_API_KEY_ID)} chars, "
-              f"PRIVATE_KEY={len(KALSHI_PRIVATE_KEY)} chars, "
-              f"B64={len(KALSHI_PRIVATE_KEY_B64)} chars, "
-              f"PATH={len(KALSHI_PRIVATE_KEY_PATH)} chars")
-        print(f"  DRY_RUN env='{os.environ.get('DRY_RUN', '(not set)')}' -> DRY_RUN={DRY_RUN}")
-
-        # Mode 1a: base64-encoded PEM (best for Railway — no multiline issues)
-        if KALSHI_PRIVATE_KEY_B64:
-            try:
-                pem_data = base64.b64decode(KALSHI_PRIVATE_KEY_B64)
-                self.private_key = serialization.load_pem_private_key(pem_data, password=None)
-                print("  RSA key loaded from KALSHI_PRIVATE_KEY_B64 env var")
-                return
-            except Exception as e:
-                print(f"  WARNING: Failed to load base64 private key: {e}")
-
-        # Mode 1b: raw PEM content from env var
+        # Mode 1: raw PEM content from env var (Railway)
         if KALSHI_PRIVATE_KEY:
             try:
                 pem_data = KALSHI_PRIVATE_KEY.replace('\\n', '\n').encode()
@@ -161,10 +142,11 @@ class KalshiClient:
                 return
             except Exception as e:
                 print(f"  WARNING: Failed to load private key from env var: {e}")
+                return
 
         # Mode 2: file path (local)
         if not KALSHI_PRIVATE_KEY_PATH:
-            print("  WARNING: No KALSHI_PRIVATE_KEY_B64, KALSHI_PRIVATE_KEY, or PATH set — trading disabled")
+            print("  WARNING: No KALSHI_PRIVATE_KEY or KALSHI_PRIVATE_KEY_PATH set — trading disabled")
             return
         key_path = Path(KALSHI_PRIVATE_KEY_PATH).expanduser()
         if not key_path.exists():
@@ -382,7 +364,7 @@ class KalshiClient:
         side: 'yes' or 'no'
         action: 'buy' or 'sell'
         count: number of contracts
-        price_cents: limit price in cents (1-99) for the given side
+        price_cents: limit price in cents (1-99)
         Returns order dict or None.
         """
         path = '/trade-api/v2/portfolio/orders'
@@ -396,13 +378,9 @@ class KalshiClient:
             'action': action,
             'type': 'limit',
             'count': count,
+            'yes_price': price_cents if side == 'yes' else (100 - price_cents),
             'client_order_id': str(uuid.uuid4()),
         }
-        # Use the appropriate price field for the side
-        if side == 'yes':
-            body['yes_price'] = price_cents
-        else:
-            body['no_price'] = price_cents
         try:
             resp = self.session.post(
                 f'{KALSHI_BASE}/portfolio/orders',
@@ -627,40 +605,39 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
     """
     Calculate bet size from orderbook depth.
     We're buying NO side (since SELL-only = fading YES buyers).
+    Look at top 3 NO ask levels and take DEPTH_FRACTION of total depth.
     Returns (contracts, price_cents) or (0, 0) if too thin.
 
     Kalshi orderbook format: {'yes': [[price, qty], ...], 'no': [[price, qty], ...]}
-    Both 'yes' and 'no' are BIDS (buy orders), NOT asks.
-
-    To BUY NO, we need NO sellers. A YES bid at price P is equivalent to
-    a NO ask at (100 - P). So we derive NO asks from YES bids.
+    The lists are sell-side resting orders (asks) at each price level.
     """
-    # YES bids = people wanting to buy YES = they'll sell NO at (100 - price)
-    yes_bids = orderbook.get('yes', [])
-    if isinstance(yes_bids, dict):
-        yes_bids = yes_bids.get('bids', yes_bids.get('asks', []))
-
-    if not yes_bids or not isinstance(yes_bids, list):
-        return 0, 0
-
-    # Convert YES bids to implied NO asks: NO ask price = 100 - YES bid price
-    # Higher YES bids = lower (better) NO ask prices, so sort ascending by NO price
-    no_asks = sorted(
-        [[100 - b[0], b[1]] for b in yes_bids if isinstance(b, (list, tuple)) and len(b) >= 2],
-        key=lambda x: x[0]
-    )
+    # NO side: resting NO sell orders = we can buy NO from them
+    no_asks = orderbook.get('no', [])
+    if isinstance(no_asks, dict):
+        no_asks = no_asks.get('asks', [])
 
     if not no_asks:
+        # Fallback: YES side bids (buying NO = taking YES bid side)
+        yes_bids = orderbook.get('yes', [])
+        if isinstance(yes_bids, dict):
+            yes_bids = yes_bids.get('bids', [])
+        if not yes_bids:
+            return 0, 0
+        # Convert: yes price P = no price (100-P)
+        no_asks = [[100 - b[0], b[1]] for b in yes_bids]
+
+    # Sort asks by price ascending (best = cheapest)
+    asks_sorted = sorted(no_asks, key=lambda x: x[0])
+
+    # Take top 3 levels
+    top_levels = asks_sorted[:3]
+    if not top_levels:
         return 0, 0
 
-    # Take top 3 cheapest NO ask levels
-    top_levels = no_asks[:3]
+    total_contracts = sum(level[1] for level in top_levels)
     best_ask_cents = top_levels[0][0]
 
-    if best_ask_cents <= 0 or best_ask_cents >= 100:
-        return 0, 0
-
-    # Depth in dollars across top 3 levels
+    # Each contract costs best_ask_cents cents, so depth in dollars:
     depth_dollars = sum(level[0] * level[1] / 100 for level in top_levels)
 
     # Our bet = DEPTH_FRACTION of depth, capped
@@ -815,24 +792,15 @@ class OrderExecutor:
         bet_dollars = round(contracts * best_ask_cents / 100, 2)
         no_price_cents = 100 - entry_cents  # NO price = 100 - YES price
 
-        # Sanity check: NO ask should be in reasonable range
-        if best_ask_cents < 2 or best_ask_cents > 98:
-            print(f"    NO ask {best_ask_cents}c out of range, likely orderbook error, skipping")
-            return None
-
         # Slippage check: best available NO ask vs signal-implied NO price
-        # Positive = worse (paying more), negative = better (paying less)
+        # If best ask is >1% worse than signal price, the move already reverted or book moved
         slippage_pct = (best_ask_cents - no_price_cents) / no_price_cents * 100 if no_price_cents > 0 else 0
         if slippage_pct > MAX_SLIPPAGE_PCT:
             print(f"    SLIPPAGE: best NO ask {best_ask_cents}c vs signal {no_price_cents}c "
                   f"({slippage_pct:+.1f}% > {MAX_SLIPPAGE_PCT}%), skipping")
             return None
 
-        slip_cost_cents = best_ask_cents - no_price_cents
-        slip_cost_dollars = round(slip_cost_cents * contracts / 100, 2)
-        print(f"    Sizing: {contracts} NO @ {best_ask_cents}c (signal {no_price_cents}c, "
-              f"slip {slippage_pct:+.1f}% = {slip_cost_cents:+d}c/contract, ${slip_cost_dollars:.2f} total) "
-              f"= ${bet_dollars:.2f}")
+        print(f"    Sizing: {contracts} NO @ {best_ask_cents}c (signal {no_price_cents}c, slip {slippage_pct:+.1f}%) = ${bet_dollars:.2f}")
 
         if DRY_RUN:
             order_info = {
@@ -859,7 +827,46 @@ class OrderExecutor:
         # Max price we'll pay: signal NO price + 1% slippage
         max_no_price = int(no_price_cents * (1 + MAX_SLIPPAGE_PCT / 100))
 
-        # Live order with retries
+        # Live order with retries -- track all placed order IDs so we can
+        # clean up any that are still resting if the loop exits without a fill.
+        placed_order_ids = []
+
+        def _handle_fill(order_id, status, price):
+            """Process a filled/partially-filled order and return order_info."""
+            filled = status.get('quantity_filled', 0)
+            remaining = status.get('remaining_count', contracts)
+            avg_fill = status.get('average_fill_price', price)
+            fill_slip = (avg_fill - no_price_cents) / no_price_cents * 100 if no_price_cents > 0 else 0
+            actual_dollars = round(filled * avg_fill / 100, 2)
+            info = {
+                'order_id': order_id,
+                'fill_price': avg_fill / 100,
+                'fill_count': filled,
+                'bet_dollars': actual_dollars,
+                'slippage_pct': round(fill_slip, 2),
+                'dry_run': False,
+            }
+            self.logger.record({
+                'type': 'entry',
+                'ticker': ticker,
+                'order_id': order_id,
+                'side': 'no',
+                'action': 'buy',
+                'contracts_requested': contracts,
+                'contracts_filled': filled,
+                'price_cents': price,
+                'avg_fill_price': avg_fill,
+                'signal_no_price': no_price_cents,
+                'slippage_pct': round(fill_slip, 2),
+                'bet_dollars': actual_dollars,
+                'dry_run': False,
+            })
+            if remaining > 0:
+                self.client.cancel_order(order_id)
+            print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c "
+                  f"(slip {fill_slip:+.1f}%, ${actual_dollars:.2f})")
+            return info
+
         for attempt in range(MAX_ORDER_RETRIES + 1):
             price = best_ask_cents + attempt  # Start at best ask, bump 1c each retry
             if price > max_no_price:
@@ -880,6 +887,7 @@ class OrderExecutor:
                 continue
 
             order_id = order.get('order_id', '')
+            placed_order_ids.append(order_id)
             print(f"    Order placed: {order_id} ({contracts} NO @ {price}c)")
 
             # Wait for fill
@@ -889,50 +897,35 @@ class OrderExecutor:
             status = self.client.get_order(order_id)
             if status:
                 filled = status.get('quantity_filled', 0)
-                remaining = status.get('remaining_count', contracts)
-                order_status = status.get('status', '')
 
                 if filled > 0:
-                    avg_fill = status.get('average_fill_price', price)
-                    fill_slip = (avg_fill - no_price_cents) / no_price_cents * 100 if no_price_cents > 0 else 0
-                    actual_dollars = round(filled * avg_fill / 100, 2)
-                    order_info = {
-                        'order_id': order_id,
-                        'fill_price': avg_fill / 100,
-                        'fill_count': filled,
-                        'bet_dollars': actual_dollars,
-                        'slippage_pct': round(fill_slip, 2),
-                        'dry_run': False,
-                    }
-                    self.logger.record({
-                        'type': 'entry',
-                        'ticker': ticker,
-                        'order_id': order_id,
-                        'side': 'no',
-                        'action': 'buy',
-                        'contracts_requested': contracts,
-                        'contracts_filled': filled,
-                        'price_cents': price,
-                        'avg_fill_price': avg_fill,
-                        'signal_no_price': no_price_cents,
-                        'slippage_pct': round(fill_slip, 2),
-                        'bet_dollars': actual_dollars,
-                        'dry_run': False,
-                    })
-                    # Cancel remainder if partial fill
-                    if remaining > 0:
-                        self.client.cancel_order(order_id)
-                    fill_slip_cost = round((avg_fill - no_price_cents) * filled / 100, 2)
-                    print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c "
-                          f"(signal {no_price_cents}c, slip {fill_slip:+.1f}% = ${fill_slip_cost:.2f} extra, "
-                          f"total ${actual_dollars:.2f})")
-                    return order_info
+                    # Cancel any earlier resting orders before returning
+                    for prev_id in placed_order_ids:
+                        if prev_id != order_id:
+                            self.client.cancel_order(prev_id)
+                    return _handle_fill(order_id, status, price)
                 else:
-                    # Not filled, cancel and retry at higher price
-                    self.client.cancel_order(order_id)
+                    # Not filled -- cancel and verify it's actually canceled
+                    canceled = self.client.cancel_order(order_id)
+                    if not canceled:
+                        print(f"    Cancel may have failed for {order_id}, re-checking...")
+                    # Re-check: order may have filled between our check and cancel
+                    time.sleep(0.5)
+                    recheck = self.client.get_order(order_id)
+                    if recheck and recheck.get('quantity_filled', 0) > 0:
+                        print(f"    Late fill detected on {order_id}")
+                        for prev_id in placed_order_ids:
+                            if prev_id != order_id:
+                                self.client.cancel_order(prev_id)
+                        return _handle_fill(order_id, recheck, price)
                     print(f"    Not filled at {price}c, retrying...")
 
-        print(f"    Failed to fill after {MAX_ORDER_RETRIES + 1} attempts")
+        # Loop exited without a fill -- cancel ALL resting orders to prevent
+        # late fills that would exceed the $50 max bet.
+        for oid in placed_order_ids:
+            self.client.cancel_order(oid)
+            time.sleep(0.2)
+        print(f"    Failed to fill after {MAX_ORDER_RETRIES + 1} attempts (all orders canceled)")
         return None
 
     def execute_exit(self, pos):
@@ -965,21 +958,19 @@ class OrderExecutor:
             print(f"    DRY RUN: would sell {contracts} NO (P&L: ${pnl:.2f})")
             return {'exit_price': current, 'pnl': round(pnl, 2)}
 
-        # Live exit: sell NO contracts aggressively (1c below best NO bid)
-        # To sell NO, we look at NO bids (people wanting to buy NO from us)
+        # Live exit: sell NO contracts aggressively (1c below best bid)
+        # To sell NO, we look at YES asks (someone buying YES = we sell NO to them)
         orderbook = self.client.get_orderbook(ticker)
-        no_bids = orderbook.get('no', []) if orderbook else []
-        if isinstance(no_bids, dict):
-            no_bids = no_bids.get('bids', no_bids.get('asks', []))
+        yes_asks = orderbook.get('yes', []) if orderbook else []
+        if isinstance(yes_asks, dict):
+            yes_asks = yes_asks.get('asks', [])
 
-        sell_price = None
-        if no_bids and isinstance(no_bids, list):
-            valid_bids = [b[0] for b in no_bids if isinstance(b, (list, tuple)) and len(b) >= 2]
-            if valid_bids:
-                best_no_bid = max(valid_bids)
-                sell_price = max(1, best_no_bid - 1)  # 1c below for fast fill
-
-        if sell_price is None:
+        if yes_asks:
+            # YES ask at P means someone wants to buy YES at P
+            # We sell NO at (100-P), so find lowest YES ask = best match
+            best_yes_ask = min(a[0] for a in yes_asks)
+            sell_price = max(1, (100 - best_yes_ask) - 1)  # 1c below for fast fill
+        else:
             # Fallback: use current market price
             current = self.client.get_current_price(ticker)
             if current:
@@ -1142,7 +1133,6 @@ class KalshiNotifier:
             f"Hold: 24h, -30% stop-loss\n"
             f"Max bet: ${MAX_BET_DOLLARS}/signal\n"
             f"Max positions: {MAX_OPEN_POSITIONS}\n"
-            f"Daily loss limit: ${MAX_DAILY_LOSS}\n"
             f"{bal_line}"
             f"Backtest (60d): 58% WR, +27% avg ROI\n\n"
             f"Open positions: {n_open}\n"
@@ -1185,7 +1175,6 @@ class KalshiReversionScanner:
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
         print(f"Strategy: Fade retail surges, 24h hold, -30% SL")
         print(f"Max bet: ${MAX_BET_DOLLARS}/signal, Max positions: {MAX_OPEN_POSITIONS}")
-        print(f"Daily loss limit: ${MAX_DAILY_LOSS}")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -1219,13 +1208,7 @@ class KalshiReversionScanner:
         now_str = datetime.fromtimestamp(now, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         print(f"\n[{now_str}] Scan cycle")
 
-        # Safety: check daily loss circuit breaker
-        daily_pnl = self.trade_logger.daily_pnl()
-        if daily_pnl < -MAX_DAILY_LOSS:
-            print(f"  CIRCUIT BREAKER: Daily loss ${daily_pnl:.2f} exceeds -${MAX_DAILY_LOSS}. No new orders.")
-            trading_allowed = False
-        else:
-            trading_allowed = True
+        trading_allowed = True
 
         # Safety: check max positions
         if self.positions.count() >= MAX_OPEN_POSITIONS:
