@@ -825,7 +825,11 @@ class OrderExecutor:
                   f"({slippage_pct:+.1f}% > {MAX_SLIPPAGE_PCT}%), skipping")
             return None
 
-        print(f"    Sizing: {contracts} NO @ {best_ask_cents}c (signal {no_price_cents}c, slip {slippage_pct:+.1f}%) = ${bet_dollars:.2f}")
+        slip_cost_cents = best_ask_cents - no_price_cents
+        slip_cost_dollars = round(slip_cost_cents * contracts / 100, 2)
+        print(f"    Sizing: {contracts} NO @ {best_ask_cents}c (signal {no_price_cents}c, "
+              f"slip {slippage_pct:+.1f}% = {slip_cost_cents:+d}c/contract, ${slip_cost_dollars:.2f} total) "
+              f"= ${bet_dollars:.2f}")
 
         if DRY_RUN:
             order_info = {
@@ -915,8 +919,10 @@ class OrderExecutor:
                     # Cancel remainder if partial fill
                     if remaining > 0:
                         self.client.cancel_order(order_id)
+                    fill_slip_cost = round((avg_fill - no_price_cents) * filled / 100, 2)
                     print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c "
-                          f"(slip {fill_slip:+.1f}%, ${actual_dollars:.2f})")
+                          f"(signal {no_price_cents}c, slip {fill_slip:+.1f}% = ${fill_slip_cost:.2f} extra, "
+                          f"total ${actual_dollars:.2f})")
                     return order_info
                 else:
                     # Not filled, cancel and retry at higher price
