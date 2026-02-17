@@ -618,28 +618,23 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
     """
     Calculate bet size from orderbook depth.
     We're buying NO side (since SELL-only = fading YES buyers).
-    Look at top 3 NO ask levels and take DEPTH_FRACTION of total depth.
+
+    Kalshi orderbook only returns BIDS (not asks).
+    To buy NO, we look at YES bids: a YES bid at price P = NO ask at (100-P).
     Returns (contracts, price_cents) or (0, 0) if too thin.
-
-    Kalshi orderbook format: {'yes': [[price, qty], ...], 'no': [[price, qty], ...]}
-    The lists are sell-side resting orders (asks) at each price level.
     """
-    # NO side: resting NO sell orders = we can buy NO from them
-    no_asks = orderbook.get('no', [])
-    if isinstance(no_asks, dict):
-        no_asks = no_asks.get('asks', [])
+    # YES bids represent the prices where someone will sell NO to us.
+    # A YES bid at P cents means we can buy NO at (100-P) cents.
+    yes_bids = orderbook.get('yes', [])
+    if isinstance(yes_bids, dict):
+        yes_bids = yes_bids.get('bids', [])
+    if not yes_bids:
+        return 0, 0
 
-    if not no_asks:
-        # Fallback: YES side bids (buying NO = taking YES bid side)
-        yes_bids = orderbook.get('yes', [])
-        if isinstance(yes_bids, dict):
-            yes_bids = yes_bids.get('bids', [])
-        if not yes_bids:
-            return 0, 0
-        # Convert: yes price P = no price (100-P)
-        no_asks = [[100 - b[0], b[1]] for b in yes_bids]
+    # Convert YES bids to NO ask prices: [no_price, quantity]
+    no_asks = [[100 - b[0], b[1]] for b in yes_bids]
 
-    # Sort asks by price ascending (best = cheapest)
+    # Sort asks by price ascending (best/cheapest first)
     asks_sorted = sorted(no_asks, key=lambda x: x[0])
 
     # Take top 3 levels
