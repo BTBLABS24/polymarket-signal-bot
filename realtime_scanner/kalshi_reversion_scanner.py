@@ -46,6 +46,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 KALSHI_API_KEY_ID = os.environ.get('KALSHI_API_KEY_ID', '')
 KALSHI_PRIVATE_KEY_PATH = os.environ.get('KALSHI_PRIVATE_KEY_PATH', '')
 KALSHI_PRIVATE_KEY = os.environ.get('KALSHI_PRIVATE_KEY', '')  # Raw PEM content (for Railway)
+KALSHI_PRIVATE_KEY_B64 = os.environ.get('KALSHI_PRIVATE_KEY_B64', '')  # Base64-encoded PEM (for Railway)
 
 KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
@@ -128,10 +129,19 @@ class KalshiClient:
 
     def _load_private_key(self):
         """Load RSA private key for API authentication.
-        Supports two modes:
+        Supports three modes:
           1. KALSHI_PRIVATE_KEY — raw PEM content (for Railway / cloud)
-          2. KALSHI_PRIVATE_KEY_PATH — path to PEM file (for local)
+          2. KALSHI_PRIVATE_KEY_B64 — base64-encoded PEM (for Railway / cloud)
+          3. KALSHI_PRIVATE_KEY_PATH — path to PEM file (for local)
         """
+        # Debug: show which env vars are set (not the values)
+        print(f"  Key env vars: KALSHI_PRIVATE_KEY={'SET' if KALSHI_PRIVATE_KEY else 'EMPTY'} "
+              f"({len(KALSHI_PRIVATE_KEY)} chars), "
+              f"B64={'SET' if KALSHI_PRIVATE_KEY_B64 else 'EMPTY'} "
+              f"({len(KALSHI_PRIVATE_KEY_B64)} chars), "
+              f"PATH={'SET' if KALSHI_PRIVATE_KEY_PATH else 'EMPTY'}, "
+              f"API_KEY_ID={'SET' if KALSHI_API_KEY_ID else 'EMPTY'}")
+
         # Mode 1: raw PEM content from env var (Railway)
         if KALSHI_PRIVATE_KEY:
             try:
@@ -140,12 +150,22 @@ class KalshiClient:
                 print("  RSA key loaded from KALSHI_PRIVATE_KEY env var")
                 return
             except Exception as e:
-                print(f"  WARNING: Failed to load private key from env var: {e}")
-                return
+                print(f"  WARNING: Failed to load private key from KALSHI_PRIVATE_KEY: {e}")
 
-        # Mode 2: file path (local)
+        # Mode 2: base64-encoded PEM from env var (Railway)
+        if KALSHI_PRIVATE_KEY_B64:
+            try:
+                import base64
+                pem_data = base64.b64decode(KALSHI_PRIVATE_KEY_B64)
+                self.private_key = serialization.load_pem_private_key(pem_data, password=None)
+                print("  RSA key loaded from KALSHI_PRIVATE_KEY_B64 env var")
+                return
+            except Exception as e:
+                print(f"  WARNING: Failed to load private key from KALSHI_PRIVATE_KEY_B64: {e}")
+
+        # Mode 3: file path (local)
         if not KALSHI_PRIVATE_KEY_PATH:
-            print("  WARNING: No KALSHI_PRIVATE_KEY or KALSHI_PRIVATE_KEY_PATH set — trading disabled")
+            print("  WARNING: No KALSHI_PRIVATE_KEY, KALSHI_PRIVATE_KEY_B64, or KALSHI_PRIVATE_KEY_PATH set — trading disabled")
             return
         key_path = Path(KALSHI_PRIVATE_KEY_PATH).expanduser()
         if not key_path.exists():
