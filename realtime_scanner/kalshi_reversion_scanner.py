@@ -131,6 +131,11 @@ class KalshiClient:
           1. KALSHI_PRIVATE_KEY — raw PEM content (for Railway / cloud)
           2. KALSHI_PRIVATE_KEY_PATH — path to PEM file (for local)
         """
+        # Debug: show what env vars we got
+        print(f"  Auth env: KEY_ID={len(KALSHI_API_KEY_ID)} chars, "
+              f"PRIVATE_KEY={len(KALSHI_PRIVATE_KEY)} chars, "
+              f"PATH={len(KALSHI_PRIVATE_KEY_PATH)} chars")
+
         # Mode 1: raw PEM content from env var (Railway)
         if KALSHI_PRIVATE_KEY:
             try:
