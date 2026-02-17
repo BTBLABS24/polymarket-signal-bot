@@ -687,6 +687,7 @@ class KalshiPositionTracker:
     def add(self, signal, order_info=None):
         pos = {
             'ticker': signal['ticker'],
+            'event_ticker': signal.get('event_ticker', ''),
             'title': signal['title'],
             'fade_action': signal['fade_action'],
             'fade_side': signal['fade_side'],
@@ -709,6 +710,16 @@ class KalshiPositionTracker:
             pos['is_live'] = False
         self.positions.append(pos)
         self._save()
+
+    def event_exposure(self, event_ticker):
+        """Total dollars deployed on open positions for a given event."""
+        if not event_ticker:
+            return 0
+        return sum(
+            pos.get('bet_dollars', 0)
+            for pos in self.positions
+            if pos.get('status') == 'open' and pos.get('event_ticker') == event_ticker
+        )
 
     def check(self, client):
         """Check for 24h expiry. Returns alerts list."""
@@ -1203,7 +1214,11 @@ class KalshiReversionScanner:
                       f"(move {sig['price_move']:+.3f}, {sig['n_small_trades']} trades)")
 
                 order_info = None
-                if trading_allowed and self.client.can_trade:
+                event = sig.get('event_ticker', '')
+                exposure = self.positions.event_exposure(event)
+                if exposure >= MAX_BET_DOLLARS and event:
+                    print(f"    EVENT CAP: already ${exposure:.2f} on {event} (max ${MAX_BET_DOLLARS}), skipping")
+                elif trading_allowed and self.client.can_trade:
                     order_info = self.executor.execute_entry(sig)
 
                 await self.notifier.send_signal(sig, order_info)
