@@ -68,7 +68,8 @@ TRADES_PER_PAGE = 1000
 WINDOW_MINUTES = 60          # 1-hour signal windows
 
 # Trading config
-DRY_RUN = True               # True = log orders but don't execute
+_dry_run_val = os.environ.get('DRY_RUN', 'true').lower().strip()
+DRY_RUN = _dry_run_val not in ('false', 'flase', 'fals', '0', 'no', 'off')  # Set DRY_RUN=false to go live
 MAX_BET_DOLLARS = 50          # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
@@ -137,6 +138,7 @@ class KalshiClient:
               f"PRIVATE_KEY={len(KALSHI_PRIVATE_KEY)} chars, "
               f"B64={len(KALSHI_PRIVATE_KEY_B64)} chars, "
               f"PATH={len(KALSHI_PRIVATE_KEY_PATH)} chars")
+        print(f"  DRY_RUN env='{os.environ.get('DRY_RUN', '(not set)')}' -> DRY_RUN={DRY_RUN}")
 
         # Mode 1a: base64-encoded PEM (best for Railway — no multiline issues)
         if KALSHI_PRIVATE_KEY_B64:
@@ -378,7 +380,7 @@ class KalshiClient:
         side: 'yes' or 'no'
         action: 'buy' or 'sell'
         count: number of contracts
-        price_cents: limit price in cents (1-99)
+        price_cents: limit price in cents (1-99) for the given side
         Returns order dict or None.
         """
         path = '/trade-api/v2/portfolio/orders'
@@ -392,9 +394,13 @@ class KalshiClient:
             'action': action,
             'type': 'limit',
             'count': count,
-            'yes_price': price_cents if side == 'yes' else (100 - price_cents),
             'client_order_id': str(uuid.uuid4()),
         }
+        # Use the appropriate price field for the side
+        if side == 'yes':
+            body['yes_price'] = price_cents
+        else:
+            body['no_price'] = price_cents
         try:
             resp = self.session.post(
                 f'{KALSHI_BASE}/portfolio/orders',
@@ -619,39 +625,40 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
     """
     Calculate bet size from orderbook depth.
     We're buying NO side (since SELL-only = fading YES buyers).
-    Look at top 3 NO ask levels and take DEPTH_FRACTION of total depth.
     Returns (contracts, price_cents) or (0, 0) if too thin.
 
     Kalshi orderbook format: {'yes': [[price, qty], ...], 'no': [[price, qty], ...]}
-    The lists are sell-side resting orders (asks) at each price level.
+    Both 'yes' and 'no' are BIDS (buy orders), NOT asks.
+
+    To BUY NO, we need NO sellers. A YES bid at price P is equivalent to
+    a NO ask at (100 - P). So we derive NO asks from YES bids.
     """
-    # NO side: resting NO sell orders = we can buy NO from them
-    no_asks = orderbook.get('no', [])
-    if isinstance(no_asks, dict):
-        no_asks = no_asks.get('asks', [])
+    # YES bids = people wanting to buy YES = they'll sell NO at (100 - price)
+    yes_bids = orderbook.get('yes', [])
+    if isinstance(yes_bids, dict):
+        yes_bids = yes_bids.get('bids', yes_bids.get('asks', []))
 
-    if not no_asks:
-        # Fallback: YES side bids (buying NO = taking YES bid side)
-        yes_bids = orderbook.get('yes', [])
-        if isinstance(yes_bids, dict):
-            yes_bids = yes_bids.get('bids', [])
-        if not yes_bids:
-            return 0, 0
-        # Convert: yes price P = no price (100-P)
-        no_asks = [[100 - b[0], b[1]] for b in yes_bids]
-
-    # Sort asks by price ascending (best = cheapest)
-    asks_sorted = sorted(no_asks, key=lambda x: x[0])
-
-    # Take top 3 levels
-    top_levels = asks_sorted[:3]
-    if not top_levels:
+    if not yes_bids or not isinstance(yes_bids, list):
         return 0, 0
 
-    total_contracts = sum(level[1] for level in top_levels)
+    # Convert YES bids to implied NO asks: NO ask price = 100 - YES bid price
+    # Higher YES bids = lower (better) NO ask prices, so sort ascending by NO price
+    no_asks = sorted(
+        [[100 - b[0], b[1]] for b in yes_bids if isinstance(b, (list, tuple)) and len(b) >= 2],
+        key=lambda x: x[0]
+    )
+
+    if not no_asks:
+        return 0, 0
+
+    # Take top 3 cheapest NO ask levels
+    top_levels = no_asks[:3]
     best_ask_cents = top_levels[0][0]
 
-    # Each contract costs best_ask_cents cents, so depth in dollars:
+    if best_ask_cents <= 0 or best_ask_cents >= 100:
+        return 0, 0
+
+    # Depth in dollars across top 3 levels
     depth_dollars = sum(level[0] * level[1] / 100 for level in top_levels)
 
     # Our bet = DEPTH_FRACTION of depth, capped
@@ -806,8 +813,13 @@ class OrderExecutor:
         bet_dollars = round(contracts * best_ask_cents / 100, 2)
         no_price_cents = 100 - entry_cents  # NO price = 100 - YES price
 
+        # Sanity check: NO ask should be in reasonable range
+        if best_ask_cents < 2 or best_ask_cents > 98:
+            print(f"    NO ask {best_ask_cents}c out of range, likely orderbook error, skipping")
+            return None
+
         # Slippage check: best available NO ask vs signal-implied NO price
-        # If best ask is >1% worse than signal price, the move already reverted or book moved
+        # Positive = worse (paying more), negative = better (paying less)
         slippage_pct = (best_ask_cents - no_price_cents) / no_price_cents * 100 if no_price_cents > 0 else 0
         if slippage_pct > MAX_SLIPPAGE_PCT:
             print(f"    SLIPPAGE: best NO ask {best_ask_cents}c vs signal {no_price_cents}c "
@@ -945,19 +957,21 @@ class OrderExecutor:
             print(f"    DRY RUN: would sell {contracts} NO (P&L: ${pnl:.2f})")
             return {'exit_price': current, 'pnl': round(pnl, 2)}
 
-        # Live exit: sell NO contracts aggressively (1c below best bid)
-        # To sell NO, we look at YES asks (someone buying YES = we sell NO to them)
+        # Live exit: sell NO contracts aggressively (1c below best NO bid)
+        # To sell NO, we look at NO bids (people wanting to buy NO from us)
         orderbook = self.client.get_orderbook(ticker)
-        yes_asks = orderbook.get('yes', []) if orderbook else []
-        if isinstance(yes_asks, dict):
-            yes_asks = yes_asks.get('asks', [])
+        no_bids = orderbook.get('no', []) if orderbook else []
+        if isinstance(no_bids, dict):
+            no_bids = no_bids.get('bids', no_bids.get('asks', []))
 
-        if yes_asks:
-            # YES ask at P means someone wants to buy YES at P
-            # We sell NO at (100-P), so find lowest YES ask = best match
-            best_yes_ask = min(a[0] for a in yes_asks)
-            sell_price = max(1, (100 - best_yes_ask) - 1)  # 1c below for fast fill
-        else:
+        sell_price = None
+        if no_bids and isinstance(no_bids, list):
+            valid_bids = [b[0] for b in no_bids if isinstance(b, (list, tuple)) and len(b) >= 2]
+            if valid_bids:
+                best_no_bid = max(valid_bids)
+                sell_price = max(1, best_no_bid - 1)  # 1c below for fast fill
+
+        if sell_price is None:
             # Fallback: use current market price
             current = self.client.get_current_price(ticker)
             if current:
