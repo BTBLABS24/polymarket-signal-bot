@@ -1,13 +1,10 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy signal bot
-COPY simple_signal_bot.py .
+COPY realtime_scanner/kalshi_reversion_scanner.py .
 
-# Run the bot
-CMD ["python", "-u", "simple_signal_bot.py"]
+CMD ["python", "-u", "kalshi_reversion_scanner.py"]
