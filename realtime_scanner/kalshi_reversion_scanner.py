@@ -656,6 +656,20 @@ class ImpliedProbDetector:
             if not (IMPL_MIN_OUTCOMES <= len(mkts) <= IMPL_MAX_OUTCOMES):
                 continue
 
+            # Filter excluded categories (sports/crypto/financials)
+            sample_ticker = mkts[0].get('ticker', '').upper()
+            excluded = False
+            for prefix in EXCLUDED_PREFIXES:
+                if sample_ticker.startswith(prefix.upper()):
+                    excluded = True
+                    break
+            if not excluded:
+                cat = mkts[0].get('category', '')
+                if cat in EXCLUDED_CATEGORIES:
+                    excluded = True
+            if excluded:
+                continue
+
             # Check cooldown
             last_cd = self.signal_history.get(event_ticker, 0)
             if now_ts - last_cd < IMPL_COOLDOWN_HOURS * 3600:
@@ -783,7 +797,7 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
 
     Kalshi orderbook only returns BIDS (not asks).
     To buy NO, we look at YES bids: a YES bid at price P = NO ask at (100-P).
-    Returns (contracts, price_cents) or (0, 0) if too thin.
+    Returns (contracts, price_cents, uncapped_dollars) or (0, 0, 0) if too thin.
     """
     # YES bids represent the prices where someone will sell NO to us.
     # A YES bid at P cents means we can buy NO at (100-P) cents.
@@ -791,7 +805,7 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
     if isinstance(yes_bids, dict):
         yes_bids = yes_bids.get('bids', [])
     if not yes_bids:
-        return 0, 0
+        return 0, 0, 0
 
     # Convert YES bids to NO ask prices: [no_price, quantity]
     no_asks = [[100 - b[0], b[1]] for b in yes_bids]
@@ -802,7 +816,7 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
     # Take top 3 levels
     top_levels = asks_sorted[:3]
     if not top_levels:
-        return 0, 0
+        return 0, 0, 0
 
     total_contracts = sum(level[1] for level in top_levels)
     best_ask_cents = top_levels[0][0]
