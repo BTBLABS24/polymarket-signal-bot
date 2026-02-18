@@ -128,6 +128,13 @@ MENTION_KEYWORDS = [
     'speech say', 'address say', 'interview say', 'debate say',
 ]
 
+# Combo/parlay event prefixes — multi-leg bets with terrible liquidity
+# Deviation is just vig structure, not real mispricing
+IMPL_EXCLUDED_PREFIXES = [
+    'KXMVESPORTS', 'KXMULTIGAME', 'KXPARLAY', 'KXCOMBO',
+    'KXMVESPORTSMULTIGAME',
+]
+
 # State files
 STATE_DIR = Path(__file__).parent
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
@@ -670,6 +677,18 @@ class ImpliedProbDetector:
             sample_title = mkts[0].get('title', '').lower()
             is_mention = any(kw in sample_title for kw in MENTION_KEYWORDS)
             if is_mention:
+                continue
+
+            # Skip combo/parlay markets (vig structure, not real mispricing)
+            event_upper = event_ticker.upper()
+            is_combo = any(event_upper.startswith(p.upper()) for p in IMPL_EXCLUDED_PREFIXES)
+            if is_combo:
+                continue
+
+            # Skip 2-outcome "winner" markets (Team A vs Team B)
+            # These are binary bets, not multi-outcome events
+            sample_ticker = mkts[0].get('ticker', '').upper()
+            if len(mkts) == 2 and ('WINNER' in sample_title.upper() or 'VS' in sample_title.upper()):
                 continue
 
             # Check cooldown
