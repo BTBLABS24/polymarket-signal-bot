@@ -673,6 +673,22 @@ class ImpliedProbDetector:
             if not (IMPL_MIN_OUTCOMES <= len(mkts) <= IMPL_MAX_OUTCOMES):
                 continue
 
+            # Skip sports/crypto/financials — Kalshi groups independent props
+            # (spread, total, 1H spread) under one event_ticker, but they're
+            # NOT mutually exclusive, so implied prob math doesn't apply
+            sample_ticker = mkts[0].get('ticker', '').upper()
+            excluded = False
+            for prefix in EXCLUDED_PREFIXES:
+                if sample_ticker.startswith(prefix.upper()):
+                    excluded = True
+                    break
+            if not excluded:
+                cat = mkts[0].get('category', '')
+                if cat in EXCLUDED_CATEGORIES:
+                    excluded = True
+            if excluded:
+                continue
+
             # Skip mention/independent-outcome markets (not mutually exclusive)
             sample_title = mkts[0].get('title', '').lower()
             is_mention = any(kw in sample_title for kw in MENTION_KEYWORDS)
@@ -683,12 +699,6 @@ class ImpliedProbDetector:
             event_upper = event_ticker.upper()
             is_combo = any(event_upper.startswith(p.upper()) for p in IMPL_EXCLUDED_PREFIXES)
             if is_combo:
-                continue
-
-            # Skip 2-outcome "winner" markets (Team A vs Team B)
-            # These are binary bets, not multi-outcome events
-            sample_ticker = mkts[0].get('ticker', '').upper()
-            if len(mkts) == 2 and ('WINNER' in sample_title.upper() or 'VS' in sample_title.upper()):
                 continue
 
             # Check cooldown
