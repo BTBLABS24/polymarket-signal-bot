@@ -110,6 +110,7 @@ SELL_ONLY = True
 
 # --- Implied Probability Violation params ---
 IMPL_DEVIATION_THRESHOLD = 0.05   # 5c min |prob_sum - 1.0| to trigger
+IMPL_MAX_DEVIATION = 0.30         # 30c max — beyond this it's independent outcomes, not mispricing
 IMPL_HOLD_HOURS = 12              # 12h hold (violations correct faster)
 IMPL_MIN_OUTCOMES = 2
 IMPL_MAX_OUTCOMES = 20
@@ -117,6 +118,14 @@ IMPL_MIN_PRICE = 0.03
 IMPL_MAX_PRICE = 0.97
 IMPL_COOLDOWN_HOURS = 6           # Per-event cooldown
 IMPL_MAX_BET_DOLLARS = 1          # $1 for testing
+
+# Mention/independent-outcome markets — outcomes are NOT mutually exclusive
+# (multiple can resolve YES), so prob sum != 1.0 is expected, not mispricing
+MENTION_KEYWORDS = [
+    'what will', 'say during', 'mention', 'announcer', 'commentator',
+    'play by play', 'color commentary', 'broadcast', 'press conference say',
+    'speech say', 'address say', 'interview say', 'debate say',
+]
 
 # State files
 STATE_DIR = Path(__file__).parent
@@ -656,7 +665,13 @@ class ImpliedProbDetector:
             if not (IMPL_MIN_OUTCOMES <= len(mkts) <= IMPL_MAX_OUTCOMES):
                 continue
 
-            # Check cooldown (no category filter — impl prob works on all categories)
+            # Skip mention/independent-outcome markets (not mutually exclusive)
+            sample_title = mkts[0].get('title', '').lower()
+            is_mention = any(kw in sample_title for kw in MENTION_KEYWORDS)
+            if is_mention:
+                continue
+
+            # Check cooldown
             last_cd = self.signal_history.get(event_ticker, 0)
             if now_ts - last_cd < IMPL_COOLDOWN_HOURS * 3600:
                 continue
@@ -697,6 +712,10 @@ class ImpliedProbDetector:
             abs_dev = abs(deviation)
 
             if abs_dev < IMPL_DEVIATION_THRESHOLD:
+                continue
+
+            # Skip if deviation too large — likely independent outcomes, not mispricing
+            if abs_dev > IMPL_MAX_DEVIATION:
                 continue
 
             # Determine trade direction and target
