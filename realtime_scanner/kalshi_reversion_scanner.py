@@ -673,20 +673,19 @@ class ImpliedProbDetector:
             if not (IMPL_MIN_OUTCOMES <= len(mkts) <= IMPL_MAX_OUTCOMES):
                 continue
 
-            # Skip sports/crypto/financials — Kalshi groups independent props
-            # (spread, total, 1H spread) under one event_ticker, but they're
-            # NOT mutually exclusive, so implied prob math doesn't apply
-            sample_ticker = mkts[0].get('ticker', '').upper()
-            excluded = False
-            for prefix in EXCLUDED_PREFIXES:
-                if sample_ticker.startswith(prefix.upper()):
-                    excluded = True
-                    break
-            if not excluded:
-                cat = mkts[0].get('category', '')
-                if cat in EXCLUDED_CATEGORIES:
-                    excluded = True
-            if excluded:
+            # Skip events with independent props (spread, total, 1H, over/under)
+            # These are NOT mutually exclusive — Kalshi groups them under one event
+            # but "Kansas wins by 3.5" and "Over 145.5 total" are independent bets.
+            # Allow legit multi-outcome events like "Who wins ice skating?" (5 people)
+            prop_keywords = [
+                'over ', 'under ', 'by over', 'by under', 'spread',
+                'total', 'points', '1h ', '1st half', '2nd half',
+                'first half', 'second half', 'quarter', 'inning',
+                'half time', 'halftime',
+            ]
+            titles_lower = [m.get('title', '').lower() for m in mkts]
+            has_props = any(kw in t for t in titles_lower for kw in prop_keywords)
+            if has_props:
                 continue
 
             # Skip mention/independent-outcome markets (not mutually exclusive)
@@ -699,6 +698,17 @@ class ImpliedProbDetector:
             event_upper = event_ticker.upper()
             is_combo = any(event_upper.startswith(p.upper()) for p in IMPL_EXCLUDED_PREFIXES)
             if is_combo:
+                continue
+
+            # Skip crypto/financials (prices driven by external feeds, not mispricing)
+            sample_ticker = mkts[0].get('ticker', '').upper()
+            is_crypto_fin = False
+            for prefix in ['KXBTC', 'KXETH', 'KXSOL', 'KXCRYPTO', 'KXDOGE', 'KXXRP',
+                           'KXINX', 'KXNASDAQ', 'KXSP5', 'KXWTI', 'KXINXU']:
+                if sample_ticker.startswith(prefix):
+                    is_crypto_fin = True
+                    break
+            if is_crypto_fin:
                 continue
 
             # Check cooldown
