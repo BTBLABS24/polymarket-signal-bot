@@ -656,7 +656,7 @@ class ImpliedProbDetector:
             if not (IMPL_MIN_OUTCOMES <= len(mkts) <= IMPL_MAX_OUTCOMES):
                 continue
 
-            # Check cooldown
+            # Check cooldown (no category filter — impl prob works on all categories)
             last_cd = self.signal_history.get(event_ticker, 0)
             if now_ts - last_cd < IMPL_COOLDOWN_HOURS * 3600:
                 continue
