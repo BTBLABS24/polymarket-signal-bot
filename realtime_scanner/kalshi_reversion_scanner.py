@@ -68,7 +68,7 @@ WINDOW_MINUTES = 60          # 1-hour signal windows
 
 # Trading config
 DRY_RUN = False
-MAX_BET_DOLLARS = 10          # Max per signal
+MAX_BET_DOLLARS = 3           # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
 MAX_OPEN_POSITIONS = 20       # Cap concurrent reversion positions
