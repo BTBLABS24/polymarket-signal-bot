@@ -656,21 +656,7 @@ class ImpliedProbDetector:
             if not (IMPL_MIN_OUTCOMES <= len(mkts) <= IMPL_MAX_OUTCOMES):
                 continue
 
-            # Filter excluded categories (sports/crypto/financials)
-            sample_ticker = mkts[0].get('ticker', '').upper()
-            excluded = False
-            for prefix in EXCLUDED_PREFIXES:
-                if sample_ticker.startswith(prefix.upper()):
-                    excluded = True
-                    break
-            if not excluded:
-                cat = mkts[0].get('category', '')
-                if cat in EXCLUDED_CATEGORIES:
-                    excluded = True
-            if excluded:
-                continue
-
-            # Check cooldown
+            # Check cooldown (no category filter — impl prob works on all categories)
             last_cd = self.signal_history.get(event_ticker, 0)
             if now_ts - last_cd < IMPL_COOLDOWN_HOURS * 3600:
                 continue
