@@ -112,7 +112,7 @@ SELL_ONLY = True
 IMPL_DEVIATION_THRESHOLD = 0.05   # 5c min |prob_sum - 1.0| to trigger
 IMPL_MAX_DEVIATION = 0.30         # 30c max — beyond this it's independent outcomes, not mispricing
 IMPL_HOLD_HOURS = 12              # 12h hold (violations correct faster)
-IMPL_MIN_OUTCOMES = 2
+IMPL_MIN_OUTCOMES = 3             # 2-outcome = binary YES/NO, always complementary
 IMPL_MAX_OUTCOMES = 20
 IMPL_MIN_PRICE = 0.03
 IMPL_MAX_PRICE = 0.97
