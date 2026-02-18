@@ -56,8 +56,8 @@ MAX_SMALL_TRADES = 40       # Max (beyond this, it's real news)
 SMALL_TRADE_LIMIT = 100     # Contracts — "retail" is < 100 contracts
 MIN_SIDE_RATIO = 0.65       # 65%+ on one side
 MIN_PRICE_MOVE = 0.15       # 15c move
-ENTRY_PRICE_MIN = 0.21
-ENTRY_PRICE_MAX = 0.80
+ENTRY_PRICE_MIN = 0.30
+ENTRY_PRICE_MAX = 0.60
 HOLD_HOURS = 24
 COOLDOWN_HOURS = 4
 
