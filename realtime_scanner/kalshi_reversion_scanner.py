@@ -123,9 +123,12 @@ IMPL_MAX_BET_DOLLARS = 1          # $1 for testing
 # Mention/independent-outcome markets — outcomes are NOT mutually exclusive
 # (multiple can resolve YES), so prob sum != 1.0 is expected, not mispricing
 MENTION_KEYWORDS = [
-    'what will', 'say during', 'mention', 'announcer', 'commentator',
-    'play by play', 'color commentary', 'broadcast', 'press conference say',
-    'speech say', 'address say', 'interview say', 'debate say',
+    'what will', 'say during', 'say at', 'say in', 'say on',
+    'mention', 'announce', 'announcer', 'commentator',
+    'play by play', 'color commentary', 'broadcast',
+    'press conference', 'speech', 'address', 'interview',
+    'debate', 'ceremony', 'halftime show', 'opening remarks',
+    'state of the', 'remarks at', 'remarks during',
 ]
 
 # Combo/parlay event prefixes — multi-leg bets with terrible liquidity
@@ -1545,8 +1548,9 @@ class KalshiReversionScanner:
                 elif reversion_allowed and self.client.can_trade:
                     order_info = self.executor.execute_entry(sig)
 
-                await self.notifier.send_signal(sig, order_info)
-                self.positions.add(sig, order_info)
+                if order_info:
+                    await self.notifier.send_signal(sig, order_info)
+                    self.positions.add(sig, order_info)
 
         # 3. Implied probability violation scan
         print(f"  Scanning implied probability violations...")
@@ -1577,8 +1581,9 @@ class KalshiReversionScanner:
                     order_info = self.executor.execute_entry(sig)
                     globals()['MAX_BET_DOLLARS'] = saved_max
 
-                await self.notifier.send_impl_prob_signal(sig, order_info)
-                self.positions.add(sig, order_info)
+                if order_info:
+                    await self.notifier.send_impl_prob_signal(sig, order_info)
+                    self.positions.add(sig, order_info)
         except Exception as e:
             print(f"  Impl prob scan error: {e}")
             import traceback
