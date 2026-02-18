@@ -1083,11 +1083,18 @@ class OrderExecutor:
             if price >= 99:
                 break
 
+            # Re-derive contract count at this price so dollar cost stays <= MAX_BET_DOLLARS
+            max_dollars = IMPL_MAX_BET_DOLLARS if signal.get('signal_type') == 'implied_prob' else MAX_BET_DOLLARS
+            retry_contracts = min(contracts, int(max_dollars / (price / 100))) if price > 0 else contracts
+            if retry_contracts < 1:
+                print(f"    Price {price}c too high to buy even 1 contract within ${max_dollars}, stopping")
+                break
+
             order = self.client.create_order(
                 ticker=ticker,
                 side=order_side,
                 action='buy',
-                count=contracts,
+                count=retry_contracts,
                 price_cents=price,
             )
             if not order:
@@ -1096,7 +1103,7 @@ class OrderExecutor:
 
             order_id = order.get('order_id', '')
             placed_order_ids.append(order_id)
-            print(f"    Order placed: {order_id} ({contracts} NO @ {price}c)")
+            print(f"    Order placed: {order_id} ({retry_contracts} {side_label} @ {price}c, ${retry_contracts * price / 100:.2f})")
 
             # Wait for fill
             time.sleep(ORDER_WAIT_SECONDS)
