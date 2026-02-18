@@ -71,7 +71,8 @@ DRY_RUN = False
 MAX_BET_DOLLARS = 10          # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
-MAX_OPEN_POSITIONS = 20       # Cap concurrent positions
+MAX_OPEN_POSITIONS = 20       # Cap concurrent reversion positions
+MAX_IMPL_POSITIONS = 5        # Cap concurrent implied prob positions
 ORDER_WAIT_SECONDS = 5        # Wait for fill after placing order
 MAX_ORDER_RETRIES = 2         # Retry at next price level
 MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
@@ -946,7 +947,9 @@ class KalshiPositionTracker:
         else:
             return (current - entry) / entry * 100
 
-    def count(self):
+    def count(self, signal_type=None):
+        if signal_type:
+            return sum(1 for p in self.positions if p.get('signal_type', 'reversion') == signal_type)
         return len(self.positions)
 
     def live_count(self):
@@ -1464,12 +1467,18 @@ class KalshiReversionScanner:
         now_str = datetime.fromtimestamp(now, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         print(f"\n[{now_str}] Scan cycle")
 
-        trading_allowed = True
+        reversion_allowed = True
+        impl_allowed = True
 
-        # Safety: check max positions
-        if self.positions.count() >= MAX_OPEN_POSITIONS:
-            print(f"  MAX POSITIONS: {self.positions.count()}/{MAX_OPEN_POSITIONS}. No new orders.")
-            trading_allowed = False
+        # Safety: check max positions (separate limits per strategy)
+        rev_count = self.positions.count('reversion')
+        impl_count = self.positions.count('implied_prob')
+        if rev_count >= MAX_OPEN_POSITIONS:
+            print(f"  MAX REVERSION POSITIONS: {rev_count}/{MAX_OPEN_POSITIONS}. No new reversion orders.")
+            reversion_allowed = False
+        if impl_count >= MAX_IMPL_POSITIONS:
+            print(f"  MAX IMPL POSITIONS: {impl_count}/{MAX_IMPL_POSITIONS}. No new impl orders.")
+            impl_allowed = False
 
         # 1. Fetch last 65 min of trades (extra 5min buffer)
         trades = self.client.get_all_recent_trades(since_minutes=65)
@@ -1494,7 +1503,7 @@ class KalshiReversionScanner:
                 exposure = self.positions.event_exposure(event)
                 if exposure >= MAX_BET_DOLLARS and event:
                     print(f"    EVENT CAP: already ${exposure:.2f} on {event} (max ${MAX_BET_DOLLARS}), skipping")
-                elif trading_allowed and self.client.can_trade:
+                elif reversion_allowed and self.client.can_trade:
                     order_info = self.executor.execute_entry(sig)
 
                 await self.notifier.send_signal(sig, order_info)
@@ -1520,8 +1529,8 @@ class KalshiReversionScanner:
                 if exposure >= IMPL_MAX_BET_DOLLARS and event:
                     print(f"    EVENT CAP: already ${exposure:.2f} on {event} "
                           f"(max ${IMPL_MAX_BET_DOLLARS}), skipping")
-                elif not trading_allowed:
-                    print(f"    MAX POSITIONS reached, skipping")
+                elif not impl_allowed:
+                    print(f"    MAX IMPL POSITIONS reached, skipping")
                 elif self.client.can_trade:
                     # Use impl prob bet sizing: override MAX_BET temporarily
                     saved_max = globals()['MAX_BET_DOLLARS']
@@ -1547,7 +1556,7 @@ class KalshiReversionScanner:
                 print(f"  24h EXIT: '{pos['title'][:50]}' ROI: {pos.get('roi_pct',0):+.1f}%")
                 await self.notifier.send_24h_exit(pos, exit_info)
 
-        print(f"  Open positions: {self.positions.count()} ({self.positions.live_count()} live)")
+        print(f"  Open positions: {self.positions.count()} (rev={self.positions.count('reversion')}, impl={self.positions.count('implied_prob')}, {self.positions.live_count()} live)")
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
             print(f"  Daily P&L: ${daily_pnl:.2f}")
