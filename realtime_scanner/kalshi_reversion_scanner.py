@@ -6,7 +6,7 @@ Automated version of the scanner that:
 - Detects retail surge signals (same logic as before)
 - Places real orders on Kalshi via authenticated API
 - Sizes bets dynamically based on orderbook depth
-- Executes stop-loss and 24h exits automatically
+- Executes 24h exits automatically
 - Has DRY_RUN toggle and safety circuit breakers
 
 Uses RSA-PSS signing for Kalshi API authentication.
@@ -46,6 +46,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 KALSHI_API_KEY_ID = os.environ.get('KALSHI_API_KEY_ID', '')
 KALSHI_PRIVATE_KEY_PATH = os.environ.get('KALSHI_PRIVATE_KEY_PATH', '')
 KALSHI_PRIVATE_KEY = os.environ.get('KALSHI_PRIVATE_KEY', '')  # Raw PEM content (for Railway)
+KALSHI_PRIVATE_KEY_B64 = os.environ.get('KALSHI_PRIVATE_KEY_B64', '')  # Base64-encoded PEM (for Railway)
 
 KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
@@ -55,9 +56,8 @@ MAX_SMALL_TRADES = 40       # Max (beyond this, it's real news)
 SMALL_TRADE_LIMIT = 100     # Contracts — "retail" is < 100 contracts
 MIN_SIDE_RATIO = 0.65       # 65%+ on one side
 MIN_PRICE_MOVE = 0.15       # 15c move
-ENTRY_PRICE_MIN = 0.21
-ENTRY_PRICE_MAX = 0.80
-STOP_LOSS_PCT = -30.0
+ENTRY_PRICE_MIN = 0.30
+ENTRY_PRICE_MAX = 0.60
 HOLD_HOURS = 24
 COOLDOWN_HOURS = 4
 
@@ -67,14 +67,14 @@ TRADES_PER_PAGE = 1000
 WINDOW_MINUTES = 60          # 1-hour signal windows
 
 # Trading config
-DRY_RUN = True               # True = log orders but don't execute
+DRY_RUN = False
 MAX_BET_DOLLARS = 10          # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
 MAX_OPEN_POSITIONS = 20       # Cap concurrent positions
 ORDER_WAIT_SECONDS = 5        # Wait for fill after placing order
 MAX_ORDER_RETRIES = 2         # Retry at next price level
-MAX_SLIPPAGE_PCT = 1.0        # Skip if NO price > 1% worse than signal
+MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 
 # Categories to EXCLUDE (prefix-based fast filter + event category fallback)
 EXCLUDED_PREFIXES = [
@@ -108,11 +108,22 @@ EXCLUDED_CATEGORIES = {'Sports', 'Crypto', 'Financials'}
 # 60d backtest: SELL +24.4% avg ROI vs BUY -6.8% — only fade buying surges
 SELL_ONLY = True
 
+# --- Implied Probability Violation params ---
+IMPL_DEVIATION_THRESHOLD = 0.05   # 5c min |prob_sum - 1.0| to trigger
+IMPL_HOLD_HOURS = 12              # 12h hold (violations correct faster)
+IMPL_MIN_OUTCOMES = 2
+IMPL_MAX_OUTCOMES = 20
+IMPL_MIN_PRICE = 0.03
+IMPL_MAX_PRICE = 0.97
+IMPL_COOLDOWN_HOURS = 6           # Per-event cooldown
+IMPL_MAX_BET_DOLLARS = 1          # $1 for testing
+
 # State files
 STATE_DIR = Path(__file__).parent
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
 SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_signal_history.json'
 TRADE_LOG_FILE = STATE_DIR / 'kalshi_trade_log.json'
+IMPL_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_impl_signal_history.json'
 
 
 # =====================================================================
@@ -129,10 +140,19 @@ class KalshiClient:
 
     def _load_private_key(self):
         """Load RSA private key for API authentication.
-        Supports two modes:
+        Supports three modes:
           1. KALSHI_PRIVATE_KEY — raw PEM content (for Railway / cloud)
-          2. KALSHI_PRIVATE_KEY_PATH — path to PEM file (for local)
+          2. KALSHI_PRIVATE_KEY_B64 — base64-encoded PEM (for Railway / cloud)
+          3. KALSHI_PRIVATE_KEY_PATH — path to PEM file (for local)
         """
+        # Debug: show which env vars are set (not the values)
+        print(f"  Key env vars: KALSHI_PRIVATE_KEY={'SET' if KALSHI_PRIVATE_KEY else 'EMPTY'} "
+              f"({len(KALSHI_PRIVATE_KEY)} chars), "
+              f"B64={'SET' if KALSHI_PRIVATE_KEY_B64 else 'EMPTY'} "
+              f"({len(KALSHI_PRIVATE_KEY_B64)} chars), "
+              f"PATH={'SET' if KALSHI_PRIVATE_KEY_PATH else 'EMPTY'}, "
+              f"API_KEY_ID={'SET' if KALSHI_API_KEY_ID else 'EMPTY'}")
+
         # Mode 1: raw PEM content from env var (Railway)
         if KALSHI_PRIVATE_KEY:
             try:
@@ -141,12 +161,22 @@ class KalshiClient:
                 print("  RSA key loaded from KALSHI_PRIVATE_KEY env var")
                 return
             except Exception as e:
-                print(f"  WARNING: Failed to load private key from env var: {e}")
-                return
+                print(f"  WARNING: Failed to load private key from KALSHI_PRIVATE_KEY: {e}")
 
-        # Mode 2: file path (local)
+        # Mode 2: base64-encoded PEM from env var (Railway)
+        if KALSHI_PRIVATE_KEY_B64:
+            try:
+                import base64
+                pem_data = base64.b64decode(KALSHI_PRIVATE_KEY_B64)
+                self.private_key = serialization.load_pem_private_key(pem_data, password=None)
+                print("  RSA key loaded from KALSHI_PRIVATE_KEY_B64 env var")
+                return
+            except Exception as e:
+                print(f"  WARNING: Failed to load private key from KALSHI_PRIVATE_KEY_B64: {e}")
+
+        # Mode 3: file path (local)
         if not KALSHI_PRIVATE_KEY_PATH:
-            print("  WARNING: No KALSHI_PRIVATE_KEY or KALSHI_PRIVATE_KEY_PATH set — trading disabled")
+            print("  WARNING: No KALSHI_PRIVATE_KEY, KALSHI_PRIVATE_KEY_B64, or KALSHI_PRIVATE_KEY_PATH set — trading disabled")
             return
         key_path = Path(KALSHI_PRIVATE_KEY_PATH).expanduser()
         if not key_path.exists():
@@ -311,6 +341,34 @@ class KalshiClient:
         except Exception:
             pass
         return {'title': '', 'category': ''}
+
+    def get_all_open_markets(self):
+        """Fetch all open markets (paginated). Used for implied prob scanning."""
+        all_markets = []
+        cursor = None
+        pages = 0
+        while pages < 200:
+            try:
+                params = {'status': 'open', 'limit': 200}
+                if cursor:
+                    params['cursor'] = cursor
+                resp = self.session.get(f'{KALSHI_BASE}/markets', params=params, timeout=15)
+                if resp.status_code == 429:
+                    time.sleep(3)
+                    continue
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                markets = data.get('markets', [])
+                cursor = data.get('cursor', '')
+                all_markets.extend(markets)
+                pages += 1
+                if not markets or not cursor:
+                    break
+            except Exception as e:
+                print(f'  API error (all markets): {e}')
+                break
+        return all_markets
 
     # --- Authenticated endpoints (trading) ---
 
@@ -532,11 +590,6 @@ class KalshiReversionDetector:
                 fade_action = 'BUY'
                 fade_side = 'yes'
 
-            if fade_action == 'SELL':
-                sl_price = round(p_end * (1 + abs(STOP_LOSS_PCT) / 100), 4)
-            else:
-                sl_price = round(p_end * (1 - abs(STOP_LOSS_PCT) / 100), 4)
-
             retail_volume = sum(t.get('count', 0) for t in small_trades)
 
             self.signal_history[ticker] = now_ts
@@ -556,7 +609,129 @@ class KalshiReversionDetector:
                 'n_total_trades': len(ticker_trades),
                 'retail_contracts': retail_volume,
                 'signal_time': now_ts,
-                'stop_loss_price': sl_price,
+            })
+
+        return signals
+
+
+# =====================================================================
+# IMPLIED PROBABILITY VIOLATION DETECTOR
+# =====================================================================
+
+class ImpliedProbDetector:
+    """Detects when YES prices across outcomes in a multi-outcome event
+    don't sum to ~$1.00, indicating mispricing."""
+
+    def __init__(self):
+        self.signal_history = {}  # event_ticker -> last signal timestamp
+        self._load()
+
+    def _load(self):
+        try:
+            with open(IMPL_SIGNAL_HISTORY_FILE, 'r') as f:
+                self.signal_history = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+    def _save(self):
+        with open(IMPL_SIGNAL_HISTORY_FILE, 'w') as f:
+            json.dump(self.signal_history, f)
+
+    def detect(self, all_markets, client, now_ts):
+        """Scan all open markets for implied probability violations.
+        Returns list of signals."""
+        from collections import defaultdict
+
+        # Group markets by event_ticker
+        events = defaultdict(list)
+        for m in all_markets:
+            et = m.get('event_ticker', '')
+            ticker = m.get('ticker', '')
+            if et and ticker:
+                events[et].append(m)
+
+        signals = []
+
+        for event_ticker, mkts in events.items():
+            if not (IMPL_MIN_OUTCOMES <= len(mkts) <= IMPL_MAX_OUTCOMES):
+                continue
+
+            # Check cooldown
+            last_cd = self.signal_history.get(event_ticker, 0)
+            if now_ts - last_cd < IMPL_COOLDOWN_HOURS * 3600:
+                continue
+
+            # Get YES price for each outcome
+            outcome_prices = []
+            for m in mkts:
+                # Use mid-price (bid+ask)/2 or last_price as fallback
+                price = None
+                yes_bid = m.get('yes_bid')
+                yes_ask = m.get('yes_ask')
+                if yes_bid and yes_ask:
+                    try:
+                        price = (int(yes_bid) + int(yes_ask)) / 2 / 100
+                    except (ValueError, TypeError):
+                        pass
+                if price is None:
+                    last = m.get('last_price')
+                    if last:
+                        try:
+                            price = int(last) / 100
+                        except (ValueError, TypeError):
+                            pass
+                if price is not None and IMPL_MIN_PRICE <= price <= IMPL_MAX_PRICE:
+                    outcome_prices.append({
+                        'ticker': m['ticker'],
+                        'price': price,
+                        'title': m.get('title', m['ticker']),
+                        'event_ticker': event_ticker,
+                    })
+
+            if len(outcome_prices) < IMPL_MIN_OUTCOMES:
+                continue
+
+            # Compute probability sum
+            prob_sum = sum(o['price'] for o in outcome_prices)
+            deviation = prob_sum - 1.0
+            abs_dev = abs(deviation)
+
+            if abs_dev < IMPL_DEVIATION_THRESHOLD:
+                continue
+
+            # Determine trade direction and target
+            if deviation > 0:
+                # Overpriced: sell the highest-priced outcome (buy NO)
+                target = max(outcome_prices, key=lambda o: o['price'])
+                fade_action = 'SELL'
+                fade_side = 'no'
+            else:
+                # Underpriced: buy the lowest-priced outcome (buy YES)
+                target = min(outcome_prices, key=lambda o: o['price'])
+                fade_action = 'BUY'
+                fade_side = 'yes'
+
+            # Record cooldown
+            self.signal_history[event_ticker] = now_ts
+            self._save()
+
+            signals.append({
+                'ticker': target['ticker'],
+                'title': target['title'],
+                'event_ticker': event_ticker,
+                'fade_action': fade_action,
+                'fade_side': fade_side,
+                'entry_price': round(target['price'], 4),
+                'pre_signal_price': round(target['price'], 4),  # same for impl prob
+                'price_move': round(deviation, 4),
+                'n_small_trades': len(outcome_prices),  # repurpose: n_outcomes
+                'retail_contracts': 0,
+                'signal_time': now_ts,
+                'signal_type': 'implied_prob',
+                'prob_sum': round(prob_sum, 4),
+                'deviation': round(deviation, 4),
+                'abs_dev': round(abs_dev, 4),
+                'n_outcomes': len(outcome_prices),
             })
 
         return signals
@@ -605,28 +780,23 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
     """
     Calculate bet size from orderbook depth.
     We're buying NO side (since SELL-only = fading YES buyers).
-    Look at top 3 NO ask levels and take DEPTH_FRACTION of total depth.
+
+    Kalshi orderbook only returns BIDS (not asks).
+    To buy NO, we look at YES bids: a YES bid at price P = NO ask at (100-P).
     Returns (contracts, price_cents) or (0, 0) if too thin.
-
-    Kalshi orderbook format: {'yes': [[price, qty], ...], 'no': [[price, qty], ...]}
-    The lists are sell-side resting orders (asks) at each price level.
     """
-    # NO side: resting NO sell orders = we can buy NO from them
-    no_asks = orderbook.get('no', [])
-    if isinstance(no_asks, dict):
-        no_asks = no_asks.get('asks', [])
+    # YES bids represent the prices where someone will sell NO to us.
+    # A YES bid at P cents means we can buy NO at (100-P) cents.
+    yes_bids = orderbook.get('yes', [])
+    if isinstance(yes_bids, dict):
+        yes_bids = yes_bids.get('bids', [])
+    if not yes_bids:
+        return 0, 0
 
-    if not no_asks:
-        # Fallback: YES side bids (buying NO = taking YES bid side)
-        yes_bids = orderbook.get('yes', [])
-        if isinstance(yes_bids, dict):
-            yes_bids = yes_bids.get('bids', [])
-        if not yes_bids:
-            return 0, 0
-        # Convert: yes price P = no price (100-P)
-        no_asks = [[100 - b[0], b[1]] for b in yes_bids]
+    # Convert YES bids to NO ask prices: [no_price, quantity]
+    no_asks = [[100 - b[0], b[1]] for b in yes_bids]
 
-    # Sort asks by price ascending (best = cheapest)
+    # Sort asks by price ascending (best/cheapest first)
     asks_sorted = sorted(no_asks, key=lambda x: x[0])
 
     # Take top 3 levels
@@ -641,16 +811,17 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
     depth_dollars = sum(level[0] * level[1] / 100 for level in top_levels)
 
     # Our bet = DEPTH_FRACTION of depth, capped
-    bet_dollars = min(depth_dollars * DEPTH_FRACTION, MAX_BET_DOLLARS)
+    uncapped_dollars = round(depth_dollars * DEPTH_FRACTION, 2)
+    bet_dollars = min(uncapped_dollars, MAX_BET_DOLLARS)
     if bet_dollars < MIN_BET_DOLLARS:
-        return 0, 0
+        return 0, 0, uncapped_dollars
 
     # Convert to contracts at the best ask price
     contracts = int(bet_dollars / (best_ask_cents / 100))
     if contracts < 1:
-        return 0, 0
+        return 0, 0, uncapped_dollars
 
-    return contracts, best_ask_cents
+    return contracts, best_ask_cents, uncapped_dollars
 
 
 # =====================================================================
@@ -677,8 +848,11 @@ class KalshiPositionTracker:
             json.dump({'open': self.positions, 'closed': self.closed[-100:]}, f, indent=2)
 
     def add(self, signal, order_info=None):
+        signal_type = signal.get('signal_type', 'reversion')
+        hold_hours = IMPL_HOLD_HOURS if signal_type == 'implied_prob' else HOLD_HOURS
         pos = {
             'ticker': signal['ticker'],
+            'event_ticker': signal.get('event_ticker', ''),
             'title': signal['title'],
             'fade_action': signal['fade_action'],
             'fade_side': signal['fade_side'],
@@ -688,9 +862,9 @@ class KalshiPositionTracker:
             'n_small_trades': signal['n_small_trades'],
             'retail_contracts': signal['retail_contracts'],
             'entry_time': signal['signal_time'],
-            'exit_time': signal['signal_time'] + HOLD_HOURS * 3600,
-            'stop_loss_price': signal['stop_loss_price'],
+            'exit_time': signal['signal_time'] + hold_hours * 3600,
             'status': 'open',
+            'signal_type': signal_type,
         }
         if order_info:
             pos['order_id'] = order_info.get('order_id', '')
@@ -703,8 +877,18 @@ class KalshiPositionTracker:
         self.positions.append(pos)
         self._save()
 
+    def event_exposure(self, event_ticker):
+        """Total dollars deployed on open positions for a given event."""
+        if not event_ticker:
+            return 0
+        return sum(
+            pos.get('bet_dollars', 0)
+            for pos in self.positions
+            if pos.get('status') == 'open' and pos.get('event_ticker') == event_ticker
+        )
+
     def check(self, client):
-        """Check for stop-loss or 24h expiry. Returns alerts list."""
+        """Check for 24h expiry. Returns alerts list."""
         now = time.time()
         alerts = []
         still_open = []
@@ -726,16 +910,6 @@ class KalshiPositionTracker:
                 pos['close_time'] = now
                 self.closed.append(pos)
                 alerts.append(('24h_exit', pos))
-                continue
-
-            # Stop-loss
-            if roi is not None and roi <= STOP_LOSS_PCT:
-                pos['exit_price'] = current
-                pos['roi_pct'] = roi
-                pos['status'] = 'stopped_out'
-                pos['close_time'] = now
-                self.closed.append(pos)
-                alerts.append(('stop_loss', pos))
                 continue
 
             still_open.append(pos)
@@ -773,9 +947,11 @@ class OrderExecutor:
         """
         Place entry order for a signal. Returns order_info dict or None.
         For SELL signals: buy NO contracts.
+        For BUY signals: buy YES contracts.
         """
         ticker = signal['ticker']
         entry_cents = int(signal['entry_price'] * 100)
+        order_side = signal.get('fade_side', 'no')  # 'no' for SELL fades, 'yes' for BUY fades
 
         # Fetch orderbook
         orderbook = self.client.get_orderbook(ticker)
@@ -783,24 +959,56 @@ class OrderExecutor:
             print(f"    No orderbook for {ticker}, skipping")
             return None
 
-        # Calculate bet size from depth
-        contracts, best_ask_cents = calculate_bet_size(orderbook, 'no', entry_cents)
+        if order_side == 'no':
+            # Buy NO: derive NO asks from YES bids
+            contracts, best_ask_cents, uncapped_dollars = calculate_bet_size(orderbook, 'no', entry_cents)
+            target_price_cents = 100 - entry_cents  # NO price = 100 - YES price
+            side_label = 'NO'
+        else:
+            # Buy YES: use YES asks directly (derived from NO bids)
+            # NO bid at P = YES ask at (100-P)
+            no_bids = orderbook.get('no', []) or []
+            if isinstance(no_bids, dict):
+                no_bids = no_bids.get('bids', [])
+            if not no_bids:
+                # Fallback: just use entry price
+                contracts = max(1, int(IMPL_MAX_BET_DOLLARS / (entry_cents / 100)))
+                best_ask_cents = entry_cents
+                uncapped_dollars = IMPL_MAX_BET_DOLLARS
+            else:
+                yes_asks = [[100 - b[0], b[1]] for b in no_bids]
+                asks_sorted = sorted(yes_asks, key=lambda x: x[0])
+                top_levels = asks_sorted[:3]
+                if not top_levels:
+                    print(f"    No YES ask levels for {ticker}, skipping")
+                    return None
+                best_ask_cents = top_levels[0][0]
+                depth_dollars = sum(l[0] * l[1] / 100 for l in top_levels)
+                uncapped_dollars = round(depth_dollars * DEPTH_FRACTION, 2)
+                bet_dollars_raw = min(uncapped_dollars, MAX_BET_DOLLARS)
+                if bet_dollars_raw < MIN_BET_DOLLARS:
+                    return None
+                contracts = int(bet_dollars_raw / (best_ask_cents / 100)) if best_ask_cents > 0 else 0
+                if contracts < 1:
+                    return None
+            target_price_cents = entry_cents
+            side_label = 'YES'
+
         if contracts < 1:
             print(f"    Book too thin for {ticker} (min ${MIN_BET_DOLLARS}), skipping")
             return None
 
         bet_dollars = round(contracts * best_ask_cents / 100, 2)
-        no_price_cents = 100 - entry_cents  # NO price = 100 - YES price
 
-        # Slippage check: best available NO ask vs signal-implied NO price
-        # If best ask is >1% worse than signal price, the move already reverted or book moved
-        slippage_pct = (best_ask_cents - no_price_cents) / no_price_cents * 100 if no_price_cents > 0 else 0
+        # Slippage check
+        slippage_pct = (best_ask_cents - target_price_cents) / target_price_cents * 100 if target_price_cents > 0 else 0
         if slippage_pct > MAX_SLIPPAGE_PCT:
-            print(f"    SLIPPAGE: best NO ask {best_ask_cents}c vs signal {no_price_cents}c "
+            print(f"    SLIPPAGE: best {side_label} ask {best_ask_cents}c vs signal {target_price_cents}c "
                   f"({slippage_pct:+.1f}% > {MAX_SLIPPAGE_PCT}%), skipping")
             return None
 
-        print(f"    Sizing: {contracts} NO @ {best_ask_cents}c (signal {no_price_cents}c, slip {slippage_pct:+.1f}%) = ${bet_dollars:.2f}")
+        capped_note = f" [depth: ${uncapped_dollars:.2f}, capped to ${MAX_BET_DOLLARS}]" if uncapped_dollars > MAX_BET_DOLLARS else ""
+        print(f"    Sizing: {contracts} {side_label} @ {best_ask_cents}c (signal {target_price_cents}c, slip {slippage_pct:+.1f}%) = ${bet_dollars:.2f}{capped_note}")
 
         if DRY_RUN:
             order_info = {
@@ -813,19 +1021,19 @@ class OrderExecutor:
             self.logger.record({
                 'type': 'entry',
                 'ticker': ticker,
-                'side': 'no',
+                'side': order_side,
                 'action': 'buy',
                 'contracts': contracts,
-                'price_cents': no_price_cents,
+                'price_cents': target_price_cents,
                 'bet_dollars': bet_dollars,
                 'dry_run': True,
                 'signal': {k: v for k, v in signal.items() if k != 'title'},
             })
-            print(f"    DRY RUN: would buy {contracts} NO @ {no_price_cents}c (${bet_dollars:.2f})")
+            print(f"    DRY RUN: would buy {contracts} {side_label} @ {target_price_cents}c (${bet_dollars:.2f})")
             return order_info
 
-        # Max price we'll pay: signal NO price + 1% slippage
-        max_no_price = int(no_price_cents * (1 + MAX_SLIPPAGE_PCT / 100))
+        # Max price we'll pay: signal price + slippage tolerance
+        max_price = int(target_price_cents * (1 + MAX_SLIPPAGE_PCT / 100))
 
         # Live order with retries -- track all placed order IDs so we can
         # clean up any that are still resting if the loop exits without a fill.
@@ -836,7 +1044,7 @@ class OrderExecutor:
             filled = status.get('quantity_filled', 0)
             remaining = status.get('remaining_count', contracts)
             avg_fill = status.get('average_fill_price', price)
-            fill_slip = (avg_fill - no_price_cents) / no_price_cents * 100 if no_price_cents > 0 else 0
+            fill_slip = (avg_fill - target_price_cents) / target_price_cents * 100 if target_price_cents > 0 else 0
             actual_dollars = round(filled * avg_fill / 100, 2)
             info = {
                 'order_id': order_id,
@@ -850,34 +1058,34 @@ class OrderExecutor:
                 'type': 'entry',
                 'ticker': ticker,
                 'order_id': order_id,
-                'side': 'no',
+                'side': order_side,
                 'action': 'buy',
                 'contracts_requested': contracts,
                 'contracts_filled': filled,
                 'price_cents': price,
                 'avg_fill_price': avg_fill,
-                'signal_no_price': no_price_cents,
+                'signal_price': target_price_cents,
                 'slippage_pct': round(fill_slip, 2),
                 'bet_dollars': actual_dollars,
                 'dry_run': False,
             })
             if remaining > 0:
                 self.client.cancel_order(order_id)
-            print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c "
+            print(f"    FILLED: {filled}/{contracts} {side_label} @ avg {avg_fill}c "
                   f"(slip {fill_slip:+.1f}%, ${actual_dollars:.2f})")
             return info
 
         for attempt in range(MAX_ORDER_RETRIES + 1):
             price = best_ask_cents + attempt  # Start at best ask, bump 1c each retry
-            if price > max_no_price:
-                print(f"    Price {price}c exceeds max {max_no_price}c (1% slip), stopping")
+            if price > max_price:
+                print(f"    Price {price}c exceeds max {max_price}c ({MAX_SLIPPAGE_PCT:.0f}% slip), stopping")
                 break
             if price >= 99:
                 break
 
             order = self.client.create_order(
                 ticker=ticker,
-                side='no',
+                side=order_side,
                 action='buy',
                 count=contracts,
                 price_cents=price,
@@ -931,10 +1139,13 @@ class OrderExecutor:
     def execute_exit(self, pos):
         """
         Place exit order for a position. Returns actual exit info.
-        For SELL positions: sell NO contracts back.
+        For SELL positions (fade_side=no): sell NO contracts back.
+        For BUY positions (fade_side=yes): sell YES contracts back.
         """
         ticker = pos['ticker']
         contracts = pos.get('fill_count', 0)
+        exit_side = pos.get('fade_side', 'no')  # sell the same side we bought
+        side_label = 'NO' if exit_side == 'no' else 'YES'
 
         if not contracts or not pos.get('is_live'):
             return None
@@ -955,32 +1166,38 @@ class OrderExecutor:
                 'actual_pnl_dollars': round(pnl, 2),
                 'dry_run': True,
             })
-            print(f"    DRY RUN: would sell {contracts} NO (P&L: ${pnl:.2f})")
+            print(f"    DRY RUN: would sell {contracts} {side_label} (P&L: ${pnl:.2f})")
             return {'exit_price': current, 'pnl': round(pnl, 2)}
 
-        # Live exit: sell NO contracts aggressively (1c below best bid)
-        # To sell NO, we look at YES asks (someone buying YES = we sell NO to them)
         orderbook = self.client.get_orderbook(ticker)
-        yes_asks = orderbook.get('yes', []) if orderbook else []
-        if isinstance(yes_asks, dict):
-            yes_asks = yes_asks.get('asks', [])
 
-        if yes_asks:
-            # YES ask at P means someone wants to buy YES at P
-            # We sell NO at (100-P), so find lowest YES ask = best match
-            best_yes_ask = min(a[0] for a in yes_asks)
-            sell_price = max(1, (100 - best_yes_ask) - 1)  # 1c below for fast fill
-        else:
-            # Fallback: use current market price
-            current = self.client.get_current_price(ticker)
-            if current:
-                sell_price = max(1, int((1 - current) * 100) - 1)
+        if exit_side == 'no':
+            # Sell NO: look at YES asks (someone buying YES = we sell NO to them)
+            yes_asks = orderbook.get('yes', []) if orderbook else []
+            if isinstance(yes_asks, dict):
+                yes_asks = yes_asks.get('asks', [])
+            if yes_asks:
+                best_yes_ask = min(a[0] for a in yes_asks)
+                sell_price = max(1, (100 - best_yes_ask) - 1)
             else:
-                sell_price = 1  # Fire sale
+                current = self.client.get_current_price(ticker)
+                sell_price = max(1, int((1 - current) * 100) - 1) if current else 1
+        else:
+            # Sell YES: look at NO asks (derived from NO bids: NO bid at P = YES ask at 100-P)
+            # Actually to sell YES, we want YES bids (best price someone will buy YES at)
+            yes_bids = orderbook.get('yes', []) if orderbook else []
+            if isinstance(yes_bids, dict):
+                yes_bids = yes_bids.get('bids', [])
+            if yes_bids:
+                best_yes_bid = max(b[0] for b in yes_bids)
+                sell_price = max(1, best_yes_bid - 1)
+            else:
+                current = self.client.get_current_price(ticker)
+                sell_price = max(1, int(current * 100) - 1) if current else 1
 
         order = self.client.create_order(
             ticker=ticker,
-            side='no',
+            side=exit_side,
             action='sell',
             count=contracts,
             price_cents=sell_price,
@@ -1007,7 +1224,7 @@ class OrderExecutor:
                 'actual_pnl_dollars': pnl,
                 'dry_run': False,
             })
-            print(f"    EXIT FILLED: {filled}/{contracts} NO @ {avg_fill}c (P&L: ${pnl:.2f})")
+            print(f"    EXIT FILLED: {filled}/{contracts} {side_label} @ {avg_fill}c (P&L: ${pnl:.2f})")
             return {'exit_price': avg_fill / 100, 'pnl': pnl}
 
         print(f"    EXIT FAILED for {ticker}")
@@ -1024,7 +1241,6 @@ class KalshiNotifier:
 
     async def send_signal(self, sig, order_info=None):
         entry_cents = int(sig['entry_price'] * 100)
-        sl_cents = int(sig['stop_loss_price'] * 100)
         exit_time = datetime.fromtimestamp(
             sig['signal_time'] + HOLD_HOURS * 3600, tz=timezone.utc
         ).strftime('%b %d %H:%M UTC')
@@ -1059,7 +1275,6 @@ class KalshiNotifier:
             f"Ticker: {sig['ticker']}\n\n"
             f"ACTION: {action}\n\n"
             f"Yes price: {entry_cents}c\n"
-            f"Stop-loss: {sl_cents}c ({STOP_LOSS_PCT:.0f}%)\n"
             f"Exit: {exit_time} (24h hold)\n\n"
             f"Why: {sig['n_small_trades']} small trades {move_dir} "
             f"by {abs(sig['price_move'])*100:.0f}c in 1hr "
@@ -1070,29 +1285,46 @@ class KalshiNotifier:
         )
         await self._send(msg)
 
-    async def send_stop_loss(self, pos, exit_info=None):
-        held = (pos['close_time'] - pos['entry_time']) / 3600
-        exit_price = pos.get('exit_price', 0) or 0
-        entry_cents = int(pos['entry_price'] * 100)
-        exit_cents = int(exit_price * 100) if exit_price else 0
+    async def send_impl_prob_signal(self, sig, order_info=None):
+        entry_cents = int(sig['entry_price'] * 100)
+        exit_time = datetime.fromtimestamp(
+            sig['signal_time'] + IMPL_HOLD_HOURS * 3600, tz=timezone.utc
+        ).strftime('%b %d %H:%M UTC')
 
-        if pos['fade_action'] == 'SELL':
-            close = f"SELL your NO position (or buy back YES at {exit_cents}c)"
+        if sig['fade_side'] == 'yes':
+            action = f"BUY YES at {entry_cents}c"
         else:
-            close = f"SELL your YES at {exit_cents}c"
+            action = f"BUY NO at {100 - entry_cents}c"
 
-        pnl_line = ""
-        if exit_info and 'pnl' in exit_info:
-            pnl_line = f"\nActual P&L: ${exit_info['pnl']:.2f}"
+        url = f"\nhttps://kalshi.com/markets/{sig['ticker']}"
+
+        if order_info:
+            if order_info.get('dry_run'):
+                trade_line = (
+                    f"\n[DRY RUN] Would buy {order_info['fill_count']} "
+                    f"{'NO' if sig['fade_side'] == 'no' else 'YES'} "
+                    f"@ {int(order_info['fill_price']*100)}c (${order_info['bet_dollars']:.2f})"
+                )
+            else:
+                trade_line = (
+                    f"\nORDER FILLED: {order_info['fill_count']} "
+                    f"{'NO' if sig['fade_side'] == 'no' else 'YES'} "
+                    f"@ {int(order_info['fill_price']*100)}c (${order_info['bet_dollars']:.2f})"
+                )
+        else:
+            trade_line = "\n(Signal only -- no order placed)"
 
         msg = (
-            f"STOP-LOSS HIT (-30%)\n\n"
-            f"{pos['title']}\n"
-            f"Ticker: {pos['ticker']}\n\n"
-            f"CLOSE NOW: {close}\n\n"
-            f"Entry: {entry_cents}c -> Now: {exit_cents}c\n"
-            f"Loss: {pos.get('roi_pct', 0):+.1f}%{pnl_line}\n"
-            f"Held: {held:.1f}h"
+            f"KALSHI IMPLIED PROB VIOLATION\n\n"
+            f"{sig['title']}\n"
+            f"Ticker: {sig['ticker']}\n\n"
+            f"ACTION: {action}\n\n"
+            f"Prob sum: ${sig['prob_sum']:.2f} across {sig['n_outcomes']} outcomes "
+            f"(deviation: {sig['deviation']:+.2f})\n"
+            f"Exit: {exit_time} (12h hold)\n\n"
+            f"Backtest (60d Kalshi): 70.7% WR, +17.9% avg PnL"
+            f"{trade_line}"
+            f"{url}"
         )
         await self._send(msg)
 
@@ -1127,14 +1359,11 @@ class KalshiNotifier:
         msg = (
             f"Kalshi Auto-Trading Bot Started\n\n"
             f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE TRADING'}\n"
-            f"Strategy: SELL-only, fade retail buying surges\n"
-            f"Params: 12-40 small trades, 15c+ move, 21-80c\n"
+            f"Strategy 1: Retail reversion (SELL-only, ${MAX_BET_DOLLARS}/bet, 24h hold)\n"
+            f"Strategy 2: Implied prob violations (${IMPL_MAX_BET_DOLLARS}/bet, 12h hold)\n"
             f"Categories: No sports/crypto/financials\n"
-            f"Hold: 24h, -30% stop-loss\n"
-            f"Max bet: ${MAX_BET_DOLLARS}/signal\n"
             f"Max positions: {MAX_OPEN_POSITIONS}\n"
             f"{bal_line}"
-            f"Backtest (60d): 58% WR, +27% avg ROI\n\n"
             f"Open positions: {n_open}\n"
             f"Scan interval: {SCAN_INTERVAL_SECONDS}s"
         )
@@ -1161,6 +1390,7 @@ class KalshiReversionScanner:
     def __init__(self):
         self.client = KalshiClient()
         self.detector = KalshiReversionDetector()
+        self.impl_detector = ImpliedProbDetector()
         self.positions = KalshiPositionTracker()
         self.notifier = KalshiNotifier()
         self.trade_logger = TradeLogger()
@@ -1173,7 +1403,7 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy: Fade retail surges, 24h hold, -30% SL")
+        print(f"Strategy: Fade retail surges, 24h hold, no stop-loss")
         print(f"Max bet: ${MAX_BET_DOLLARS}/signal, Max positions: {MAX_OPEN_POSITIONS}")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
@@ -1234,27 +1464,65 @@ class KalshiReversionScanner:
                       f"(move {sig['price_move']:+.3f}, {sig['n_small_trades']} trades)")
 
                 order_info = None
-                if trading_allowed and self.client.can_trade:
+                event = sig.get('event_ticker', '')
+                exposure = self.positions.event_exposure(event)
+                if exposure >= MAX_BET_DOLLARS and event:
+                    print(f"    EVENT CAP: already ${exposure:.2f} on {event} (max ${MAX_BET_DOLLARS}), skipping")
+                elif trading_allowed and self.client.can_trade:
                     order_info = self.executor.execute_entry(sig)
 
                 await self.notifier.send_signal(sig, order_info)
                 self.positions.add(sig, order_info)
 
-        # 3. Check positions for stop-loss / 24h exit
+        # 3. Implied probability violation scan
+        print(f"  Scanning implied probability violations...")
+        try:
+            all_open_markets = self.client.get_all_open_markets()
+            print(f"  Open markets fetched: {len(all_open_markets)}")
+            impl_signals = self.impl_detector.detect(all_open_markets, self.client, now)
+            print(f"  Impl prob signals: {len(impl_signals)}")
+
+            for sig in impl_signals:
+                entry_c = int(sig['entry_price'] * 100)
+                print(f"  IMPL PROB: {sig['fade_action']} '{sig['title'][:50]}' @ {entry_c}c "
+                      f"(sum={sig['prob_sum']:.2f}, dev={sig['deviation']:+.2f}, "
+                      f"{sig['n_outcomes']} outcomes)")
+
+                order_info = None
+                event = sig.get('event_ticker', '')
+                exposure = self.positions.event_exposure(event)
+                if exposure >= IMPL_MAX_BET_DOLLARS and event:
+                    print(f"    EVENT CAP: already ${exposure:.2f} on {event} "
+                          f"(max ${IMPL_MAX_BET_DOLLARS}), skipping")
+                elif not trading_allowed:
+                    print(f"    MAX POSITIONS reached, skipping")
+                elif self.client.can_trade:
+                    # Use impl prob bet sizing: override MAX_BET temporarily
+                    saved_max = globals()['MAX_BET_DOLLARS']
+                    globals()['MAX_BET_DOLLARS'] = IMPL_MAX_BET_DOLLARS
+                    order_info = self.executor.execute_entry(sig)
+                    globals()['MAX_BET_DOLLARS'] = saved_max
+
+                await self.notifier.send_impl_prob_signal(sig, order_info)
+                self.positions.add(sig, order_info)
+        except Exception as e:
+            print(f"  Impl prob scan error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # 4. Check positions for exit (24h reversion, 12h impl prob)
         alerts = self.positions.check(self.client)
         for atype, pos in alerts:
             exit_info = None
             if pos.get('is_live') and self.client.can_trade:
                 exit_info = self.executor.execute_exit(pos)
 
-            if atype == 'stop_loss':
-                print(f"  STOP-LOSS: '{pos['title'][:50]}' ROI: {pos.get('roi_pct',0):+.1f}%")
-                await self.notifier.send_stop_loss(pos, exit_info)
-            elif atype == '24h_exit':
+            if atype == '24h_exit':
                 print(f"  24h EXIT: '{pos['title'][:50]}' ROI: {pos.get('roi_pct',0):+.1f}%")
                 await self.notifier.send_24h_exit(pos, exit_info)
 
         print(f"  Open positions: {self.positions.count()} ({self.positions.live_count()} live)")
+        daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
             print(f"  Daily P&L: ${daily_pnl:.2f}")
 
