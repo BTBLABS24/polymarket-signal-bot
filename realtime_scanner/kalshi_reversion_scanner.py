@@ -649,16 +649,17 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
     depth_dollars = sum(level[0] * level[1] / 100 for level in top_levels)
 
     # Our bet = DEPTH_FRACTION of depth, capped
-    bet_dollars = min(depth_dollars * DEPTH_FRACTION, MAX_BET_DOLLARS)
+    uncapped_dollars = round(depth_dollars * DEPTH_FRACTION, 2)
+    bet_dollars = min(uncapped_dollars, MAX_BET_DOLLARS)
     if bet_dollars < MIN_BET_DOLLARS:
-        return 0, 0
+        return 0, 0, uncapped_dollars
 
     # Convert to contracts at the best ask price
     contracts = int(bet_dollars / (best_ask_cents / 100))
     if contracts < 1:
-        return 0, 0
+        return 0, 0, uncapped_dollars
 
-    return contracts, best_ask_cents
+    return contracts, best_ask_cents, uncapped_dollars
 
 
 # =====================================================================
@@ -792,7 +793,7 @@ class OrderExecutor:
             return None
 
         # Calculate bet size from depth
-        contracts, best_ask_cents = calculate_bet_size(orderbook, 'no', entry_cents)
+        contracts, best_ask_cents, uncapped_dollars = calculate_bet_size(orderbook, 'no', entry_cents)
         if contracts < 1:
             print(f"    Book too thin for {ticker} (min ${MIN_BET_DOLLARS}), skipping")
             return None
@@ -808,7 +809,8 @@ class OrderExecutor:
                   f"({slippage_pct:+.1f}% > {MAX_SLIPPAGE_PCT}%), skipping")
             return None
 
-        print(f"    Sizing: {contracts} NO @ {best_ask_cents}c (signal {no_price_cents}c, slip {slippage_pct:+.1f}%) = ${bet_dollars:.2f}")
+        capped_note = f" [depth: ${uncapped_dollars:.2f}, capped to ${MAX_BET_DOLLARS}]" if uncapped_dollars > MAX_BET_DOLLARS else ""
+        print(f"    Sizing: {contracts} NO @ {best_ask_cents}c (signal {no_price_cents}c, slip {slippage_pct:+.1f}%) = ${bet_dollars:.2f}{capped_note}")
 
         if DRY_RUN:
             order_info = {
