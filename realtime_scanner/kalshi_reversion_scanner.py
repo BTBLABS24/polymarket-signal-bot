@@ -140,12 +140,45 @@ IMPL_EXCLUDED_PREFIXES = [
     'KXMVESPORTSMULTIGAME',
 ]
 
+# --- Mention BUY NO Strategy ---
+# Backtest: YES is systematically overpriced on mention markets.
+# Refined: NO 5-65c, ex NBA/Earnings → +53% ROI (train +51%, test +56%)
+# 4,410 trades, 155 active days, 0 negative rolling 21d windows.
+# Even with 3c slippage: +46% ROI. Holds across all time periods.
+MENTION_BET_DOLLARS = 4           # $4 per signal
+MENTION_MAX_NO_PRICE = 0.65       # Only buy NO when NO <= 65c (YES >= 35c)
+MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
+MENTION_MAX_HOURS_BEFORE_CLOSE = 4  # Only trade within 4h of close_time
+MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
+MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
+MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker
+MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
+# Series to scan (ex NBA/Earnings per backtest — weakest ROI categories)
+MENTION_SCAN_SERIES = [
+    # Sports (ex NBA) — NFL +80%, NCAA +60%, Fight +34%
+    'KXNFLMENTION', 'KXNCAAMENTION', 'KXNCAABMENTION',
+    'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION', 'KXMLBMENTION',
+    'KXFIGHTMENTION', 'KXSBMENTION',
+    # Politics/Gov — Trump +68%, Governor +55%, Press +72%
+    'KXTRUMPMENTION', 'KXTRUMPMENTIONB',
+    'KXMAMDANIMENTION', 'KXHOCHULMENTION',
+    'KXSECPRESSMENTION', 'KXLEAVITTMENTION',
+    'KXGOVERNORMENTION',
+    # Media — Maddow +175%, Talk shows, SNL
+    'KXMADDOWMENTION',
+    'KXSNLMENTION', 'KXROGANMENTION', 'KXCOOPERMENTION',
+    'KXCOLBERTMENTION', 'KXKIMMELMENTION',
+    # Other mention series (catch new ones)
+    'KXVANCEMENTION',
+]
+
 # State files
 STATE_DIR = Path(__file__).parent
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
 SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_signal_history.json'
 TRADE_LOG_FILE = STATE_DIR / 'kalshi_trade_log.json'
 IMPL_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_impl_signal_history.json'
+MENTION_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_mention_signal_history.json'
 
 
 # =====================================================================
@@ -393,6 +426,40 @@ class KalshiClient:
             except Exception as e:
                 print(f'  API error (all markets): {e}')
                 break
+        return all_markets
+
+    def get_open_mention_markets(self):
+        """Fetch all open mention markets by scanning configured series."""
+        all_markets = []
+        for series in MENTION_SCAN_SERIES:
+            try:
+                cursor = None
+                pages = 0
+                while pages < 10:
+                    params = {
+                        'series_ticker': series,
+                        'status': 'open',
+                        'limit': 200,
+                    }
+                    if cursor:
+                        params['cursor'] = cursor
+                    resp = self.session.get(
+                        f'{KALSHI_BASE}/markets', params=params, timeout=15
+                    )
+                    if resp.status_code == 429:
+                        time.sleep(2)
+                        continue
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    markets = data.get('markets', [])
+                    all_markets.extend(markets)
+                    cursor = data.get('cursor', '')
+                    pages += 1
+                    if not markets or not cursor:
+                        break
+            except Exception as e:
+                print(f'  API error (mention series {series}): {e}')
         return all_markets
 
     # --- Authenticated endpoints (trading) ---
@@ -805,6 +872,132 @@ class ImpliedProbDetector:
 
 
 # =====================================================================
+# MENTION BUY NO DETECTOR
+# =====================================================================
+
+class MentionBuyNoDetector:
+    """Scans open mention markets and generates BUY NO signals for those
+    within 4h of close_time with NO price in the 5-65c range.
+
+    Backtest: YES is systematically overpriced on mention markets.
+    Buying NO at 5-65c (ex NBA/Earnings) yields +53% ROI over 383 days,
+    with 0 negative rolling 21-day windows out of 135.
+    """
+
+    def __init__(self):
+        self.signal_history = {}  # ticker -> last signal timestamp
+        self._load()
+
+    def _load(self):
+        try:
+            with open(MENTION_SIGNAL_HISTORY_FILE, 'r') as f:
+                self.signal_history = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+    def _save(self):
+        with open(MENTION_SIGNAL_HISTORY_FILE, 'w') as f:
+            json.dump(self.signal_history, f)
+
+    def detect(self, open_markets, client, now_ts):
+        """Scan open mention markets for BUY NO opportunities.
+
+        For each market:
+        - Must be within 4h of close_time
+        - YES price must imply NO price in [5c, 65c]
+        - Must not be in cooldown
+
+        Returns list of signal dicts compatible with OrderExecutor.
+        """
+        signals = []
+
+        for m in open_markets:
+            ticker = m.get('ticker', '')
+            if not ticker:
+                continue
+
+            # Skip NBA and Earnings (weakest categories in backtest)
+            ticker_upper = ticker.upper()
+            if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
+                continue
+            if 'EARNINGS' in ticker_upper:
+                continue
+
+            # Check close_time is within 4h
+            close_time_str = m.get('close_time', '')
+            if not close_time_str:
+                continue
+            try:
+                close_dt = datetime.fromisoformat(
+                    close_time_str.replace('Z', '+00:00')
+                )
+                close_ts = close_dt.timestamp()
+            except Exception:
+                continue
+
+            hours_before = (close_ts - now_ts) / 3600
+            if hours_before < 0 or hours_before > MENTION_MAX_HOURS_BEFORE_CLOSE:
+                continue
+
+            # Get current YES price → derive NO price
+            yes_price = None
+            yes_bid = m.get('yes_bid')
+            yes_ask = m.get('yes_ask')
+            if yes_bid is not None and yes_ask is not None:
+                try:
+                    yes_price = (int(yes_bid) + int(yes_ask)) / 2 / 100
+                except (ValueError, TypeError):
+                    pass
+            if yes_price is None:
+                last = m.get('last_price')
+                if last is not None:
+                    try:
+                        yes_price = int(last) / 100
+                    except (ValueError, TypeError):
+                        pass
+            if yes_price is None:
+                continue
+
+            no_price = 1 - yes_price
+            if no_price < MENTION_MIN_NO_PRICE or no_price > MENTION_MAX_NO_PRICE:
+                continue
+
+            # Cooldown check
+            last_signal = self.signal_history.get(ticker, 0)
+            if now_ts - last_signal < MENTION_COOLDOWN_SECONDS:
+                continue
+
+            # Record cooldown
+            self.signal_history[ticker] = now_ts
+            self._save()
+
+            title = m.get('title', ticker)
+            event_ticker = m.get('event_ticker', '')
+            no_price_cents = int(no_price * 100)
+
+            signals.append({
+                'ticker': ticker,
+                'title': title,
+                'event_ticker': event_ticker,
+                'fade_action': 'SELL',   # "selling YES" = buying NO
+                'fade_side': 'no',
+                'entry_price': round(yes_price, 4),
+                'pre_signal_price': round(yes_price, 4),
+                'price_move': 0,
+                'n_small_trades': 0,
+                'retail_contracts': 0,
+                'signal_time': now_ts,
+                'signal_type': 'mention_buy_no',
+                'no_price': round(no_price, 4),
+                'no_price_cents': no_price_cents,
+                'hours_before_close': round(hours_before, 2),
+                'close_ts': close_ts,
+            })
+
+        return signals
+
+
+# =====================================================================
 # TRADE LOGGER
 # =====================================================================
 
@@ -916,7 +1109,15 @@ class KalshiPositionTracker:
 
     def add(self, signal, order_info=None):
         signal_type = signal.get('signal_type', 'reversion')
-        hold_hours = IMPL_HOLD_HOURS if signal_type == 'implied_prob' else HOLD_HOURS
+
+        if signal_type == 'mention_buy_no':
+            # Mention positions: hold until settlement (close_ts from signal)
+            exit_time = signal.get('close_ts', signal['signal_time'] + 4 * 3600)
+        elif signal_type == 'implied_prob':
+            exit_time = signal['signal_time'] + IMPL_HOLD_HOURS * 3600
+        else:
+            exit_time = signal['signal_time'] + HOLD_HOURS * 3600
+
         pos = {
             'ticker': signal['ticker'],
             'event_ticker': signal.get('event_ticker', ''),
@@ -929,10 +1130,13 @@ class KalshiPositionTracker:
             'n_small_trades': signal['n_small_trades'],
             'retail_contracts': signal['retail_contracts'],
             'entry_time': signal['signal_time'],
-            'exit_time': signal['signal_time'] + hold_hours * 3600,
+            'exit_time': exit_time,
             'status': 'open',
             'signal_type': signal_type,
         }
+        if signal_type == 'mention_buy_no':
+            pos['no_price'] = signal.get('no_price', 0)
+            pos['hold_until_settle'] = True
         if order_info:
             pos['order_id'] = order_info.get('order_id', '')
             pos['fill_price'] = order_info.get('fill_price', 0)
@@ -955,7 +1159,8 @@ class KalshiPositionTracker:
         )
 
     def check(self, client):
-        """Check for 24h expiry. Returns alerts list."""
+        """Check for timed exits (reversion) and settlements (mention).
+        Returns alerts list of (alert_type, position) tuples."""
         now = time.time()
         alerts = []
         still_open = []
@@ -964,12 +1169,70 @@ class KalshiPositionTracker:
             if pos['status'] != 'open':
                 continue
 
-            # Force-refresh the market cache for current price
+            is_mention = pos.get('signal_type') == 'mention_buy_no'
+
+            if is_mention:
+                # Mention positions: check if market has settled
+                market = client.get_market(pos['ticker'])
+                status = market.get('status', 'open') if market else 'open'
+
+                if status in ('settled', 'finalized'):
+                    result = market.get('result', '')
+                    fill_price = pos.get('fill_price', pos.get('no_price', 0))
+                    fill_count = pos.get('fill_count', 0)
+
+                    if result == 'no':
+                        # NO won — we profit
+                        pnl = fill_count * (1 - fill_price)
+                    elif result == 'yes':
+                        # YES won — we lose our cost
+                        pnl = -(fill_count * fill_price)
+                    else:
+                        pnl = 0
+
+                    pos['settle_pnl'] = round(pnl, 2)
+                    pos['result'] = result
+                    pos['status'] = 'settled'
+                    pos['close_time'] = now
+                    self.closed.append(pos)
+                    alerts.append(('settled', pos))
+                    continue
+                elif now > pos['exit_time'] + 3600:
+                    # Safety: if 1h past expected close and still not settled,
+                    # force-close to avoid stuck positions
+                    client.market_cache.pop(pos['ticker'], None)
+                    market = client.get_market(pos['ticker'])
+                    status = market.get('status', 'open') if market else 'open'
+                    if status in ('settled', 'finalized'):
+                        # Retry settlement logic
+                        result = market.get('result', '')
+                        fill_price = pos.get('fill_price', pos.get('no_price', 0))
+                        fill_count = pos.get('fill_count', 0)
+                        if result == 'no':
+                            pnl = fill_count * (1 - fill_price)
+                        elif result == 'yes':
+                            pnl = -(fill_count * fill_price)
+                        else:
+                            pnl = 0
+                        pos['settle_pnl'] = round(pnl, 2)
+                        pos['result'] = result
+                        pos['status'] = 'settled'
+                        pos['close_time'] = now
+                        self.closed.append(pos)
+                        alerts.append(('settled', pos))
+                        continue
+                    # Still not settled — keep waiting
+                    still_open.append(pos)
+                    continue
+                else:
+                    still_open.append(pos)
+                    continue
+
+            # Reversion/impl positions: timed exit
             client.market_cache.pop(pos['ticker'], None)
             current = client.get_current_price(pos['ticker'])
             roi = self._roi(pos, current)
 
-            # 24h exit
             if now >= pos['exit_time']:
                 pos['exit_price'] = current
                 pos['roi_pct'] = roi
@@ -1411,6 +1674,40 @@ class KalshiNotifier:
         )
         await self._send(msg)
 
+    async def send_mention_signal(self, sig, order_info=None):
+        no_cents = sig.get('no_price_cents', 0)
+        hours = sig.get('hours_before_close', 0)
+
+        url = f"\nhttps://kalshi.com/markets/{sig['ticker']}"
+
+        if order_info:
+            if order_info.get('dry_run'):
+                trade_line = (
+                    f"\n[DRY RUN] Would buy {order_info['fill_count']} NO "
+                    f"@ {int(order_info['fill_price']*100)}c (${order_info['bet_dollars']:.2f})"
+                )
+            else:
+                trade_line = (
+                    f"\nORDER FILLED: {order_info['fill_count']} NO "
+                    f"@ {int(order_info['fill_price']*100)}c (${order_info['bet_dollars']:.2f})"
+                )
+        else:
+            trade_line = "\n(Signal only -- no order placed)"
+
+        msg = (
+            f"KALSHI MENTION BUY NO\n\n"
+            f"{sig['title']}\n"
+            f"Ticker: {sig['ticker']}\n\n"
+            f"ACTION: BUY NO at {no_cents}c\n\n"
+            f"Close in: {hours:.1f}h\n"
+            f"Hold: until settlement\n\n"
+            f"Why: YES systematically overpriced on mention markets. "
+            f"Backtest: +53% ROI, 0/135 negative 21d windows."
+            f"{trade_line}"
+            f"{url}"
+        )
+        await self._send(msg)
+
     async def send_24h_exit(self, pos, exit_info=None):
         roi = pos.get('roi_pct', 0) or 0
         result = "WIN" if roi > 0 else "LOSS"
@@ -1473,10 +1770,12 @@ class KalshiReversionScanner:
         self.client = KalshiClient()
         self.detector = KalshiReversionDetector()
         self.impl_detector = ImpliedProbDetector()
+        self.mention_detector = MentionBuyNoDetector()
         self.positions = KalshiPositionTracker()
         self.notifier = KalshiNotifier()
         self.trade_logger = TradeLogger()
         self.executor = OrderExecutor(self.client, self.trade_logger)
+        self._last_mention_scan = 0  # timestamp of last mention scan
 
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
@@ -1485,8 +1784,9 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy: Fade retail surges, 24h hold, no stop-loss")
-        print(f"Max bet: ${MAX_BET_DOLLARS}/signal, Max positions: {MAX_OPEN_POSITIONS}")
+        print(f"Strategy 1: Fade retail surges, 24h hold")
+        print(f"Strategy 2: Mention BUY NO, ${MENTION_BET_DOLLARS}/bet, hold until settle")
+        print(f"Max bet: ${MAX_BET_DOLLARS}/signal (reversion), ${MENTION_BET_DOLLARS}/signal (mention)")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -1558,27 +1858,186 @@ class KalshiReversionScanner:
                     await self.notifier.send_signal(sig, order_info)
                     self.positions.add(sig, order_info)
 
-        # 3. Implied probability violation scan — DISABLED
-        # Backtest showed too few diverse events (1 housing event = 67% of profit)
-        # and sports matches (e.g. Gaziantep vs Trabzonspor) leaked through as
-        # false "multi-outcome" events. Not enough edge to justify the complexity.
-        print(f"  Impl prob strategy: DISABLED")
+        # 3. Mention BUY NO scan
+        mention_count = self.positions.count('mention_buy_no')
+        mention_allowed = mention_count < MENTION_MAX_POSITIONS
+        should_scan_mentions = (now - self._last_mention_scan) >= MENTION_SCAN_INTERVAL_SECONDS
 
-        # 4. Check positions for exit (24h reversion, 12h impl prob)
+        if should_scan_mentions:
+            self._last_mention_scan = now
+            print(f"  Mention scan: fetching open mention markets...")
+            mention_markets = self.client.get_open_mention_markets()
+            print(f"  Mention markets found: {len(mention_markets)}")
+
+            if mention_markets:
+                mention_signals = self.mention_detector.detect(mention_markets, self.client, now)
+                print(f"  Mention signals: {len(mention_signals)}")
+
+                for sig in mention_signals:
+                    if not mention_allowed:
+                        print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
+                        break
+
+                    no_c = sig.get('no_price_cents', 0)
+                    hrs = sig.get('hours_before_close', 0)
+                    print(f"  MENTION: BUY NO @ {no_c}c '{sig['title'][:50]}' ({hrs:.1f}h to close)")
+
+                    order_info = None
+                    if self.client.can_trade:
+                        order_info = self._execute_mention_entry(sig)
+
+                    if order_info:
+                        await self.notifier.send_mention_signal(sig, order_info)
+                        self.positions.add(sig, order_info)
+                        mention_count += 1
+                        mention_allowed = mention_count < MENTION_MAX_POSITIONS
+        else:
+            print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
+
+        # 4. Check positions for exit (24h reversion, settlement for mention)
         alerts = self.positions.check(self.client)
         for atype, pos in alerts:
             exit_info = None
             if pos.get('is_live') and self.client.can_trade:
-                exit_info = self.executor.execute_exit(pos)
+                # Mention positions held until settlement — no manual exit needed
+                if pos.get('signal_type') != 'mention_buy_no':
+                    exit_info = self.executor.execute_exit(pos)
 
             if atype == '24h_exit':
                 print(f"  24h EXIT: '{pos['title'][:50]}' ROI: {pos.get('roi_pct',0):+.1f}%")
                 await self.notifier.send_24h_exit(pos, exit_info)
+            elif atype == 'settled':
+                pnl = pos.get('settle_pnl', 0)
+                result = "WIN" if pnl > 0 else "LOSS"
+                print(f"  SETTLED ({result}): '{pos['title'][:50]}' P&L: ${pnl:+.2f}")
 
-        print(f"  Open positions: {self.positions.count()} (rev={self.positions.count('reversion')}, impl={self.positions.count('implied_prob')}, {self.positions.live_count()} live)")
+        rev_count = self.positions.count('reversion')
+        mention_count = self.positions.count('mention_buy_no')
+        print(f"  Open positions: {self.positions.count()} (rev={rev_count}, mention={mention_count}, {self.positions.live_count()} live)")
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
             print(f"  Daily P&L: ${daily_pnl:.2f}")
+
+
+    def _execute_mention_entry(self, sig):
+        """Execute a mention BUY NO entry. Simpler than reversion — fixed $5 bet,
+        buy NO at market, no complex depth sizing."""
+        ticker = sig['ticker']
+        no_price = sig['no_price']
+        no_price_cents = sig['no_price_cents']
+
+        # Fetch orderbook to get actual ask
+        orderbook = self.client.get_orderbook(ticker)
+        if not orderbook:
+            print(f"    No orderbook for {ticker}, skipping")
+            return None
+
+        # Buy NO: derive NO asks from YES bids
+        yes_bids = orderbook.get('yes', [])
+        if isinstance(yes_bids, dict):
+            yes_bids = yes_bids.get('bids', [])
+        if not yes_bids:
+            print(f"    No YES bids (= no NO asks) for {ticker}, skipping")
+            return None
+
+        # Convert YES bids to NO asks
+        no_asks = sorted([[100 - b[0], b[1]] for b in yes_bids], key=lambda x: x[0])
+        if not no_asks:
+            return None
+
+        best_no_ask = no_asks[0][0]  # cents
+
+        # Check price still in range
+        if best_no_ask / 100 < MENTION_MIN_NO_PRICE or best_no_ask / 100 > MENTION_MAX_NO_PRICE:
+            print(f"    NO ask {best_no_ask}c outside range, skipping")
+            return None
+
+        # Calculate contracts for MENTION_BET_DOLLARS
+        contracts = int(MENTION_BET_DOLLARS / (best_no_ask / 100))
+        if contracts < 1:
+            print(f"    Can't buy even 1 contract at {best_no_ask}c for ${MENTION_BET_DOLLARS}, skipping")
+            return None
+
+        bet_dollars = round(contracts * best_no_ask / 100, 2)
+        print(f"    Sizing: {contracts} NO @ {best_no_ask}c = ${bet_dollars:.2f}")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-MEN-{uuid.uuid4().hex[:8]}',
+                'fill_price': best_no_ask / 100,
+                'fill_count': contracts,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+            }
+            self.trade_logger.record({
+                'type': 'entry',
+                'strategy': 'mention_buy_no',
+                'ticker': ticker,
+                'side': 'no',
+                'action': 'buy',
+                'contracts': contracts,
+                'price_cents': best_no_ask,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+            })
+            print(f"    DRY RUN: would buy {contracts} NO @ {best_no_ask}c (${bet_dollars:.2f})")
+            return order_info
+
+        # Live order: buy NO at best ask + 1c (to improve fill chance)
+        buy_price = min(best_no_ask + 1, 65)  # Don't exceed our max NO price
+        order = self.client.create_order(
+            ticker=ticker,
+            side='no',
+            action='buy',
+            count=contracts,
+            price_cents=buy_price,
+        )
+        if not order:
+            print(f"    Mention order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    Order placed: {order_id} ({contracts} NO @ {buy_price}c)")
+
+        # Wait for fill
+        time.sleep(ORDER_WAIT_SECONDS)
+
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                avg_fill = status.get('average_fill_price', buy_price)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    self.client.cancel_order(order_id)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                }
+                self.trade_logger.record({
+                    'type': 'entry',
+                    'strategy': 'mention_buy_no',
+                    'ticker': ticker,
+                    'order_id': order_id,
+                    'side': 'no',
+                    'action': 'buy',
+                    'contracts_filled': filled,
+                    'price_cents': buy_price,
+                    'avg_fill_price': avg_fill,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                })
+                print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
+                return info
+
+        # Not filled — cancel
+        self.client.cancel_order(order_id)
+        print(f"    Not filled, canceled {order_id}")
+        return None
 
 
 if __name__ == "__main__":
