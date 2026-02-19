@@ -1265,6 +1265,10 @@ class KalshiPositionTracker:
     def live_count(self):
         return sum(1 for p in self.positions if p.get('is_live'))
 
+    def has_open_ticker(self, ticker):
+        """Check if there's already an open position for this ticker."""
+        return any(p.get('ticker') == ticker for p in self.positions)
+
 
 # =====================================================================
 # ORDER EXECUTOR
@@ -1877,6 +1881,10 @@ class KalshiReversionScanner:
                     if not mention_allowed:
                         print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
                         break
+
+                    # Skip if we already have an open position on this ticker
+                    if self.positions.has_open_ticker(sig['ticker']):
+                        continue
 
                     no_c = sig.get('no_price_cents', 0)
                     hrs = sig.get('hours_before_close', 0)
