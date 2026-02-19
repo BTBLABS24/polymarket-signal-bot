@@ -150,6 +150,7 @@ MENTION_BET_DOLLARS = 1           # $1 per signal (testing)
 MENTION_MAX_NO_PRICE = 0.65       # Only buy NO when NO <= 65c (YES >= 35c)
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
+MENTION_MAX_CLOSE_HOURS = 48      # Only bet if close_time is within 48h (capital efficiency)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
@@ -917,7 +918,7 @@ class MentionBuyNoDetector:
         Returns list of signal dicts compatible with OrderExecutor.
         """
         signals = []
-        debug_counts = {'total': 0, 'skipped_nba_earn': 0,
+        debug_counts = {'total': 0, 'skipped_nba_earn': 0, 'too_far': 0,
                         'no_price': 0, 'price_out_range': 0,
                         'cooldown': 0, 'eligible': 0}
 
@@ -936,7 +937,7 @@ class MentionBuyNoDetector:
                 debug_counts['skipped_nba_earn'] += 1
                 continue
 
-            # Parse close_time for position tracking (not filtering)
+            # Parse close_time — skip if too far out (capital efficiency)
             close_time_str = m.get('close_time', '')
             close_ts = now_ts + 24 * 3600  # default: 24h from now
             if close_time_str:
@@ -947,6 +948,11 @@ class MentionBuyNoDetector:
                     close_ts = close_dt.timestamp()
                 except Exception:
                     pass
+
+            hours_to_close = (close_ts - now_ts) / 3600
+            if hours_to_close > MENTION_MAX_CLOSE_HOURS:
+                debug_counts['too_far'] += 1
+                continue
 
             # Get current YES price → derive NO price
             yes_price = None
@@ -1012,6 +1018,7 @@ class MentionBuyNoDetector:
         # Print debug breakdown
         print(f"  Mention filter: {debug_counts['total']} checked, "
               f"{debug_counts['skipped_nba_earn']} NBA/Earn, "
+              f"{debug_counts['too_far']} >{MENTION_MAX_CLOSE_HOURS}h, "
               f"{debug_counts['no_price']} no price, "
               f"{debug_counts['price_out_range']} price OOR, "
               f"{debug_counts['cooldown']} cooldown, "
