@@ -1850,6 +1850,11 @@ class KalshiReversionScanner:
                 print(f"  SIGNAL: {sig['fade_action']} '{sig['title'][:50]}' @ {entry_c}c "
                       f"(move {sig['price_move']:+.3f}, {sig['n_small_trades']} trades)")
 
+                # Skip if we already have an open position on this ticker
+                if self.positions.has_open_ticker(sig['ticker']):
+                    print(f"    DUPE: already have open position on {sig['ticker']}, skipping")
+                    continue
+
                 order_info = None
                 event = sig.get('event_ticker', '')
                 exposure = self.positions.event_exposure(event)
