@@ -153,7 +153,7 @@ MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
-MENTION_MAX_EVENT_DOLLARS = 20    # Max $ per event (spread across tickers)
+MENTION_MAX_EVENT_DOLLARS = 10    # Max $ per event (spread across tickers)
 # Series to scan (ex NBA/Earnings per backtest — weakest ROI categories)
 MENTION_SCAN_SERIES = [
     # Sports (ex NBA) — NFL +80%, NCAA +60%, Fight +34%
