@@ -321,7 +321,7 @@ class KalshiClient:
         all_trades = []
         cursor = None
         pages = 0
-        max_pages = 50
+        max_pages = 15  # Cap at 15K trades — 50K was crashing the container
         while pages < max_pages:
             trades, cursor = self.get_trades(limit=TRADES_PER_PAGE, cursor=cursor)
             if not trades:
@@ -1838,8 +1838,7 @@ class KalshiReversionScanner:
 
         if trades:
             tickers = set(t.get('ticker', '') for t in trades)
-            allowed = [t for t in tickers if self.client.is_allowed_ticker(t)]
-            print(f"  Unique markets: {len(tickers)}, allowed: {len(allowed)}")
+            print(f"  Unique markets: {len(tickers)}")
 
             # 2. Detect signals
             signals = self.detector.detect(trades, self.client, now)
