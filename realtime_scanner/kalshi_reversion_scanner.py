@@ -336,6 +336,9 @@ class KalshiClient:
 
     def is_allowed_ticker(self, ticker):
         ticker_upper = ticker.upper()
+        # Block all mention markets (price moves = real info, not retail herding)
+        if 'MENTION' in ticker_upper:
+            return False
         for prefix in EXCLUDED_PREFIXES:
             if ticker_upper.startswith(prefix.upper()):
                 return False
@@ -1064,7 +1067,14 @@ class OrderExecutor:
             print(f"    Book too thin for {ticker} (min ${MIN_BET_DOLLARS}), skipping")
             return None
 
+        # Hard cap: re-derive contracts so dollar cost never exceeds MAX_BET_DOLLARS
         bet_dollars = round(contracts * best_ask_cents / 100, 2)
+        if bet_dollars > MAX_BET_DOLLARS and best_ask_cents > 0:
+            contracts = int(MAX_BET_DOLLARS / (best_ask_cents / 100))
+            bet_dollars = round(contracts * best_ask_cents / 100, 2)
+            if contracts < 1:
+                print(f"    Can't fit within ${MAX_BET_DOLLARS} at {best_ask_cents}c, skipping")
+                return None
 
         # Slippage check
         slippage_pct = (best_ask_cents - target_price_cents) / target_price_cents * 100 if target_price_cents > 0 else 0
