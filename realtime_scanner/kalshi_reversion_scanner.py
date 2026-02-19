@@ -910,22 +910,29 @@ class MentionBuyNoDetector:
         Returns list of signal dicts compatible with OrderExecutor.
         """
         signals = []
+        debug_counts = {'total': 0, 'skipped_nba_earn': 0, 'no_close': 0,
+                        'too_far': 0, 'too_close': 0, 'no_price': 0,
+                        'price_out_range': 0, 'cooldown': 0, 'eligible': 0}
 
         for m in open_markets:
             ticker = m.get('ticker', '')
             if not ticker:
                 continue
+            debug_counts['total'] += 1
 
             # Skip NBA and Earnings (weakest categories in backtest)
             ticker_upper = ticker.upper()
             if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
+                debug_counts['skipped_nba_earn'] += 1
                 continue
             if 'EARNINGS' in ticker_upper:
+                debug_counts['skipped_nba_earn'] += 1
                 continue
 
             # Check close_time is within 4h
             close_time_str = m.get('close_time', '')
             if not close_time_str:
+                debug_counts['no_close'] += 1
                 continue
             try:
                 close_dt = datetime.fromisoformat(
@@ -933,10 +940,15 @@ class MentionBuyNoDetector:
                 )
                 close_ts = close_dt.timestamp()
             except Exception:
+                debug_counts['no_close'] += 1
                 continue
 
             hours_before = (close_ts - now_ts) / 3600
-            if hours_before < 0 or hours_before > MENTION_MAX_HOURS_BEFORE_CLOSE:
+            if hours_before < 0:
+                debug_counts['too_close'] += 1
+                continue
+            if hours_before > MENTION_MAX_HOURS_BEFORE_CLOSE:
+                debug_counts['too_far'] += 1
                 continue
 
             # Get current YES price → derive NO price
@@ -956,18 +968,23 @@ class MentionBuyNoDetector:
                     except (ValueError, TypeError):
                         pass
             if yes_price is None:
+                debug_counts['no_price'] += 1
                 continue
 
             no_price = 1 - yes_price
             if no_price < MENTION_MIN_NO_PRICE or no_price > MENTION_MAX_NO_PRICE:
+                debug_counts['price_out_range'] += 1
                 continue
 
             # Cooldown check
             last_signal = self.signal_history.get(ticker, 0)
             if now_ts - last_signal < MENTION_COOLDOWN_SECONDS:
+                debug_counts['cooldown'] += 1
                 continue
 
-            # Record cooldown
+            debug_counts['eligible'] += 1
+
+            # Record cooldown ONLY for tickers we actually signal
             self.signal_history[ticker] = now_ts
             self._save()
 
@@ -993,6 +1010,16 @@ class MentionBuyNoDetector:
                 'hours_before_close': round(hours_before, 2),
                 'close_ts': close_ts,
             })
+
+        # Print debug breakdown so we can see WHY markets get filtered
+        print(f"  Mention filter: {debug_counts['total']} total, "
+              f"{debug_counts['skipped_nba_earn']} NBA/Earn, "
+              f"{debug_counts['too_far']} >4h away, "
+              f"{debug_counts['too_close']} past close, "
+              f"{debug_counts['no_price']} no price, "
+              f"{debug_counts['price_out_range']} price OOR, "
+              f"{debug_counts['cooldown']} cooldown, "
+              f"{debug_counts['eligible']} eligible")
 
         return signals
 
@@ -1463,26 +1490,45 @@ class OrderExecutor:
                             self.client.cancel_order(prev_id)
                     return _handle_fill(order_id, status, price)
                 else:
-                    # Not filled -- cancel and verify it's actually canceled
-                    canceled = self.client.cancel_order(order_id)
-                    if not canceled:
-                        print(f"    Cancel may have failed for {order_id}, re-checking...")
-                    # Re-check: order may have filled between our check and cancel
-                    time.sleep(0.5)
-                    recheck = self.client.get_order(order_id)
-                    if recheck and recheck.get('quantity_filled', 0) > 0:
-                        print(f"    Late fill detected on {order_id}")
-                        for prev_id in placed_order_ids:
-                            if prev_id != order_id:
-                                self.client.cancel_order(prev_id)
-                        return _handle_fill(order_id, recheck, price)
+                    # Not filled -- cancel
+                    self.client.cancel_order(order_id)
+                    # Wait and KEEP re-checking until order is confirmed dead
+                    # (status = 'canceled' or filled > 0). This prevents placing
+                    # a new order while the old one might still fill.
+                    for _wait in range(6):  # up to 3s total
+                        time.sleep(0.5)
+                        recheck = self.client.get_order(order_id)
+                        if not recheck:
+                            break
+                        recheck_filled = recheck.get('quantity_filled', 0)
+                        if recheck_filled > 0:
+                            print(f"    Late fill detected on {order_id}")
+                            for prev_id in placed_order_ids:
+                                if prev_id != order_id:
+                                    self.client.cancel_order(prev_id)
+                            return _handle_fill(order_id, recheck, price)
+                        recheck_status = recheck.get('status', '')
+                        if recheck_status in ('canceled', 'cancelled'):
+                            break
+                    else:
+                        # Couldn't confirm canceled — don't retry, bail out
+                        print(f"    Could not confirm cancel for {order_id}, stopping retries to avoid dupes")
+                        break
                     print(f"    Not filled at {price}c, retrying...")
 
         # Loop exited without a fill -- cancel ALL resting orders to prevent
         # late fills that would exceed the $50 max bet.
         for oid in placed_order_ids:
             self.client.cancel_order(oid)
-            time.sleep(0.2)
+            time.sleep(0.3)
+            # Double-check: if any fill came through, return it
+            final_check = self.client.get_order(oid)
+            if final_check and final_check.get('quantity_filled', 0) > 0:
+                print(f"    Late fill detected during cleanup on {oid}")
+                for prev_id in placed_order_ids:
+                    if prev_id != oid:
+                        self.client.cancel_order(prev_id)
+                return _handle_fill(oid, final_check, best_ask_cents)
         print(f"    Failed to fill after {MAX_ORDER_RETRIES + 1} attempts (all orders canceled)")
         return None
 
