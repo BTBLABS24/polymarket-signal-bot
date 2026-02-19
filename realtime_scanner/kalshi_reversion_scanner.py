@@ -142,17 +142,18 @@ IMPL_EXCLUDED_PREFIXES = [
 
 # --- Mention BUY NO Strategy ---
 # Backtest: YES is systematically overpriced on mention markets.
-# Refined: NO 5-65c, ex NBA/Earnings → +53% ROI (train +51%, test +56%)
-# 4,410 trades, 155 active days, 0 negative rolling 21d windows.
-# Even with 3c slippage: +46% ROI. Holds across all time periods.
+# NO 5-65c, ex NBA/Earnings, NO time filter → +73% ROI (train +62%, test +89%)
+# 11,104 trades, 232 active days. Only 50 negative days out of 232.
+# Kalshi uses can_close_early with far-future deadline, so close_time
+# is NOT the event time. We filter by price range only.
 MENTION_BET_DOLLARS = 4           # $4 per signal
 MENTION_MAX_NO_PRICE = 0.65       # Only buy NO when NO <= 65c (YES >= 35c)
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
-MENTION_MAX_HOURS_BEFORE_CLOSE = 4  # Only trade within 4h of close_time
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
-MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker
+MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
+MENTION_MAX_EVENT_DOLLARS = 20    # Max $ per event (spread across tickers)
 # Series to scan (ex NBA/Earnings per backtest — weakest ROI categories)
 MENTION_SCAN_SERIES = [
     # Sports (ex NBA) — NFL +80%, NCAA +60%, Fight +34%
@@ -903,16 +904,22 @@ class MentionBuyNoDetector:
         """Scan open mention markets for BUY NO opportunities.
 
         For each market:
-        - Must be within 4h of close_time
         - YES price must imply NO price in [5c, 65c]
         - Must not be in cooldown
+        - Market must be open/active (fetched with status=open)
+
+        NOTE: We do NOT filter by close_time. Kalshi mention markets use
+        can_close_early=True and set close_time to a far-future deadline
+        (sometimes 200-500h out). The actual event closes much earlier.
+        The price range itself is the real filter — if NO is 5-65c,
+        the market is actively trading and worth betting on.
 
         Returns list of signal dicts compatible with OrderExecutor.
         """
         signals = []
-        debug_counts = {'total': 0, 'skipped_nba_earn': 0, 'no_close': 0,
-                        'too_far': 0, 'too_close': 0, 'no_price': 0,
-                        'price_out_range': 0, 'cooldown': 0, 'eligible': 0}
+        debug_counts = {'total': 0, 'skipped_nba_earn': 0,
+                        'no_price': 0, 'price_out_range': 0,
+                        'cooldown': 0, 'eligible': 0}
 
         for m in open_markets:
             ticker = m.get('ticker', '')
@@ -929,27 +936,17 @@ class MentionBuyNoDetector:
                 debug_counts['skipped_nba_earn'] += 1
                 continue
 
-            # Check close_time is within 4h
+            # Parse close_time for position tracking (not filtering)
             close_time_str = m.get('close_time', '')
-            if not close_time_str:
-                debug_counts['no_close'] += 1
-                continue
-            try:
-                close_dt = datetime.fromisoformat(
-                    close_time_str.replace('Z', '+00:00')
-                )
-                close_ts = close_dt.timestamp()
-            except Exception:
-                debug_counts['no_close'] += 1
-                continue
-
-            hours_before = (close_ts - now_ts) / 3600
-            if hours_before < 0:
-                debug_counts['too_close'] += 1
-                continue
-            if hours_before > MENTION_MAX_HOURS_BEFORE_CLOSE:
-                debug_counts['too_far'] += 1
-                continue
+            close_ts = now_ts + 24 * 3600  # default: 24h from now
+            if close_time_str:
+                try:
+                    close_dt = datetime.fromisoformat(
+                        close_time_str.replace('Z', '+00:00')
+                    )
+                    close_ts = close_dt.timestamp()
+                except Exception:
+                    pass
 
             # Get current YES price → derive NO price
             yes_price = None
@@ -976,9 +973,10 @@ class MentionBuyNoDetector:
                 debug_counts['price_out_range'] += 1
                 continue
 
-            # Cooldown check
+            # Cooldown check — use longer cooldown since we're not time-gated
+            # Once we bet on a ticker, don't bet again for 24h
             last_signal = self.signal_history.get(ticker, 0)
-            if now_ts - last_signal < MENTION_COOLDOWN_SECONDS:
+            if now_ts - last_signal < 24 * 3600:
                 debug_counts['cooldown'] += 1
                 continue
 
@@ -1007,15 +1005,13 @@ class MentionBuyNoDetector:
                 'signal_type': 'mention_buy_no',
                 'no_price': round(no_price, 4),
                 'no_price_cents': no_price_cents,
-                'hours_before_close': round(hours_before, 2),
+                'hours_before_close': round((close_ts - now_ts) / 3600, 2),
                 'close_ts': close_ts,
             })
 
-        # Print debug breakdown so we can see WHY markets get filtered
-        print(f"  Mention filter: {debug_counts['total']} total, "
+        # Print debug breakdown
+        print(f"  Mention filter: {debug_counts['total']} checked, "
               f"{debug_counts['skipped_nba_earn']} NBA/Earn, "
-              f"{debug_counts['too_far']} >4h away, "
-              f"{debug_counts['too_close']} past close, "
               f"{debug_counts['no_price']} no price, "
               f"{debug_counts['price_out_range']} price OOR, "
               f"{debug_counts['cooldown']} cooldown, "
@@ -1199,7 +1195,10 @@ class KalshiPositionTracker:
             is_mention = pos.get('signal_type') == 'mention_buy_no'
 
             if is_mention:
-                # Mention positions: check if market has settled
+                # Mention positions: poll for settlement every cycle.
+                # Clear cache to get fresh status (close_time can be far future
+                # because Kalshi uses can_close_early with a distant deadline).
+                client.market_cache.pop(pos['ticker'], None)
                 market = client.get_market(pos['ticker'])
                 status = market.get('status', 'open') if market else 'open'
 
@@ -1223,33 +1222,6 @@ class KalshiPositionTracker:
                     pos['close_time'] = now
                     self.closed.append(pos)
                     alerts.append(('settled', pos))
-                    continue
-                elif now > pos['exit_time'] + 3600:
-                    # Safety: if 1h past expected close and still not settled,
-                    # force-close to avoid stuck positions
-                    client.market_cache.pop(pos['ticker'], None)
-                    market = client.get_market(pos['ticker'])
-                    status = market.get('status', 'open') if market else 'open'
-                    if status in ('settled', 'finalized'):
-                        # Retry settlement logic
-                        result = market.get('result', '')
-                        fill_price = pos.get('fill_price', pos.get('no_price', 0))
-                        fill_count = pos.get('fill_count', 0)
-                        if result == 'no':
-                            pnl = fill_count * (1 - fill_price)
-                        elif result == 'yes':
-                            pnl = -(fill_count * fill_price)
-                        else:
-                            pnl = 0
-                        pos['settle_pnl'] = round(pnl, 2)
-                        pos['result'] = result
-                        pos['status'] = 'settled'
-                        pos['close_time'] = now
-                        self.closed.append(pos)
-                        alerts.append(('settled', pos))
-                        continue
-                    # Still not settled — keep waiting
-                    still_open.append(pos)
                     continue
                 else:
                     still_open.append(pos)
@@ -1935,6 +1907,13 @@ class KalshiReversionScanner:
                     # Skip if we already have an open position on this ticker
                     if self.positions.has_open_ticker(sig['ticker']):
                         continue
+
+                    # Per-event exposure cap
+                    event = sig.get('event_ticker', '')
+                    if event:
+                        event_exp = self.positions.event_exposure(event)
+                        if event_exp >= MENTION_MAX_EVENT_DOLLARS:
+                            continue
 
                     no_c = sig.get('no_price_cents', 0)
                     hrs = sig.get('hours_before_close', 0)
