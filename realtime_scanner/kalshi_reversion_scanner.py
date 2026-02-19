@@ -146,7 +146,7 @@ IMPL_EXCLUDED_PREFIXES = [
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 4           # $4 per signal
+MENTION_BET_DOLLARS = 1           # $1 per signal (testing)
 MENTION_MAX_NO_PRICE = 0.65       # Only buy NO when NO <= 65c (YES >= 35c)
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
