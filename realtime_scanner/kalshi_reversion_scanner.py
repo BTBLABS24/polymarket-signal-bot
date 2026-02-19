@@ -99,6 +99,8 @@ EXCLUDED_PREFIXES = [
     # Sports that leaked in live trading
     'KXWTACHALLENGER', 'KXWOMHOCKEY', 'KXALEAGUE',
     'KXWOSSKATE', 'KXWOSHORT', 'KXWOSPEED',
+    'KXWOFSKATE', 'KXWOBIATHLON', 'KXWOBOB', 'KXWOLUGE',
+    'KXWOXC', 'KXWOCOMBI', 'KXWOJUMP', 'KXWOALPINE',
     # Crypto
     'KXBTC', 'KXETH', 'KXSOL', 'KXCRYPTO', 'KXDOGE', 'KXXRP',
     # Financials (22% WR, -18.6% avg ROI in backtest)
@@ -1430,8 +1432,7 @@ class KalshiNotifier:
         msg = (
             f"Kalshi Auto-Trading Bot Started\n\n"
             f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE TRADING'}\n"
-            f"Strategy 1: Retail reversion (SELL-only, ${MAX_BET_DOLLARS}/bet, 24h hold)\n"
-            f"Strategy 2: Implied prob violations (${IMPL_MAX_BET_DOLLARS}/bet, 12h hold)\n"
+            f"Strategy: Retail reversion (SELL-only, ${MAX_BET_DOLLARS}/bet, 24h hold)\n"
             f"Categories: No sports/crypto/financials\n"
             f"Max positions: {MAX_OPEN_POSITIONS}\n"
             f"{bal_line}"
@@ -1510,17 +1511,12 @@ class KalshiReversionScanner:
         print(f"\n[{now_str}] Scan cycle")
 
         reversion_allowed = True
-        impl_allowed = True
 
-        # Safety: check max positions (separate limits per strategy)
+        # Safety: check max positions
         rev_count = self.positions.count('reversion')
-        impl_count = self.positions.count('implied_prob')
         if rev_count >= MAX_OPEN_POSITIONS:
-            print(f"  MAX REVERSION POSITIONS: {rev_count}/{MAX_OPEN_POSITIONS}. No new reversion orders.")
+            print(f"  MAX POSITIONS: {rev_count}/{MAX_OPEN_POSITIONS}. No new orders.")
             reversion_allowed = False
-        if impl_count >= MAX_IMPL_POSITIONS:
-            print(f"  MAX IMPL POSITIONS: {impl_count}/{MAX_IMPL_POSITIONS}. No new impl orders.")
-            impl_allowed = False
 
         # 1. Fetch last 65 min of trades (extra 5min buffer)
         trades = self.client.get_all_recent_trades(since_minutes=65)
@@ -1552,42 +1548,11 @@ class KalshiReversionScanner:
                     await self.notifier.send_signal(sig, order_info)
                     self.positions.add(sig, order_info)
 
-        # 3. Implied probability violation scan
-        print(f"  Scanning implied probability violations...")
-        try:
-            all_open_markets = self.client.get_all_open_markets()
-            print(f"  Open markets fetched: {len(all_open_markets)}")
-            impl_signals = self.impl_detector.detect(all_open_markets, self.client, now)
-            print(f"  Impl prob signals: {len(impl_signals)}")
-
-            for sig in impl_signals:
-                entry_c = int(sig['entry_price'] * 100)
-                print(f"  IMPL PROB: {sig['fade_action']} '{sig['title'][:50]}' @ {entry_c}c "
-                      f"(sum={sig['prob_sum']:.2f}, dev={sig['deviation']:+.2f}, "
-                      f"{sig['n_outcomes']} outcomes)")
-
-                order_info = None
-                event = sig.get('event_ticker', '')
-                exposure = self.positions.event_exposure(event)
-                if exposure >= IMPL_MAX_BET_DOLLARS and event:
-                    print(f"    EVENT CAP: already ${exposure:.2f} on {event} "
-                          f"(max ${IMPL_MAX_BET_DOLLARS}), skipping")
-                elif not impl_allowed:
-                    print(f"    MAX IMPL POSITIONS reached, skipping")
-                elif self.client.can_trade:
-                    # Use impl prob bet sizing: override MAX_BET temporarily
-                    saved_max = globals()['MAX_BET_DOLLARS']
-                    globals()['MAX_BET_DOLLARS'] = IMPL_MAX_BET_DOLLARS
-                    order_info = self.executor.execute_entry(sig)
-                    globals()['MAX_BET_DOLLARS'] = saved_max
-
-                if order_info:
-                    await self.notifier.send_impl_prob_signal(sig, order_info)
-                    self.positions.add(sig, order_info)
-        except Exception as e:
-            print(f"  Impl prob scan error: {e}")
-            import traceback
-            traceback.print_exc()
+        # 3. Implied probability violation scan — DISABLED
+        # Backtest showed too few diverse events (1 housing event = 67% of profit)
+        # and sports matches (e.g. Gaziantep vs Trabzonspor) leaked through as
+        # false "multi-outcome" events. Not enough edge to justify the complexity.
+        print(f"  Impl prob strategy: DISABLED")
 
         # 4. Check positions for exit (24h reversion, 12h impl prob)
         alerts = self.positions.check(self.client)
