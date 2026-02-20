@@ -157,6 +157,7 @@ MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 10    # Max $ per event (spread across tickers)
 MENTION_ORDER_REST_SECONDS = 600  # Leave orders resting 10 min before canceling
+MENTION_MAX_RESTING_ORDERS = 10   # Max concurrent resting orders (capital lockup cap)
 # Series to scan (ex NBA/Earnings per backtest — weakest ROI categories)
 MENTION_SCAN_SERIES = [
     # Sports (ex NBA) — NFL +80%, NCAA +60%, Fight +34%
@@ -2023,11 +2024,18 @@ class KalshiReversionScanner:
 
             if mention_markets:
                 mention_signals = self.mention_detector.detect(mention_markets, self.client, now)
+                # Sort by closest to close (best liquidity + edge)
+                mention_signals.sort(key=lambda s: s.get('hours_before_close', 999))
                 print(f"  Mention signals: {len(mention_signals)}")
 
                 for sig in mention_signals:
                     if not mention_allowed:
                         print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
+                        break
+
+                    # Cap resting orders to limit capital lockup
+                    if len(self._resting_mention_orders) >= MENTION_MAX_RESTING_ORDERS:
+                        print(f"    RESTING CAP: {len(self._resting_mention_orders)}/{MENTION_MAX_RESTING_ORDERS}, waiting for fills")
                         break
 
                     # Skip if we already have an open position or resting order
