@@ -147,8 +147,8 @@ IMPL_EXCLUDED_PREFIXES = [
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 1           # $1 per signal (testing)
-MENTION_MAX_NO_PRICE = 0.65       # Only buy NO when NO <= 65c (YES >= 35c)
+MENTION_BET_DOLLARS = 2           # $2 per signal
+MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (events live with 24h close)
@@ -529,6 +529,88 @@ class KalshiClient:
             except Exception as e:
                 print(f'  API error (mention series {series}): {e}')
         return all_markets
+
+    def get_milestones(self):
+        """Fetch milestones for mention series from Kalshi API.
+
+        Milestones contain the real-world event start time (start_date) that
+        the Kalshi UI shows as "Begins in X hours". This is NOT available on
+        market or event endpoints — it's a separate system.
+
+        Uses GET /events?series_ticker=X&with_milestones=true to efficiently
+        fetch milestones scoped to our mention series (vs paginating 10k+
+        milestones on the standalone /milestones endpoint).
+
+        Returns dict: event_ticker -> {'start_ts': float, 'end_ts': float|None, 'title': str}
+        """
+        now = time.time()
+        # Cache milestones for 10 minutes
+        if (hasattr(self, '_milestones_cache') and
+                now - self._milestones_cache_ts < 600):
+            return self._milestones_cache
+
+        series_list = getattr(self, '_mention_series_cache', list(MENTION_SCAN_SERIES))
+        milestone_map = {}  # event_ticker -> {start_ts, end_ts, title}
+
+        for series in series_list:
+            try:
+                resp = self.session.get(
+                    f'{KALSHI_BASE}/events',
+                    params={
+                        'series_ticker': series,
+                        'limit': 100,
+                        'with_milestones': 'true',
+                    },
+                    timeout=15,
+                )
+                if resp.status_code == 429:
+                    time.sleep(2)
+                    continue
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                for ms in data.get('milestones', []):
+                    start_str = ms.get('start_date', '')
+                    if not start_str:
+                        continue
+                    try:
+                        start_ts = datetime.fromisoformat(
+                            start_str.replace('Z', '+00:00')
+                        ).timestamp()
+                    except Exception:
+                        continue
+
+                    end_ts = None
+                    end_str = ms.get('end_date', '')
+                    if end_str:
+                        try:
+                            end_ts = datetime.fromisoformat(
+                                end_str.replace('Z', '+00:00')
+                            ).timestamp()
+                        except Exception:
+                            pass
+
+                    title = ms.get('title', '')
+                    for et in ms.get('primary_event_tickers', []):
+                        milestone_map[et] = {
+                            'start_ts': start_ts,
+                            'end_ts': end_ts,
+                            'title': title,
+                        }
+                    for et in ms.get('related_event_tickers', []):
+                        if et not in milestone_map:
+                            milestone_map[et] = {
+                                'start_ts': start_ts,
+                                'end_ts': end_ts,
+                                'title': title,
+                            }
+            except Exception as e:
+                print(f'  Milestones fetch error ({series}): {e}')
+
+        self._milestones_cache = milestone_map
+        self._milestones_cache_ts = now
+        print(f"  Milestones: {len(milestone_map)} events with start times")
+        return milestone_map
 
     # --- Authenticated endpoints (trading) ---
 
@@ -984,7 +1066,7 @@ class MentionBuyNoDetector:
         Returns list of signal dicts compatible with OrderExecutor.
         """
         signals = []
-        debug_counts = {'total': 0, 'skipped_nba_earn': 0, 'too_far': 0,
+        debug_counts = {'total': 0, 'skipped_cat': 0, 'too_far': 0,
                         'no_price': 0, 'price_out_range': 0,
                         'cooldown': 0, 'eligible': 0}
 
@@ -994,13 +1076,20 @@ class MentionBuyNoDetector:
                 continue
             debug_counts['total'] += 1
 
-            # Skip NBA (+29% ROI but small edge) and Earnings (+11% ROI)
+            # Skip categories with poor ROI at 3h pre-event, NO 5-30c:
+            # NBA (-2%), Fight (+16%), Press_Brief (+18%), Earnings (no milestones)
             ticker_upper = ticker.upper()
             if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
-                debug_counts['skipped_nba_earn'] += 1
+                debug_counts['skipped_cat'] += 1
                 continue
             if 'EARNINGS' in ticker_upper:
-                debug_counts['skipped_nba_earn'] += 1
+                debug_counts['skipped_cat'] += 1
+                continue
+            if 'FIGHTMENTION' in ticker_upper:
+                debug_counts['skipped_cat'] += 1
+                continue
+            if 'SECPRESS' in ticker_upper or 'LEAVITT' in ticker_upper:
+                debug_counts['skipped_cat'] += 1
                 continue
 
             # Parse close_time — skip if too far out (capital efficiency)
@@ -1097,7 +1186,7 @@ class MentionBuyNoDetector:
 
         # Print debug breakdown
         print(f"  Mention filter: {debug_counts['total']} checked, "
-              f"{debug_counts['skipped_nba_earn']} NBA/Earn, "
+              f"{debug_counts['skipped_cat']} skipped(NBA/Earn/Fight/Press), "
               f"{debug_counts['too_far']} >{MENTION_MAX_CLOSE_HOURS}h, "
               f"{debug_counts['no_price']} no price, "
               f"{debug_counts['price_out_range']} price OOR, "
@@ -1964,7 +2053,7 @@ class KalshiReversionScanner:
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
         print(f"Strategy 1: Fade retail surges, 24h hold")
-        print(f"Strategy 2: Mention BUY NO, ${MENTION_BET_DOLLARS}/bet, hold until settle")
+        print(f"Strategy 2: Mention BUY NO 5-30c, ${MENTION_BET_DOLLARS}/bet, 1h pre-event, ex NBA/Fight/Press")
         print(f"Max bet: ${MAX_BET_DOLLARS}/signal (reversion), ${MENTION_BET_DOLLARS}/signal (mention)")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
@@ -2101,17 +2190,51 @@ class KalshiReversionScanner:
                 for et in stale:
                     del self._event_volume_prev[et]
 
-                # Inject event-level metrics into each signal
+                # Fetch milestones to get real event start times
+                # The Kalshi UI "Begins in X hours" comes from milestones API
+                milestones = self.client.get_milestones()
+
+                # Inject event-level metrics + milestone start time into each signal
                 for sig in mention_signals:
                     et = sig.get('event_ticker', '')
                     sig['event_volume_24h'] = event_vol_now.get(et, 0)
                     sig['event_velocity'] = event_velocity.get(et, 0)
 
-                # Sort by event velocity (highest spike first)
-                # Events with biggest volume increase since last scan = most likely live
-                mention_signals.sort(key=lambda s: s.get('event_velocity', 0), reverse=True)
-                n_live = sum(1 for s in mention_signals if s.get('event_velocity', 0) > 0)
-                print(f"  Mention signals: {len(mention_signals)} ({n_live} with event activity)")
+                    # Inject milestone start/end time
+                    ms = milestones.get(et)
+                    if ms:
+                        sig['event_start_ts'] = ms['start_ts']
+                        sig['event_end_ts'] = ms.get('end_ts')
+                        sig['hours_to_event'] = round((ms['start_ts'] - now) / 3600, 2)
+                        # Live = started and not yet ended
+                        started = ms['start_ts'] <= now
+                        ended = ms.get('end_ts') and ms['end_ts'] <= now
+                        sig['event_live'] = started and not ended
+                    else:
+                        sig['event_start_ts'] = None
+                        sig['event_end_ts'] = None
+                        sig['hours_to_event'] = None
+                        sig['event_live'] = False
+
+                # Filter: only bet ~3h before event start
+                # Backtest (21d): NO 5-30c, ex NBA/Fight/Press at 1h pre
+                #   +127% ROI, $63.17/day, 18/20 win days
+                # Cheap NO has best ROI — enter just before event starts
+                def in_entry_window(s):
+                    h = s.get('hours_to_event')
+                    if h is None:
+                        return False
+                    # Enter when event starts in 0-1.5 hours
+                    # 1.5h upper bound = 30min buffer for 5-min scan cycle
+                    # Also allow events just started (up to 10 min ago)
+                    return -10/60 <= h <= 1.5
+
+                eligible = [s for s in mention_signals if in_entry_window(s)]
+                n_total = len(mention_signals)
+                n_with_start = sum(1 for s in mention_signals if s.get('event_start_ts'))
+                n_eligible = len(eligible)
+                mention_signals = eligible
+                print(f"  Mention signals: {n_total} total, {n_with_start} with milestone, {n_eligible} in 0-1h window")
 
                 for sig in mention_signals:
                     if not mention_allowed:
@@ -2137,10 +2260,15 @@ class KalshiReversionScanner:
                             continue
 
                     no_c = sig.get('no_price_cents', 0)
-                    evt_vel = sig.get('event_velocity', 0)
+                    h2e = sig.get('hours_to_event')
                     evt_vol = sig.get('event_volume_24h', 0)
-                    hrs = sig.get('hours_before_close', 0)
-                    print(f"  MENTION: BUY NO @ {no_c}c '{sig['title'][:50]}' (evt_vel={evt_vel:.0f}/min, evt_vol={evt_vol:,}, {hrs:.1f}h)")
+                    if h2e is not None and h2e > 0:
+                        time_str = f"starts in {h2e:.1f}h"
+                    elif h2e is not None:
+                        time_str = f"started {abs(h2e)*60:.0f}m ago"
+                    else:
+                        time_str = "?"
+                    print(f"  MENTION: BUY NO @ {no_c}c '{sig['title'][:50]}' ({time_str}, evt_vol={evt_vol:,})")
 
                     if low_balance:
                         continue
@@ -2306,6 +2434,7 @@ class KalshiReversionScanner:
             log_event('mention_skip_spread', ticker=ticker, signal_no_cents=no_price_cents,
                       book_no_ask_cents=best_no_ask, reason='outside_range',
                       hours_before_close=sig.get('hours_before_close'),
+                      hours_to_event=sig.get('hours_to_event'),
                       volume_24h=sig.get('volume_24h', 0),
                       event_volume_24h=sig.get('event_volume_24h', 0),
                       event_velocity=sig.get('event_velocity', 0))
@@ -2361,6 +2490,7 @@ class KalshiReversionScanner:
                   contracts=contracts, price_cents=buy_price, bet_dollars=bet_dollars,
                   signal_no_cents=no_price_cents, book_no_ask_cents=best_no_ask,
                   hours_before_close=sig.get('hours_before_close'),
+                  hours_to_event=sig.get('hours_to_event'),
                   volume_24h=sig.get('volume_24h', 0),
                   event_volume_24h=sig.get('event_volume_24h', 0),
                   event_velocity=sig.get('event_velocity', 0))
