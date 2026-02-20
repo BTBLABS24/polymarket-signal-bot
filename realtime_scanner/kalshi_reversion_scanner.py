@@ -1984,7 +1984,7 @@ class KalshiReversionScanner:
         now_str = datetime.fromtimestamp(now, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         print(f"\n[{now_str}] Scan cycle")
 
-        reversion_allowed = True
+        reversion_allowed = False  # Disabled — focusing capital on mention strategy
         low_balance = False
 
         # Check balance
