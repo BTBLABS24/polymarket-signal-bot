@@ -1954,7 +1954,7 @@ class KalshiReversionScanner:
         self.executor = OrderExecutor(self.client, self.trade_logger)
         self._last_mention_scan = 0  # timestamp of last mention scan
         self._resting_mention_orders = {}  # ticker -> {order_id, placed_time, contracts, price_cents, sig}
-        self._mention_volume_prev = {}  # ticker -> (volume_24h, scan_ts) from previous cycle
+        self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
 
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
@@ -2068,35 +2068,50 @@ class KalshiReversionScanner:
             if mention_markets:
                 mention_signals = self.mention_detector.detect(mention_markets, self.client, now)
 
-                # Compute volume velocity: contracts/min since last scan
-                # A spike means the event just went live, regardless of absolute volume
-                current_volumes = {}
-                for sig in mention_signals:
-                    ticker = sig['ticker']
-                    vol_now = sig.get('volume_24h', 0)
-                    current_volumes[ticker] = vol_now
-                    prev = self._mention_volume_prev.get(ticker)
+                # Event-level velocity: sum volume_24h across all sibling markets
+                # sharing the same event_ticker, then track delta between scans.
+                # Backtest: when 20%+ of event volume has traded, ROI jumps to 119-276%.
+                # Event-level aggregation is a much stronger live signal than per-market.
+                event_vol_now = {}  # event_ticker -> sum of volume_24h
+                for m in mention_markets:
+                    et = m.get('event_ticker', m.get('ticker', ''))
+                    vol = 0
+                    try:
+                        vol = int(m.get('volume_24h', 0) or 0)
+                    except (ValueError, TypeError):
+                        pass
+                    event_vol_now[et] = event_vol_now.get(et, 0) + vol
+
+                # Compute event velocity (delta/min since last scan)
+                event_velocity = {}
+                for et, vol_sum in event_vol_now.items():
+                    prev = self._event_volume_prev.get(et)
                     if prev:
                         prev_vol, prev_ts = prev
                         elapsed_min = max((now - prev_ts) / 60, 0.5)
-                        delta = max(vol_now - prev_vol, 0)
-                        sig['volume_velocity'] = round(delta / elapsed_min, 2)
+                        delta = max(vol_sum - prev_vol, 0)
+                        event_velocity[et] = round(delta / elapsed_min, 1)
                     else:
-                        sig['volume_velocity'] = 0
+                        event_velocity[et] = 0
 
                 # Update history for next cycle
-                for ticker, vol in current_volumes.items():
-                    self._mention_volume_prev[ticker] = (vol, now)
-                # Prune tickers no longer in the scan
-                active_tickers = set(current_volumes.keys())
-                stale = [t for t in self._mention_volume_prev if t not in active_tickers]
-                for t in stale:
-                    del self._mention_volume_prev[t]
+                for et, vol_sum in event_vol_now.items():
+                    self._event_volume_prev[et] = (vol_sum, now)
+                stale = [et for et in self._event_volume_prev if et not in event_vol_now]
+                for et in stale:
+                    del self._event_volume_prev[et]
 
-                # Sort by volume velocity (highest spike first)
-                # This prioritizes events that just went live over dormant markets
-                mention_signals.sort(key=lambda s: s.get('volume_velocity', 0), reverse=True)
-                print(f"  Mention signals: {len(mention_signals)}")
+                # Inject event-level metrics into each signal
+                for sig in mention_signals:
+                    et = sig.get('event_ticker', '')
+                    sig['event_volume_24h'] = event_vol_now.get(et, 0)
+                    sig['event_velocity'] = event_velocity.get(et, 0)
+
+                # Sort by event velocity (highest spike first)
+                # Events with biggest volume increase since last scan = most likely live
+                mention_signals.sort(key=lambda s: s.get('event_velocity', 0), reverse=True)
+                n_live = sum(1 for s in mention_signals if s.get('event_velocity', 0) > 0)
+                print(f"  Mention signals: {len(mention_signals)} ({n_live} with event activity)")
 
                 for sig in mention_signals:
                     if not mention_allowed:
@@ -2122,10 +2137,10 @@ class KalshiReversionScanner:
                             continue
 
                     no_c = sig.get('no_price_cents', 0)
-                    vel = sig.get('volume_velocity', 0)
-                    vol = sig.get('volume_24h', 0)
+                    evt_vel = sig.get('event_velocity', 0)
+                    evt_vol = sig.get('event_volume_24h', 0)
                     hrs = sig.get('hours_before_close', 0)
-                    print(f"  MENTION: BUY NO @ {no_c}c '{sig['title'][:50]}' (vel={vel:.1f}/min, vol={vol}, {hrs:.1f}h)")
+                    print(f"  MENTION: BUY NO @ {no_c}c '{sig['title'][:50]}' (evt_vel={evt_vel:.0f}/min, evt_vol={evt_vol:,}, {hrs:.1f}h)")
 
                     if low_balance:
                         continue
@@ -2292,7 +2307,8 @@ class KalshiReversionScanner:
                       book_no_ask_cents=best_no_ask, reason='outside_range',
                       hours_before_close=sig.get('hours_before_close'),
                       volume_24h=sig.get('volume_24h', 0),
-                      volume_velocity=sig.get('volume_velocity', 0))
+                      event_volume_24h=sig.get('event_volume_24h', 0),
+                      event_velocity=sig.get('event_velocity', 0))
             return None
 
         # Calculate contracts for MENTION_BET_DOLLARS
@@ -2346,7 +2362,8 @@ class KalshiReversionScanner:
                   signal_no_cents=no_price_cents, book_no_ask_cents=best_no_ask,
                   hours_before_close=sig.get('hours_before_close'),
                   volume_24h=sig.get('volume_24h', 0),
-                  volume_velocity=sig.get('volume_velocity', 0))
+                  event_volume_24h=sig.get('event_volume_24h', 0),
+                  event_velocity=sig.get('event_velocity', 0))
 
         # Quick check: might fill instantly
         time.sleep(2)
