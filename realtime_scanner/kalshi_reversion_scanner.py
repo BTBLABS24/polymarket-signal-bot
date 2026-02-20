@@ -14,6 +14,7 @@ Uses RSA-PSS signing for Kalshi API authentication.
 
 import asyncio
 import base64
+import csv
 import json
 import os
 import time
@@ -181,6 +182,7 @@ SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_signal_history.json'
 TRADE_LOG_FILE = STATE_DIR / 'kalshi_trade_log.json'
 IMPL_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_impl_signal_history.json'
 MENTION_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_mention_signal_history.json'
+TRADE_HISTORY_CSV = STATE_DIR / 'kalshi_trade_history.csv'
 
 
 # =====================================================================
@@ -1132,10 +1134,75 @@ class KalshiPositionTracker:
                 self.closed = data.get('closed', [])
         except (FileNotFoundError, json.JSONDecodeError):
             pass
+        # One-time backfill: write existing positions to CSV if the file doesn't exist yet
+        if not TRADE_HISTORY_CSV.exists() and (self.positions or self.closed):
+            for pos in self.closed:
+                exit_type = 'EXIT_SETTLED' if pos.get('status') == 'settled' else 'EXIT_CLOSED'
+                self._log_trade_csv(pos, exit_type)
+            for pos in self.positions:
+                self._log_trade_csv(pos, 'ENTRY')
 
     def _save(self):
         with open(POSITIONS_FILE, 'w') as f:
             json.dump({'open': self.positions, 'closed': self.closed[-100:]}, f, indent=2)
+
+    def _log_trade_csv(self, pos, event_type):
+        """Append a row to the CSV trade history. Called on every entry and exit."""
+        csv_headers = [
+            'timestamp', 'event_type', 'ticker', 'title', 'signal_type',
+            'fade_action', 'fade_side', 'entry_price', 'fill_price',
+            'exit_price', 'pre_signal_price', 'price_move',
+            'n_small_trades', 'retail_contracts', 'fill_count', 'bet_dollars',
+            'roi_pct', 'pnl_dollars', 'status', 'entry_time', 'close_time',
+            'is_live',
+        ]
+        file_exists = TRADE_HISTORY_CSV.exists()
+        with open(TRADE_HISTORY_CSV, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=csv_headers, extrasaction='ignore')
+            if not file_exists:
+                writer.writeheader()
+
+            entry_ts = pos.get('entry_time')
+            close_ts = pos.get('close_time')
+            entry_dt = datetime.fromtimestamp(entry_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M') if entry_ts else ''
+            close_dt = datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M') if close_ts else ''
+
+            # Compute PnL dollars
+            pnl = pos.get('settle_pnl')  # mention
+            if pnl is None:
+                fill_price = pos.get('fill_price', pos.get('entry_price', 0))
+                exit_price = pos.get('exit_price', 0)
+                fill_count = pos.get('fill_count', 0)
+                if fill_price and exit_price and fill_count:
+                    if pos.get('fade_action') == 'SELL':
+                        pnl = round((fill_price - exit_price) * fill_count, 2)
+                    else:
+                        pnl = round((exit_price - fill_price) * fill_count, 2)
+
+            writer.writerow({
+                'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                'event_type': event_type,
+                'ticker': pos.get('ticker', ''),
+                'title': pos.get('title', ''),
+                'signal_type': pos.get('signal_type', 'reversion'),
+                'fade_action': pos.get('fade_action', ''),
+                'fade_side': pos.get('fade_side', ''),
+                'entry_price': pos.get('entry_price', ''),
+                'fill_price': pos.get('fill_price', ''),
+                'exit_price': pos.get('exit_price', ''),
+                'pre_signal_price': pos.get('pre_signal_price', ''),
+                'price_move': pos.get('price_move', ''),
+                'n_small_trades': pos.get('n_small_trades', ''),
+                'retail_contracts': pos.get('retail_contracts', ''),
+                'fill_count': pos.get('fill_count', ''),
+                'bet_dollars': pos.get('bet_dollars', ''),
+                'roi_pct': pos.get('roi_pct', ''),
+                'pnl_dollars': pnl if pnl is not None else '',
+                'status': pos.get('status', ''),
+                'entry_time': entry_dt,
+                'close_time': close_dt,
+                'is_live': pos.get('is_live', False),
+            })
 
     def add(self, signal, order_info=None):
         signal_type = signal.get('signal_type', 'reversion')
@@ -1177,6 +1244,7 @@ class KalshiPositionTracker:
             pos['is_live'] = False
         self.positions.append(pos)
         self._save()
+        self._log_trade_csv(pos, 'ENTRY')
 
     def event_exposure(self, event_ticker):
         """Total dollars deployed on open positions for a given event."""
@@ -1228,6 +1296,7 @@ class KalshiPositionTracker:
                     pos['status'] = 'settled'
                     pos['close_time'] = now
                     self.closed.append(pos)
+                    self._log_trade_csv(pos, 'EXIT_SETTLED')
                     alerts.append(('settled', pos))
                     continue
                 else:
@@ -1245,6 +1314,7 @@ class KalshiPositionTracker:
                 pos['status'] = 'closed_24h'
                 pos['close_time'] = now
                 self.closed.append(pos)
+                self._log_trade_csv(pos, 'EXIT_24H')
                 alerts.append(('24h_exit', pos))
                 continue
 
