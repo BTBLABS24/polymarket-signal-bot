@@ -151,11 +151,12 @@ MENTION_BET_DOLLARS = 1           # $1 per signal (testing)
 MENTION_MAX_NO_PRICE = 0.65       # Only buy NO when NO <= 65c (YES >= 35c)
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
-MENTION_MAX_CLOSE_HOURS = 48      # Only bet if close_time is within 48h (capital efficiency)
+MENTION_MAX_CLOSE_HOURS = 48      # Loose filter — close_time is unreliable (can_close_early)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 10    # Max $ per event (spread across tickers)
+MENTION_ORDER_REST_SECONDS = 1800 # Leave orders resting 30 min before canceling
 # Series to scan (ex NBA/Earnings per backtest — weakest ROI categories)
 MENTION_SCAN_SERIES = [
     # Sports (ex NBA) — NFL +80%, NCAA +60%, Fight +34%
@@ -1918,6 +1919,7 @@ class KalshiReversionScanner:
         self.trade_logger = TradeLogger()
         self.executor = OrderExecutor(self.client, self.trade_logger)
         self._last_mention_scan = 0  # timestamp of last mention scan
+        self._resting_mention_orders = {}  # ticker -> {order_id, placed_time, contracts, price_cents, sig}
 
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
@@ -2005,7 +2007,11 @@ class KalshiReversionScanner:
                     self.positions.add(sig, order_info)
 
         # 3. Mention BUY NO scan
-        mention_count = self.positions.count('mention_buy_no')
+        # First: check resting orders from previous cycles
+        if self._resting_mention_orders and self.client.can_trade:
+            await self._check_resting_mention_orders()
+
+        mention_count = self.positions.count('mention_buy_no') + len(self._resting_mention_orders)
         mention_allowed = mention_count < MENTION_MAX_POSITIONS
         should_scan_mentions = (now - self._last_mention_scan) >= MENTION_SCAN_INTERVAL_SECONDS
 
@@ -2024,8 +2030,10 @@ class KalshiReversionScanner:
                         print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
                         break
 
-                    # Skip if we already have an open position on this ticker
+                    # Skip if we already have an open position or resting order
                     if self.positions.has_open_ticker(sig['ticker']):
+                        continue
+                    if sig['ticker'] in self._resting_mention_orders:
                         continue
 
                     # Per-event exposure cap
@@ -2070,11 +2078,91 @@ class KalshiReversionScanner:
 
         rev_count = self.positions.count('reversion')
         mention_count = self.positions.count('mention_buy_no')
-        print(f"  Open positions: {self.positions.count()} (rev={rev_count}, mention={mention_count}, {self.positions.live_count()} live)")
+        resting_count = len(self._resting_mention_orders)
+        resting_str = f", {resting_count} resting" if resting_count else ""
+        print(f"  Open positions: {self.positions.count()} (rev={rev_count}, mention={mention_count}{resting_str}, {self.positions.live_count()} live)")
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
             print(f"  Daily P&L: ${daily_pnl:.2f}")
 
+
+    async def _check_resting_mention_orders(self):
+        """Check resting mention orders for fills, cancel stale ones."""
+        if not self._resting_mention_orders:
+            return
+
+        now = time.time()
+        filled_tickers = []
+        canceled_tickers = []
+
+        for ticker, info in list(self._resting_mention_orders.items()):
+            order_id = info['order_id']
+            age = now - info['placed_time']
+
+            status = self.client.get_order(order_id)
+            if not status:
+                # Can't check — if old enough, cancel
+                if age > MENTION_ORDER_REST_SECONDS:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                    canceled_tickers.append(ticker)
+                continue
+
+            filled = status.get('quantity_filled', 0)
+            remaining = status.get('remaining_count', 0)
+
+            if filled > 0:
+                # Got a fill! Cancel remainder if partial
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+
+                avg_fill = status.get('average_fill_price', info['price_cents'])
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                order_info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                }
+                self.trade_logger.record({
+                    'type': 'entry',
+                    'strategy': 'mention_buy_no',
+                    'ticker': ticker,
+                    'order_id': order_id,
+                    'side': 'no',
+                    'action': 'buy',
+                    'contracts_filled': filled,
+                    'price_cents': info['price_cents'],
+                    'avg_fill_price': avg_fill,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                })
+                print(f"  RESTING FILL: {filled} NO @ avg {avg_fill}c (${actual_dollars:.2f}) — {ticker}")
+                await self.notifier.send_mention_signal(info['sig'], order_info)
+                self.positions.add(info['sig'], order_info)
+                filled_tickers.append(ticker)
+
+            elif age > MENTION_ORDER_REST_SECONDS:
+                # Stale — cancel
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception:
+                    pass
+                canceled_tickers.append(ticker)
+                print(f"  RESTING EXPIRED: {ticker} (no fill in {int(age/60)}min), canceled {order_id}")
+
+        for t in filled_tickers + canceled_tickers:
+            self._resting_mention_orders.pop(t, None)
+
+        n_resting = len(self._resting_mention_orders)
+        if n_resting > 0 or filled_tickers or canceled_tickers:
+            print(f"  Resting orders: {n_resting} active, {len(filled_tickers)} filled, {len(canceled_tickers)} expired")
 
     def _execute_mention_entry(self, sig):
         """Execute a mention BUY NO entry. Simpler than reversion — fixed $5 bet,
@@ -2154,20 +2242,22 @@ class KalshiReversionScanner:
             return None
 
         order_id = order.get('order_id', '')
-        print(f"    Order placed: {order_id} ({contracts} NO @ {buy_price}c)")
+        print(f"    Order placed: {order_id} ({contracts} NO @ {buy_price}c) — resting up to {MENTION_ORDER_REST_SECONDS//60}min")
 
-        # Wait for fill
-        time.sleep(ORDER_WAIT_SECONDS)
-
+        # Quick check: might fill instantly
+        time.sleep(2)
         status = self.client.get_order(order_id)
         if status:
             filled = status.get('quantity_filled', 0)
             if filled > 0:
-                avg_fill = status.get('average_fill_price', buy_price)
-                actual_dollars = round(filled * avg_fill / 100, 2)
                 remaining = status.get('remaining_count', 0)
                 if remaining > 0:
-                    self.client.cancel_order(order_id)
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', buy_price)
+                actual_dollars = round(filled * avg_fill / 100, 2)
                 info = {
                     'order_id': order_id,
                     'fill_price': avg_fill / 100,
@@ -2191,9 +2281,15 @@ class KalshiReversionScanner:
                 print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
                 return info
 
-        # Not filled — cancel
-        self.client.cancel_order(order_id)
-        print(f"    Not filled, canceled {order_id}")
+        # Not filled yet — leave resting on the book
+        self._resting_mention_orders[ticker] = {
+            'order_id': order_id,
+            'placed_time': time.time(),
+            'contracts': contracts,
+            'price_cents': buy_price,
+            'sig': sig,
+        }
+        print(f"    Resting on book (will check next cycle)")
         return None
 
 
