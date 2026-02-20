@@ -1062,6 +1062,18 @@ class MentionBuyNoDetector:
             event_ticker = m.get('event_ticker', '')
             no_price_cents = int(no_price * 100)
 
+            # Volume as proxy for "event is live" — high volume = active event
+            volume_24h = 0
+            try:
+                volume_24h = int(m.get('volume_24h', 0) or 0)
+            except (ValueError, TypeError):
+                pass
+            open_interest = 0
+            try:
+                open_interest = int(m.get('open_interest', 0) or 0)
+            except (ValueError, TypeError):
+                pass
+
             signals.append({
                 'ticker': ticker,
                 'title': title,
@@ -1079,6 +1091,8 @@ class MentionBuyNoDetector:
                 'no_price_cents': no_price_cents,
                 'hours_before_close': round((close_ts - now_ts) / 3600, 2),
                 'close_ts': close_ts,
+                'volume_24h': volume_24h,
+                'open_interest': open_interest,
             })
 
         # Print debug breakdown
@@ -2052,8 +2066,9 @@ class KalshiReversionScanner:
 
             if mention_markets:
                 mention_signals = self.mention_detector.detect(mention_markets, self.client, now)
-                # Sort by closest to close (best liquidity + edge)
-                mention_signals.sort(key=lambda s: s.get('hours_before_close', 999))
+                # Sort by volume descending — high volume = event is live/active
+                # This is a better proxy than hours_before_close since close_time is unreliable
+                mention_signals.sort(key=lambda s: s.get('volume_24h', 0), reverse=True)
                 print(f"  Mention signals: {len(mention_signals)}")
 
                 for sig in mention_signals:
@@ -2080,8 +2095,9 @@ class KalshiReversionScanner:
                             continue
 
                     no_c = sig.get('no_price_cents', 0)
+                    vol = sig.get('volume_24h', 0)
                     hrs = sig.get('hours_before_close', 0)
-                    print(f"  MENTION: BUY NO @ {no_c}c '{sig['title'][:50]}' ({hrs:.1f}h to close)")
+                    print(f"  MENTION: BUY NO @ {no_c}c '{sig['title'][:50]}' (vol={vol}, {hrs:.1f}h to close)")
 
                     if low_balance:
                         continue
@@ -2246,7 +2262,8 @@ class KalshiReversionScanner:
             print(f"    NO ask {best_no_ask}c outside range, skipping")
             log_event('mention_skip_spread', ticker=ticker, signal_no_cents=no_price_cents,
                       book_no_ask_cents=best_no_ask, reason='outside_range',
-                      hours_before_close=sig.get('hours_before_close'))
+                      hours_before_close=sig.get('hours_before_close'),
+                      volume_24h=sig.get('volume_24h', 0))
             return None
 
         # Calculate contracts for MENTION_BET_DOLLARS
@@ -2298,7 +2315,8 @@ class KalshiReversionScanner:
         log_event('mention_order_placed', ticker=ticker, order_id=order_id,
                   contracts=contracts, price_cents=buy_price, bet_dollars=bet_dollars,
                   signal_no_cents=no_price_cents, book_no_ask_cents=best_no_ask,
-                  hours_before_close=sig.get('hours_before_close'))
+                  hours_before_close=sig.get('hours_before_close'),
+                  volume_24h=sig.get('volume_24h', 0))
 
         # Quick check: might fill instantly
         time.sleep(2)
