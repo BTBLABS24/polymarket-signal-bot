@@ -433,9 +433,52 @@ class KalshiClient:
         return all_markets
 
     def get_open_mention_markets(self):
-        """Fetch all open mention markets by scanning configured series."""
+        """Fetch all open mention markets by dynamically discovering series.
+
+        Instead of a hardcoded list, we:
+        1. Fetch all series from the API
+        2. Filter for series with MENTION in ticker or mention-type keywords in title
+        3. Query each for open markets
+        This catches new series as Kalshi adds them (debates, rallies, interviews, etc.)
+        """
+        # Step 1: discover mention series (cached for 1 hour)
+        now = time.time()
+        if not hasattr(self, '_mention_series_cache') or now - self._mention_series_cache_ts > 3600:
+            try:
+                resp = self.session.get(f'{KALSHI_BASE}/series', params={'limit': 10000}, timeout=20)
+                if resp.status_code == 200:
+                    all_series = resp.json().get('series', [])
+                    discovered = set()
+                    for s in all_series:
+                        ticker = (s.get('ticker', '') or '').upper()
+                        title = (s.get('title', '') or '').lower()
+                        # Include series with MENTION in ticker
+                        if 'MENTION' in ticker:
+                            discovered.add(s.get('ticker', ''))
+                        # Include series with mention-type keywords in title
+                        elif any(kw in title for kw in [
+                            'what will', 'say during', 'say at', 'say on', 'say in',
+                            'announcer', 'commentator', 'broadcast mention',
+                        ]):
+                            discovered.add(s.get('ticker', ''))
+                    # Always include the hardcoded list as fallback
+                    for s in MENTION_SCAN_SERIES:
+                        discovered.add(s)
+                    self._mention_series_cache = sorted(discovered)
+                    self._mention_series_cache_ts = now
+                    print(f"  Mention series discovered: {len(self._mention_series_cache)}")
+                else:
+                    # Fallback to hardcoded list
+                    self._mention_series_cache = list(MENTION_SCAN_SERIES)
+                    self._mention_series_cache_ts = now
+            except Exception as e:
+                print(f'  Series discovery error: {e}')
+                self._mention_series_cache = list(MENTION_SCAN_SERIES)
+                self._mention_series_cache_ts = now
+
+        # Step 2: query each series for open markets
         all_markets = []
-        for series in MENTION_SCAN_SERIES:
+        for series in self._mention_series_cache:
             try:
                 cursor = None
                 pages = 0
