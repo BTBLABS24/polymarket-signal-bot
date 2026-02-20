@@ -994,9 +994,11 @@ class MentionBuyNoDetector:
                 continue
             debug_counts['total'] += 1
 
-            # Skip Earnings (weakest category at +11% ROI, not worth the capital)
-            # NBA kept: +29% ROI across 330 trades
+            # Skip NBA (+29% ROI but small edge) and Earnings (+11% ROI)
             ticker_upper = ticker.upper()
+            if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
+                debug_counts['skipped_nba_earn'] += 1
+                continue
             if 'EARNINGS' in ticker_upper:
                 debug_counts['skipped_nba_earn'] += 1
                 continue
