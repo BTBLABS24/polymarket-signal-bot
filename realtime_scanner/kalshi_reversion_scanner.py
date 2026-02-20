@@ -151,7 +151,7 @@ MENTION_BET_DOLLARS = 1           # $1 per signal (testing)
 MENTION_MAX_NO_PRICE = 0.65       # Only buy NO when NO <= 65c (YES >= 35c)
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
-MENTION_MAX_CLOSE_HOURS = 48      # Loose filter — close_time is unreliable (can_close_early)
+MENTION_MAX_CLOSE_HOURS = 6       # Only bet within 6h of close (better liquidity + edge)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
