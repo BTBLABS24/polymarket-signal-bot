@@ -185,6 +185,25 @@ TRADE_LOG_FILE = STATE_DIR / 'kalshi_trade_log.json'
 IMPL_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_impl_signal_history.json'
 MENTION_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_mention_signal_history.json'
 TRADE_HISTORY_CSV = STATE_DIR / 'kalshi_trade_history.csv'
+EVENT_LOG_FILE = STATE_DIR / 'kalshi_event_log.jsonl'
+
+
+# =====================================================================
+# STRUCTURED EVENT LOG — append-only JSONL for post-hoc analysis
+# =====================================================================
+
+def log_event(event_type, **kwargs):
+    """Append a structured event to the JSONL log file."""
+    entry = {
+        'ts': datetime.now(timezone.utc).isoformat(),
+        'event': event_type,
+        **kwargs,
+    }
+    try:
+        with open(EVENT_LOG_FILE, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+    except Exception:
+        pass  # never crash the bot for logging
 
 
 # =====================================================================
@@ -1973,6 +1992,7 @@ class KalshiReversionScanner:
             bal = self.client.get_balance()
             if bal is not None and bal < 100:  # less than $1
                 print(f"  Low balance: ${bal/100:.2f} — skipping new orders, waiting for fills/settlements")
+                log_event('low_balance', balance_cents=bal)
                 low_balance = True
 
         # Safety: check max positions
@@ -2094,6 +2114,10 @@ class KalshiReversionScanner:
                 pnl = pos.get('settle_pnl', 0)
                 result = "WIN" if pnl > 0 else "LOSS"
                 print(f"  SETTLED ({result}): '{pos['title'][:50]}' P&L: ${pnl:+.2f}")
+                log_event('settled', ticker=pos.get('ticker'), title=pos.get('title'),
+                          signal_type=pos.get('signal_type'), pnl=pnl, result=result,
+                          entry_price=pos.get('entry_price'), fill_price=pos.get('fill_price'),
+                          fill_count=pos.get('fill_count'), is_live=pos.get('is_live'))
 
         rev_count = self.positions.count('reversion')
         mention_count = self.positions.count('mention_buy_no')
@@ -2163,6 +2187,9 @@ class KalshiReversionScanner:
                     'dry_run': False,
                 })
                 print(f"  RESTING FILL: {filled} NO @ avg {avg_fill}c (${actual_dollars:.2f}) — {ticker}")
+                log_event('mention_filled_resting', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
+                          rested_seconds=int(age))
                 await self.notifier.send_mention_signal(info['sig'], order_info)
                 self.positions.add(info['sig'], order_info)
                 filled_tickers.append(ticker)
@@ -2175,6 +2202,9 @@ class KalshiReversionScanner:
                     pass
                 canceled_tickers.append(ticker)
                 print(f"  RESTING EXPIRED: {ticker} (no fill in {int(age/60)}min), canceled {order_id}")
+                log_event('mention_order_expired', ticker=ticker, order_id=order_id,
+                          price_cents=info['price_cents'], contracts=info['contracts'],
+                          rested_seconds=int(age))
 
         for t in filled_tickers + canceled_tickers:
             self._resting_mention_orders.pop(t, None)
@@ -2214,6 +2244,9 @@ class KalshiReversionScanner:
         # Check price still in range
         if best_no_ask / 100 < MENTION_MIN_NO_PRICE or best_no_ask / 100 > MENTION_MAX_NO_PRICE:
             print(f"    NO ask {best_no_ask}c outside range, skipping")
+            log_event('mention_skip_spread', ticker=ticker, signal_no_cents=no_price_cents,
+                      book_no_ask_cents=best_no_ask, reason='outside_range',
+                      hours_before_close=sig.get('hours_before_close'))
             return None
 
         # Calculate contracts for MENTION_BET_DOLLARS
@@ -2262,6 +2295,10 @@ class KalshiReversionScanner:
 
         order_id = order.get('order_id', '')
         print(f"    Order placed: {order_id} ({contracts} NO @ {buy_price}c) — resting up to {MENTION_ORDER_REST_SECONDS//60}min")
+        log_event('mention_order_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=buy_price, bet_dollars=bet_dollars,
+                  signal_no_cents=no_price_cents, book_no_ask_cents=best_no_ask,
+                  hours_before_close=sig.get('hours_before_close'))
 
         # Quick check: might fill instantly
         time.sleep(2)
@@ -2298,6 +2335,9 @@ class KalshiReversionScanner:
                     'dry_run': False,
                 })
                 print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
+                log_event('mention_filled_instant', ticker=ticker, order_id=order_id,
+                          filled=filled, requested=contracts, avg_fill_cents=avg_fill,
+                          bet_dollars=actual_dollars, hours_before_close=sig.get('hours_before_close'))
                 return info
 
         # Not filled yet — leave resting on the book
@@ -2309,6 +2349,9 @@ class KalshiReversionScanner:
             'sig': sig,
         }
         print(f"    Resting on book (will check next cycle)")
+        log_event('mention_order_resting', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=buy_price,
+                  hours_before_close=sig.get('hours_before_close'))
         return None
 
 
