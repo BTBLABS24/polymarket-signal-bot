@@ -1966,6 +1966,14 @@ class KalshiReversionScanner:
         print(f"\n[{now_str}] Scan cycle")
 
         reversion_allowed = True
+        low_balance = False
+
+        # Check balance
+        if self.client.can_trade:
+            bal = self.client.get_balance()
+            if bal is not None and bal < 100:  # less than $1
+                print(f"  Low balance: ${bal/100:.2f} — skipping new orders, waiting for fills/settlements")
+                low_balance = True
 
         # Safety: check max positions
         rev_count = self.positions.count('reversion')
@@ -2000,7 +2008,7 @@ class KalshiReversionScanner:
                 exposure = self.positions.event_exposure(event)
                 if exposure >= MAX_BET_DOLLARS and event:
                     print(f"    EVENT CAP: already ${exposure:.2f} on {event} (max ${MAX_BET_DOLLARS}), skipping")
-                elif reversion_allowed and self.client.can_trade:
+                elif reversion_allowed and self.client.can_trade and not low_balance:
                     order_info = self.executor.execute_entry(sig)
 
                 if order_info:
@@ -2054,6 +2062,9 @@ class KalshiReversionScanner:
                     no_c = sig.get('no_price_cents', 0)
                     hrs = sig.get('hours_before_close', 0)
                     print(f"  MENTION: BUY NO @ {no_c}c '{sig['title'][:50]}' ({hrs:.1f}h to close)")
+
+                    if low_balance:
+                        continue
 
                     order_info = None
                     if self.client.can_trade:
