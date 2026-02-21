@@ -4,7 +4,7 @@
 
 **Edge:** "What will X say during Y?" markets systematically overprice YES outcomes. People expect mentions that don't happen. We BUY NO cheaply and hold to settlement.
 
-**Action:** BUY NO on mention markets, 0-1.5h before event starts.
+**Action:** BUY NO on mention markets. Trump: 0-24h before event. All others: 0-1.5h before event.
 
 ---
 
@@ -14,7 +14,7 @@
 |---|---|
 | Side | BUY NO |
 | NO price range | 5c - 30c (all categories, no special floors) |
-| Entry window | 0-1.5h before event start (enforced via milestones API) |
+| Entry window | Trump: 0-24h before event start; All others: 0-1.5h (enforced via milestones API) |
 | Bet size (current) | $3/bet flat |
 | Max per event | $10 (spread across tickers) |
 | Max concurrent positions | 40 |
@@ -35,7 +35,7 @@ Bot dynamically discovers mention series via the Kalshi API (any series with "ME
 | **NFL** | KXNFLMENTION, KXSNFMENTION, KXTNFMENTION, KXCFBMENTION, KXSBMENTION | +80% | sig |
 | **NCAA** | KXNCAAMENTION, KXNCAABMENTION | +74% (270 markets) | +4.48 |
 | **MLB** | KXMLBMENTION | +34.7% | limited data |
-| **Trump** | KXTRUMPMENTION, KXTRUMPMENTIONB | +68% | sig |
+| **Trump** | KXTRUMPMENTION, KXTRUMPMENTIONB | +88% at 0-24h (761 mkts) | +8.15 |
 | **Governor** | KXGOVERNORMENTION, KXHOCHULMENTION | +55% | sig |
 | **Mamdani** | KXMAMDANIMENTION | +14.6% (test) | sig |
 | **Media** | KXMADDOWMENTION, KXSNLMENTION, KXROGANMENTION, KXCOOPERMENTION, KXCOLBERTMENTION, KXKIMMELMENTION | Maddow +175% | sig |
@@ -236,11 +236,10 @@ GET /trade-api/v2/events?with_milestones=true — event start times
 - Cheap NO (5-30c) means YES is priced 70-95c — very overconfident
 - ~28% of the time YES hits, but you only pay 5-30c for NO, so the math works
 
-### Why 0-1.5h pre-event (not 3h or during game)
-- Backtest showed 0-1.5h pre-event has strong ROI across categories
-- Now enforced via milestones API — bot fetches event_start and only bets in the window
-- Earlier entry means more time for price to move against you
-- Most volume and price discovery happens just before the event
+### Entry window per category
+- **Trump (0-24h):** Edge persists across entire 24h pre-event window. 0-24h: +88% ROI (t=8.15, 761 mkts). Edge is strongest 8-12h out (+88% ROI) and stays positive through 24h. Marginal ROI positive at every layer. Reason: Trump markets are listed well in advance and NO stays mispriced for longer. At 18-24h, 79% of markets have zero trades — the ones that do trade early are popular tickers with strong edge.
+- **All others (0-1.5h):** Backtest showed 0-1.5h pre-event has strong ROI across non-Trump categories. NCAA: +74% (t=4.48). Earlier entry on sports/governor/media categories doesn't add significant edge.
+- Enforced via milestones API — bot fetches event_start and applies per-category window
 
 ### Why exclude Earnings/Fight/Press/NBA
 - **Earnings:** No event milestone data on Kalshi API, can't time entry

@@ -1116,15 +1116,18 @@ class MentionBuyNoDetector:
                 debug_counts['too_far'] += 1
                 continue
 
-            # Event start timing filter: only bet 0-1.5h before event start
-            # Backtest: 0-1.5h pre-event, 5-30c → +73% ROI (t=4.48)
+            # Event start timing filter
+            # Default: 0-1.5h before event start (backtest: +73% ROI, t=4.48)
+            # Trump: 0-24h before event start (backtest: +88% ROI, t=8.15)
             event_ticker = m.get('event_ticker', '')
+            is_trump = 'TRUMPMENTION' in ticker_upper
+            max_hours_before = 24 if is_trump else 1.5
             ms = milestone_map.get(event_ticker)
             if ms:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
-                # Skip if event is more than 1.5h away
-                if hours_to_event > 1.5:
+                # Skip if event is too far away
+                if hours_to_event > max_hours_before:
                     debug_counts['too_early'] += 1
                     continue
                 # Skip if event has already started
@@ -2260,25 +2263,24 @@ class KalshiReversionScanner:
                         sig['hours_to_event'] = None
                         sig['event_live'] = False
 
-                # Filter: only bet ~3h before event start
-                # Backtest (21d): NO 5-30c, ex NBA/Fight/Press at 1h pre
-                #   +127% ROI, $63.17/day, 18/20 win days
-                # Cheap NO has best ROI — enter just before event starts
+                # Filter: event start timing window
+                # Default: 0-1.5h before event start (backtest: +73% ROI, t=4.48)
+                # Trump: 0-24h before event start (backtest: +88% ROI, t=8.15)
                 def in_entry_window(s):
                     h = s.get('hours_to_event')
                     if h is None:
                         return False
-                    # Enter when event starts in 0-1.5 hours
-                    # 1.5h upper bound = 30min buffer for 5-min scan cycle
-                    # Also allow events just started (up to 10 min ago)
-                    return -10/60 <= h <= 1.5
+                    ticker_up = s.get('ticker', '').upper()
+                    is_trump = 'TRUMPMENTION' in ticker_up
+                    max_h = 24 if is_trump else 1.5
+                    return -10/60 <= h <= max_h
 
                 eligible = [s for s in mention_signals if in_entry_window(s)]
                 n_total = len(mention_signals)
                 n_with_start = sum(1 for s in mention_signals if s.get('event_start_ts'))
                 n_eligible = len(eligible)
                 mention_signals = eligible
-                print(f"  Mention signals: {n_total} total, {n_with_start} with milestone, {n_eligible} in 0-1h window")
+                print(f"  Mention signals: {n_total} total, {n_with_start} with milestone, {n_eligible} in window")
 
                 for sig in mention_signals:
                     if not mention_allowed:
