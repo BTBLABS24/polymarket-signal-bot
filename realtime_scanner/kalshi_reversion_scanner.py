@@ -1080,11 +1080,10 @@ class MentionBuyNoDetector:
                 continue
             debug_counts['total'] += 1
 
-            # Skip categories with insufficient edge at bot timing (0-1.5h pre-event, 5-30c):
+            # Skip categories with insufficient edge:
             # Earnings: no event milestones, can't time entry
             # Fight: thin edge (+16%), noisy
             # Press (SecPress/Leavitt): efficiently priced (+2% ROI)
-            # NBA: small sample, not significant pre-event (t=1.43); revisit with live-game timing
             ticker_upper = ticker.upper()
             if 'EARNINGS' in ticker_upper:
                 debug_counts['skipped_cat'] += 1
@@ -1093,9 +1092,6 @@ class MentionBuyNoDetector:
                 debug_counts['skipped_cat'] += 1
                 continue
             if 'SECPRESS' in ticker_upper or 'LEAVITT' in ticker_upper:
-                debug_counts['skipped_cat'] += 1
-                continue
-            if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
                 debug_counts['skipped_cat'] += 1
                 continue
 
@@ -1118,18 +1114,28 @@ class MentionBuyNoDetector:
 
             # Event start timing filter — per-category windows:
             # Trump: 0-24h before event start (backtest: +88% ROI, t=8.15)
-            # NCAA: live only, 0-2h after start (backtest: +98% ROI, t=4.61)
+            # NCAA: live only, 0.5-1.5h after start (backtest: +151% ROI, t=9.13)
+            # NBA: live only, 0.5-2h after start (backtest: +113% ROI, t=11.79)
             # Default: 0-1.5h before event start (backtest: +73% ROI, t=4.48)
             event_ticker = m.get('event_ticker', '')
             is_trump = 'TRUMPMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+            is_nba = 'NBAMENTION' in ticker_upper
             ms = milestone_map.get(event_ticker)
             if ms:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
                 if is_ncaa:
-                    # NCAA: live games only (0-2h after start)
-                    if hours_to_event > 0:
+                    # NCAA: live games only (0.5-1.5h after start)
+                    if hours_to_event > -0.5:
+                        debug_counts['too_early'] += 1
+                        continue
+                    if hours_to_event < -1.5:
+                        debug_counts['too_far'] += 1
+                        continue
+                elif is_nba:
+                    # NBA: live games only (0.5-2h after tipoff)
+                    if hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
                         continue
                     if hours_to_event < -2:
@@ -1178,10 +1184,16 @@ class MentionBuyNoDetector:
 
             no_price = 1 - yes_price
             # Per-category price ranges:
-            # NCAA live: 5-25c (backtest: +115% ROI, t=4.14)
+            # NCAA live 0.5-1.5h: 6-25c (backtest: +151% ROI, t=9.13)
+            # NBA live 0.5-2h: 9-25c (backtest: +113% ROI, t=11.79)
             # All others: 5-30c
-            max_no = 0.25 if is_ncaa else MENTION_MAX_NO_PRICE
-            if no_price < MENTION_MIN_NO_PRICE or no_price > max_no:
+            if is_ncaa:
+                max_no, min_no = 0.25, 0.06
+            elif is_nba:
+                max_no, min_no = 0.25, 0.09
+            else:
+                max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
+            if no_price < min_no or no_price > max_no:
                 debug_counts['price_out_range'] += 1
                 continue
 
@@ -2106,7 +2118,7 @@ class KalshiReversionScanner:
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
         print(f"Strategy 1: Fade retail surges, 24h hold")
-        print(f"Strategy 2: Mention BUY NO 5-30c, ${MENTION_BET_DOLLARS}/bet, 1h pre-event, ex Fight/Press")
+        print(f"Strategy 2: Mention BUY NO, ${MENTION_BET_DOLLARS}/bet, Trump 0-24h 5-30c, NCAA live 0.5-1.5h 6-25c, NBA live 0.5-2h 9-25c, others 0-1.5h 5-30c, ex Earnings/Fight/Press")
         print(f"Max bet: ${MAX_BET_DOLLARS}/signal (reversion), ${MENTION_BET_DOLLARS}/signal (mention)")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
@@ -2293,8 +2305,11 @@ class KalshiReversionScanner:
                     ticker_up = s.get('ticker', '').upper()
                     is_trump = 'TRUMPMENTION' in ticker_up
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
+                    is_nba = 'NBAMENTION' in ticker_up
                     if is_ncaa:
-                        return -2 <= h <= 0  # live games only
+                        return -1.5 <= h <= -0.5  # live games, 0.5-1.5h after start
+                    elif is_nba:
+                        return -2 <= h <= -0.5  # live games, 0.5-2h after tipoff
                     elif is_trump:
                         return -10/60 <= h <= 24
                     else:
@@ -2502,11 +2517,17 @@ class KalshiReversionScanner:
 
         best_no_ask = no_asks[0][0]  # cents
 
-        # Check price still in range (NCAA live: 5-25c, others: 5-30c)
+        # Check price still in range per category
         ticker_upper = ticker.upper()
         is_ncaa_order = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
-        max_no_order = 0.25 if is_ncaa_order else MENTION_MAX_NO_PRICE
-        if best_no_ask / 100 < MENTION_MIN_NO_PRICE or best_no_ask / 100 > max_no_order:
+        is_nba_order = 'NBAMENTION' in ticker_upper
+        if is_ncaa_order:
+            max_no_order, min_no_order = 0.25, 0.06
+        elif is_nba_order:
+            max_no_order, min_no_order = 0.25, 0.09
+        else:
+            max_no_order, min_no_order = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
+        if best_no_ask / 100 < min_no_order or best_no_ask / 100 > max_no_order:
             print(f"    NO ask {best_no_ask}c outside range, skipping")
             log_event('mention_skip_spread', ticker=ticker, signal_no_cents=no_price_cents,
                       book_no_ask_cents=best_no_ask, reason='outside_range',
@@ -2516,6 +2537,16 @@ class KalshiReversionScanner:
                       event_volume_24h=sig.get('event_volume_24h', 0),
                       event_velocity=sig.get('event_velocity', 0))
             return None
+
+        # Slippage check: reject if book price is >100% above signal price
+        # (e.g. signal at 5c, book at 10c = 100% slip — too much)
+        if no_price_cents > 0:
+            slip_pct = (best_no_ask - no_price_cents) / no_price_cents * 100
+            if slip_pct > 100:
+                print(f"    Mention slip too high: signal {no_price_cents}c, book {best_no_ask}c ({slip_pct:+.0f}%), skipping")
+                log_event('mention_skip_slippage', ticker=ticker, signal_no_cents=no_price_cents,
+                          book_no_ask_cents=best_no_ask, slip_pct=round(slip_pct, 1))
+                return None
 
         # Calculate contracts for MENTION_BET_DOLLARS
         contracts = int(MENTION_BET_DOLLARS / (best_no_ask / 100))
