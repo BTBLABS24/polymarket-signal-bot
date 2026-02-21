@@ -147,7 +147,7 @@ IMPL_EXCLUDED_PREFIXES = [
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 2           # $2 per signal
+MENTION_BET_DOLLARS = 3           # $3 per signal
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
@@ -1068,7 +1068,11 @@ class MentionBuyNoDetector:
         signals = []
         debug_counts = {'total': 0, 'skipped_cat': 0, 'too_far': 0,
                         'no_price': 0, 'price_out_range': 0,
-                        'cooldown': 0, 'eligible': 0}
+                        'cooldown': 0, 'eligible': 0,
+                        'no_milestone': 0, 'too_early': 0}
+
+        # Fetch milestones for event_start timing filter
+        milestone_map = client.get_milestones()
 
         for m in open_markets:
             ticker = m.get('ticker', '')
@@ -1076,9 +1080,11 @@ class MentionBuyNoDetector:
                 continue
             debug_counts['total'] += 1
 
-            # Skip categories with poor ROI at 3h pre-event, NO 5-30c:
-            # Fight (+16%), Press_Brief (+18%), Earnings (no milestones)
-            # NBA re-enabled: 690 trades at 5-30c, +132% ROI, t=11.18
+            # Skip categories with insufficient edge at bot timing (0-1.5h pre-event, 5-30c):
+            # Earnings: no event milestones, can't time entry
+            # Fight: thin edge (+16%), noisy
+            # Press (SecPress/Leavitt): efficiently priced (+2% ROI)
+            # NBA: small sample, not significant pre-event (t=1.43); revisit with live-game timing
             ticker_upper = ticker.upper()
             if 'EARNINGS' in ticker_upper:
                 debug_counts['skipped_cat'] += 1
@@ -1087,6 +1093,9 @@ class MentionBuyNoDetector:
                 debug_counts['skipped_cat'] += 1
                 continue
             if 'SECPRESS' in ticker_upper or 'LEAVITT' in ticker_upper:
+                debug_counts['skipped_cat'] += 1
+                continue
+            if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
                 debug_counts['skipped_cat'] += 1
                 continue
 
@@ -1105,6 +1114,26 @@ class MentionBuyNoDetector:
             hours_to_close = (close_ts - now_ts) / 3600
             if hours_to_close > MENTION_MAX_CLOSE_HOURS:
                 debug_counts['too_far'] += 1
+                continue
+
+            # Event start timing filter: only bet 0-1.5h before event start
+            # Backtest: 0-1.5h pre-event, 5-30c → +73% ROI (t=4.48)
+            event_ticker = m.get('event_ticker', '')
+            ms = milestone_map.get(event_ticker)
+            if ms:
+                event_start_ts = ms.get('start_ts', 0)
+                hours_to_event = (event_start_ts - now_ts) / 3600
+                # Skip if event is more than 1.5h away
+                if hours_to_event > 1.5:
+                    debug_counts['too_early'] += 1
+                    continue
+                # Skip if event has already started
+                if hours_to_event < 0:
+                    debug_counts['too_far'] += 1
+                    continue
+            else:
+                # No milestone data — skip (can't time entry)
+                debug_counts['no_milestone'] += 1
                 continue
 
             # Get current YES price → derive NO price
@@ -1128,10 +1157,9 @@ class MentionBuyNoDetector:
                 continue
 
             no_price = 1 - yes_price
-            # NCAA sports bettors overprice YES on longshots — cheap NO (5-9c)
-            # is a trap. Backtest: 5-9c NCAA = -40% ROI. Skip them.
-            min_no = 0.10 if 'NCAAMENTION' in ticker.upper() else MENTION_MIN_NO_PRICE
-            if no_price < min_no or no_price > MENTION_MAX_NO_PRICE:
+            # NCAA 5-30c is strong at bot timing (0-1.5h pre-event):
+            # +73.4% ROI, t=16.90. No special floor needed.
+            if no_price < MENTION_MIN_NO_PRICE or no_price > MENTION_MAX_NO_PRICE:
                 debug_counts['price_out_range'] += 1
                 continue
 
@@ -1148,8 +1176,8 @@ class MentionBuyNoDetector:
             # so markets aren't blocked before passing the entry window check
 
             title = m.get('title', ticker)
-            event_ticker = m.get('event_ticker', '')
             no_price_cents = int(no_price * 100)
+            hours_to_event_val = round((ms['start_ts'] - now_ts) / 3600, 2) if ms else None
 
             # Volume as proxy for "event is live" — high volume = active event
             volume_24h = 0
@@ -1179,6 +1207,7 @@ class MentionBuyNoDetector:
                 'no_price': round(no_price, 4),
                 'no_price_cents': no_price_cents,
                 'hours_before_close': round((close_ts - now_ts) / 3600, 2),
+                'hours_to_event': hours_to_event_val,
                 'close_ts': close_ts,
                 'volume_24h': volume_24h,
                 'open_interest': open_interest,
@@ -1186,8 +1215,10 @@ class MentionBuyNoDetector:
 
         # Print debug breakdown
         print(f"  Mention filter: {debug_counts['total']} checked, "
-              f"{debug_counts['skipped_cat']} skipped(Earn/Fight/Press), "
-              f"{debug_counts['too_far']} >{MENTION_MAX_CLOSE_HOURS}h, "
+              f"{debug_counts['skipped_cat']} skipped(cat), "
+              f"{debug_counts['no_milestone']} no milestone, "
+              f"{debug_counts['too_early']} too early, "
+              f"{debug_counts['too_far']} too far, "
               f"{debug_counts['no_price']} no price, "
               f"{debug_counts['price_out_range']} price OOR, "
               f"{debug_counts['cooldown']} cooldown, "
@@ -2487,8 +2518,9 @@ class KalshiReversionScanner:
             print(f"    DRY RUN: would buy {contracts} NO @ {best_no_ask}c (${bet_dollars:.2f})")
             return order_info
 
-        # Live order: buy NO at best ask + 1c (to improve fill chance)
-        buy_price = min(best_no_ask + 1, 65)  # Don't exceed our max NO price
+        # Live order: buy NO at best ask (hard cap at max NO price)
+        max_cents = int(MENTION_MAX_NO_PRICE * 100)
+        buy_price = min(best_no_ask, max_cents)
         order = self.client.create_order(
             ticker=ticker,
             side='no',
