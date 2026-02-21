@@ -1116,24 +1116,41 @@ class MentionBuyNoDetector:
                 debug_counts['too_far'] += 1
                 continue
 
-            # Event start timing filter
-            # Default: 0-1.5h before event start (backtest: +73% ROI, t=4.48)
+            # Event start timing filter — per-category windows:
             # Trump: 0-24h before event start (backtest: +88% ROI, t=8.15)
+            # NCAA: live only, 0-2h after start (backtest: +98% ROI, t=4.61)
+            # Default: 0-1.5h before event start (backtest: +73% ROI, t=4.48)
             event_ticker = m.get('event_ticker', '')
             is_trump = 'TRUMPMENTION' in ticker_upper
-            max_hours_before = 24 if is_trump else 1.5
+            is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
             ms = milestone_map.get(event_ticker)
             if ms:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
-                # Skip if event is too far away
-                if hours_to_event > max_hours_before:
-                    debug_counts['too_early'] += 1
-                    continue
-                # Skip if event has already started
-                if hours_to_event < 0:
-                    debug_counts['too_far'] += 1
-                    continue
+                if is_ncaa:
+                    # NCAA: live games only (0-2h after start)
+                    if hours_to_event > 0:
+                        debug_counts['too_early'] += 1
+                        continue
+                    if hours_to_event < -2:
+                        debug_counts['too_far'] += 1
+                        continue
+                elif is_trump:
+                    # Trump: 0-24h before event start
+                    if hours_to_event > 24:
+                        debug_counts['too_early'] += 1
+                        continue
+                    if hours_to_event < 0:
+                        debug_counts['too_far'] += 1
+                        continue
+                else:
+                    # Default: 0-1.5h before event start
+                    if hours_to_event > 1.5:
+                        debug_counts['too_early'] += 1
+                        continue
+                    if hours_to_event < 0:
+                        debug_counts['too_far'] += 1
+                        continue
             else:
                 # No milestone data — skip (can't time entry)
                 debug_counts['no_milestone'] += 1
@@ -1160,9 +1177,11 @@ class MentionBuyNoDetector:
                 continue
 
             no_price = 1 - yes_price
-            # NCAA 5-30c is strong at bot timing (0-1.5h pre-event):
-            # +73.4% ROI, t=16.90. No special floor needed.
-            if no_price < MENTION_MIN_NO_PRICE or no_price > MENTION_MAX_NO_PRICE:
+            # Per-category price ranges:
+            # NCAA live: 5-25c (backtest: +115% ROI, t=4.14)
+            # All others: 5-30c
+            max_no = 0.25 if is_ncaa else MENTION_MAX_NO_PRICE
+            if no_price < MENTION_MIN_NO_PRICE or no_price > max_no:
                 debug_counts['price_out_range'] += 1
                 continue
 
@@ -2263,17 +2282,23 @@ class KalshiReversionScanner:
                         sig['hours_to_event'] = None
                         sig['event_live'] = False
 
-                # Filter: event start timing window
-                # Default: 0-1.5h before event start (backtest: +73% ROI, t=4.48)
+                # Filter: event start timing window — per-category:
                 # Trump: 0-24h before event start (backtest: +88% ROI, t=8.15)
+                # NCAA: live only, 0-2h after start (backtest: +98% ROI, t=4.61)
+                # Default: 0-1.5h before event start
                 def in_entry_window(s):
                     h = s.get('hours_to_event')
                     if h is None:
                         return False
                     ticker_up = s.get('ticker', '').upper()
                     is_trump = 'TRUMPMENTION' in ticker_up
-                    max_h = 24 if is_trump else 1.5
-                    return -10/60 <= h <= max_h
+                    is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
+                    if is_ncaa:
+                        return -2 <= h <= 0  # live games only
+                    elif is_trump:
+                        return -10/60 <= h <= 24
+                    else:
+                        return -10/60 <= h <= 1.5
 
                 eligible = [s for s in mention_signals if in_entry_window(s)]
                 n_total = len(mention_signals)
@@ -2477,8 +2502,11 @@ class KalshiReversionScanner:
 
         best_no_ask = no_asks[0][0]  # cents
 
-        # Check price still in range
-        if best_no_ask / 100 < MENTION_MIN_NO_PRICE or best_no_ask / 100 > MENTION_MAX_NO_PRICE:
+        # Check price still in range (NCAA live: 5-25c, others: 5-30c)
+        ticker_upper = ticker.upper()
+        is_ncaa_order = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+        max_no_order = 0.25 if is_ncaa_order else MENTION_MAX_NO_PRICE
+        if best_no_ask / 100 < MENTION_MIN_NO_PRICE or best_no_ask / 100 > max_no_order:
             print(f"    NO ask {best_no_ask}c outside range, skipping")
             log_event('mention_skip_spread', ticker=ticker, signal_no_cents=no_price_cents,
                       book_no_ask_cents=best_no_ask, reason='outside_range',
@@ -2520,8 +2548,8 @@ class KalshiReversionScanner:
             print(f"    DRY RUN: would buy {contracts} NO @ {best_no_ask}c (${bet_dollars:.2f})")
             return order_info
 
-        # Live order: buy NO at best ask (hard cap at max NO price)
-        max_cents = int(MENTION_MAX_NO_PRICE * 100)
+        # Live order: buy NO at best ask (hard cap at max NO price per category)
+        max_cents = int(max_no_order * 100)
         buy_price = min(best_no_ask, max_cents)
         order = self.client.create_order(
             ticker=ticker,

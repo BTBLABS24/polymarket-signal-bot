@@ -4,7 +4,7 @@
 
 **Edge:** "What will X say during Y?" markets systematically overprice YES outcomes. People expect mentions that don't happen. We BUY NO cheaply and hold to settlement.
 
-**Action:** BUY NO on mention markets. Trump: 0-24h before event. All others: 0-1.5h before event.
+**Action:** BUY NO on mention markets. Trump: 0-24h before event. NCAA: live games only (0-2h after start, 5-25c). All others: 0-1.5h before event.
 
 ---
 
@@ -13,8 +13,8 @@
 | Parameter | Value |
 |---|---|
 | Side | BUY NO |
-| NO price range | 5c - 30c (all categories, no special floors) |
-| Entry window | Trump: 0-24h before event start; All others: 0-1.5h (enforced via milestones API) |
+| NO price range | 5-30c default; NCAA live: 5-25c |
+| Entry window | Trump: 0-24h before event; NCAA: 0-2h after event start (live only); All others: 0-1.5h before event (enforced via milestones API) |
 | Bet size (current) | $3/bet flat |
 | Max per event | $10 (spread across tickers) |
 | Max concurrent positions | 40 |
@@ -33,7 +33,7 @@ Bot dynamically discovers mention series via the Kalshi API (any series with "ME
 | Category | Series | Backtest ROI (0-1.5h pre-event, 5-30c) | t-stat |
 |---|---|---|---|
 | **NFL** | KXNFLMENTION, KXSNFMENTION, KXTNFMENTION, KXCFBMENTION, KXSBMENTION | +80% | sig |
-| **NCAA** | KXNCAAMENTION, KXNCAABMENTION | +74% (270 markets) | +4.48 |
+| **NCAA** | KXNCAAMENTION, KXNCAABMENTION | +114% live 0-2h, 5-25c (232 mkts) | +4.40 |
 | **MLB** | KXMLBMENTION | +34.7% | limited data |
 | **Trump** | KXTRUMPMENTION, KXTRUMPMENTIONB | +88% at 0-24h (761 mkts) | +8.15 |
 | **Governor** | KXGOVERNORMENTION, KXHOCHULMENTION | +55% | sig |
@@ -95,19 +95,33 @@ Edge is **increasing** over time — more mention series being added by Kalshi:
 - Jan 2026: +109%
 - Rolling 3-month ROI trending up: 59% -> 68% -> 79%
 
-### NCAA Backtest (0-1.5h before event start, per-market, last 90 days)
+### NCAA Backtest — Live Games (0-2h after event start, per-market, last 90 days)
 
 | NO Price Bucket | N | WR% | ROI% | t-stat |
 |---|---|---|---|---|
-| 3-7c | 126 | 8.7% | +101% | +1.75 |
-| 8-12c | 53 | 26.4% | +151% | +2.59 |
-| 13-17c | 43 | 30.2% | +99% | +2.12 |
-| 18-22c | 53 | 30.2% | +54% | +1.66 |
-| 23-26c | 58 | 39.7% | +57% | +2.23 |
-| 27-31c | 53 | 41.5% | +38% | +1.67 |
-| **5-30c (bot range)** | **271** | **28.9%** | **+74%** | **+4.48** |
+| 3-5c | 66 | 6.1% | +49% | +0.66 |
+| 6-8c | 50 | 20.0% | +162% | +2.13 |
+| 9-11c | 22 | 31.8% | +210% | +2.12 |
+| 12-15c | 39 | 23.1% | +66% | +1.37 |
+| 16-20c | 60 | 33.3% | +76% | +2.37 |
+| 21-25c | 42 | 47.6% | +99% | +3.04 |
+| 26-30c | 62 | 37.1% | +33% | +1.50 |
+| **5-25c (bot range)** | **232** | **29.3%** | **+114%** | **+4.40** |
 
-76 unique NCAA events, ~17 tickers per game, ~4 eligible at 5-30c per game.
+67 unique NCAA events. Edge is much stronger during live games than pre-event.
+
+### NCAA Time Window Comparison (5-30c NO)
+
+| Window | N | WR% | ROI% | t-stat |
+|---|---|---|---|---|
+| 3h to 2h before | 254 | 29.5% | +99% | +4.04 |
+| 2h to 1h before | 283 | 30.0% | +104% | +4.34 |
+| 1h to start | 337 | 28.2% | +79% | +3.98 |
+| **Live 0-1h after** | **661** | **35.9%** | **+124%** | **+8.83** |
+| **Live 1-2h after** | **413** | **44.1%** | **+153%** | **+9.23** |
+| Live 2-3h after | 225 | 50.7% | +199% | +7.92 |
+
+Pre-event edge is real but live-game edge is 2-3x stronger with higher statistical significance.
 
 ### NBA Analysis
 - **Pre-event (0-1.5h before tipoff):** 5-30c +15.4%, t=1.43 — NOT significant
@@ -143,8 +157,8 @@ Median market has **$72** of NO-side volume in the 1h pre-event window (NO 5-30c
 ## Live Bot Results (as of 2026-02-21)
 
 ### Bot Trades — Strategy Parameters Only (<$4 cost, 5-30c NO)
-- **26 settled trades**, 12W/14L, 46% WR
-- **PnL: +$50.16, +114.4% ROI**
+- **30 settled trades**, 13W/17L, 43% WR
+- **PnL: +$44.08, +83.3% ROI**
 - Running at $3/bet flat (bumped from $2 on 2026-02-21)
 
 ### All Bot Trades (including bugs/out-of-range)
@@ -190,8 +204,8 @@ Median market has **$72** of NO-side volume in the 1h pre-event window (NO 5-30c
 
 ### Bot Architecture
 - **Strategy 1 (Reversion):** Fade retail surges, $3 max, 24h hold
-- **Strategy 2 (Mention):** BUY NO 5-30c, $3/bet, 0-1.5h pre-event, ex Earnings/Fight/Press/NBA
-- **Event start timing:** Milestones fetched from Kalshi API (cached 10 min), only bets 0-1.5h before event start. Markets without milestones are skipped.
+- **Strategy 2 (Mention):** BUY NO, $3/bet, per-category timing + price, ex Earnings/Fight/Press/NBA
+- **Event start timing:** Milestones fetched from Kalshi API (cached 10 min). Per-category: Trump 0-24h pre-event 5-30c, NCAA live 0-2h after start 5-25c, others 0-1.5h pre-event 5-30c. Markets without milestones are skipped.
 - **Dynamic series discovery:** Bot discovers new mention series automatically via API. Excluded categories are filtered after discovery.
 - Limit orders rest on book, canceled after **10 minutes** if unfilled
 - Duplicate trade protection: seeds cooldown from API positions on startup (survives redeploys)
@@ -238,7 +252,8 @@ GET /trade-api/v2/events?with_milestones=true — event start times
 
 ### Entry window per category
 - **Trump (0-24h):** Edge persists across entire 24h pre-event window. 0-24h: +88% ROI (t=8.15, 761 mkts). Edge is strongest 8-12h out (+88% ROI) and stays positive through 24h. Marginal ROI positive at every layer. Reason: Trump markets are listed well in advance and NO stays mispriced for longer. At 18-24h, 79% of markets have zero trades — the ones that do trade early are popular tickers with strong edge.
-- **All others (0-1.5h):** Backtest showed 0-1.5h pre-event has strong ROI across non-Trump categories. NCAA: +74% (t=4.48). Earlier entry on sports/governor/media categories doesn't add significant edge.
+- **NCAA (live 0-2h after start, 5-25c):** Pre-event edge exists (+79-104% ROI) but live-game edge is far stronger: +114% ROI (t=4.40) at 5-25c. WR climbs from 29% to 44% deeper into the game. Edge dies above 25c during live games. Switched to live-only on 2026-02-21.
+- **All others (0-1.5h):** Backtest showed 0-1.5h pre-event has strong ROI across non-Trump categories. Earlier entry on governor/media categories doesn't add significant edge.
 - Enforced via milestones API — bot fetches event_start and applies per-category window
 
 ### Why exclude Earnings/Fight/Press/NBA
@@ -249,15 +264,17 @@ GET /trade-api/v2/events?with_milestones=true — event start times
 
 ### NCAA pricing
 - Tested special NCAA floors (10c, 20c) and ranges (20-69c)
-- At bot timing (0-1.5h pre-event start), 5-30c is +74% ROI (t=4.48)
-- 76 unique events in 90 days, ~4 eligible tickers per game at 5-30c
+- Pre-event 5-30c: +74% ROI (t=4.48), but live 5-25c is better: +114% ROI (t=4.40)
+- Dropping 5c floor to 6c barely changes ROI (+114.0% vs +113.7%), not worth it
+- Edge dies above 25c during live games (26-30c only +33% ROI)
+- 67 unique events in 90 days, ~3-4 eligible tickers per game at 5-25c live
 - Kalshi only creates mention markets for nationally-televised/high-profile games
 
-### Category performance (0-1.5h pre-event, 5-30c NO)
-- **NCAA:** 271 markets, +74% ROI, t=4.48
-- **Trump:** Highest volume, +68% ROI
-- **Governor/Political:** +55% ROI, lower volume
-- **Maddow:** +175% ROI, small sample
+### Category performance (per-category timing windows)
+- **NCAA (live 0-2h, 5-25c):** 232 markets, +114% ROI, t=4.40
+- **Trump (0-24h, 5-30c):** Highest volume, +88% ROI, t=8.15
+- **Governor/Political (0-1.5h, 5-30c):** +55% ROI, lower volume
+- **Maddow (0-1.5h, 5-30c):** +175% ROI, small sample
 
 ### Liquidity-scaled sizing
 - At flat $3, every market gets equal weight — optimal for ROI
@@ -302,9 +319,10 @@ Capital math: ~68 concurrent positions x bet size x 1.3 buffer.
 5. ~~Exclude NBA~~ — DONE (pre-event not significant)
 6. ~~Bump to $3/bet~~ — DONE (26 settled, +114% ROI)
 7. ~~Fix buy_price cap bug~~ — DONE
-8. Hit 100 settled trades -> bump to $5/bet, deposit to ~$625
-9. Validate at $5 -> bump to $10/bet, deposit to ~$1,250
-10. Revisit NBA with live-game timing window (bet during game instead of before)
+8. ~~Switch NCAA to live-game only (0-2h after start, 5-25c)~~ — DONE (+114% ROI vs +74% pre-event)
+9. Hit 100 settled trades -> bump to $5/bet, deposit to ~$625
+10. Validate at $5 -> bump to $10/bet, deposit to ~$1,250
+11. Revisit NBA with live-game timing window (bet during game instead of before)
 11. Optionally implement liquidity-scaled sizing
 12. Monitor live fill rates — backtest assumes 100% fill, reality will be lower
 13. Track Strategy 1 (reversion) performance once enough trades settle
