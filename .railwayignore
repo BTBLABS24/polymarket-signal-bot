@@ -1,0 +1,7 @@
+*.pkl
+*.json
+!realtime_scanner/*.json
+data/
+__pycache__/
+*.pyc
+.git/

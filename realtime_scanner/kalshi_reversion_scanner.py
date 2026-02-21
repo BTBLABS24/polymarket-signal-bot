@@ -1077,11 +1077,9 @@ class MentionBuyNoDetector:
             debug_counts['total'] += 1
 
             # Skip categories with poor ROI at 3h pre-event, NO 5-30c:
-            # NBA (-2%), Fight (+16%), Press_Brief (+18%), Earnings (no milestones)
+            # Fight (+16%), Press_Brief (+18%), Earnings (no milestones)
+            # NBA re-enabled: 690 trades at 5-30c, +132% ROI, t=11.18
             ticker_upper = ticker.upper()
-            if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
-                debug_counts['skipped_cat'] += 1
-                continue
             if 'EARNINGS' in ticker_upper:
                 debug_counts['skipped_cat'] += 1
                 continue
@@ -1130,7 +1128,10 @@ class MentionBuyNoDetector:
                 continue
 
             no_price = 1 - yes_price
-            if no_price < MENTION_MIN_NO_PRICE or no_price > MENTION_MAX_NO_PRICE:
+            # NCAA sports bettors overprice YES on longshots — cheap NO (5-9c)
+            # is a trap. Backtest: 5-9c NCAA = -40% ROI. Skip them.
+            min_no = 0.10 if 'NCAAMENTION' in ticker.upper() else MENTION_MIN_NO_PRICE
+            if no_price < min_no or no_price > MENTION_MAX_NO_PRICE:
                 debug_counts['price_out_range'] += 1
                 continue
 
@@ -1143,9 +1144,8 @@ class MentionBuyNoDetector:
 
             debug_counts['eligible'] += 1
 
-            # Record cooldown ONLY for tickers we actually signal
-            self.signal_history[ticker] = now_ts
-            self._save()
+            # NOTE: cooldown is now set AFTER order is placed (in run loop)
+            # so markets aren't blocked before passing the entry window check
 
             title = m.get('title', ticker)
             event_ticker = m.get('event_ticker', '')
@@ -1186,7 +1186,7 @@ class MentionBuyNoDetector:
 
         # Print debug breakdown
         print(f"  Mention filter: {debug_counts['total']} checked, "
-              f"{debug_counts['skipped_cat']} skipped(NBA/Earn/Fight/Press), "
+              f"{debug_counts['skipped_cat']} skipped(Earn/Fight/Press), "
               f"{debug_counts['too_far']} >{MENTION_MAX_CLOSE_HOURS}h, "
               f"{debug_counts['no_price']} no price, "
               f"{debug_counts['price_out_range']} price OOR, "
@@ -2053,7 +2053,7 @@ class KalshiReversionScanner:
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
         print(f"Strategy 1: Fade retail surges, 24h hold")
-        print(f"Strategy 2: Mention BUY NO 5-30c, ${MENTION_BET_DOLLARS}/bet, 1h pre-event, ex NBA/Fight/Press")
+        print(f"Strategy 2: Mention BUY NO 5-30c, ${MENTION_BET_DOLLARS}/bet, 1h pre-event, ex Fight/Press")
         print(f"Max bet: ${MAX_BET_DOLLARS}/signal (reversion), ${MENTION_BET_DOLLARS}/signal (mention)")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
@@ -2066,6 +2066,19 @@ class KalshiReversionScanner:
                 print(f"Account balance: ${balance/100:.2f}")
             else:
                 print("WARNING: Could not fetch balance — check API keys")
+
+            # Seed cooldown from existing API positions so we don't
+            # re-bet tickers we already hold (survives redeploys)
+            existing = self.client.get_positions()
+            seeded = 0
+            for pos in existing:
+                t = pos.get('ticker', '')
+                if 'MENTION' in t.upper() and t not in self.mention_detector.signal_history:
+                    self.mention_detector.signal_history[t] = time.time()
+                    seeded += 1
+            if seeded:
+                self.mention_detector._save()
+                print(f"  Seeded cooldown from {seeded} existing mention positions")
 
         await self.notifier.send_startup(self.positions.count(), balance)
 
@@ -2282,6 +2295,9 @@ class KalshiReversionScanner:
                         self.positions.add(sig, order_info)
                         mention_count += 1
                         mention_allowed = mention_count < MENTION_MAX_POSITIONS
+                        # Set cooldown AFTER order placed (not on eligibility)
+                        self.mention_detector.signal_history[sig['ticker']] = time.time()
+                        self.mention_detector._save()
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
