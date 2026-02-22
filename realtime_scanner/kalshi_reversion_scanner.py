@@ -2079,6 +2079,90 @@ class KalshiNotifier:
         )
         await self._send(msg)
 
+    async def send_daily_summary(self, closed_positions):
+        """Send daily P&L summary for bot mention trades (NO fill 5-30c)."""
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+        # Filter: mention trades settled today, NO fill price 5-30c
+        todays = []
+        for pos in closed_positions:
+            if pos.get('signal_type') != 'mention_buy_no':
+                continue
+            close_ts = pos.get('close_time')
+            if not close_ts:
+                continue
+            close_date = datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%Y-%m-%d')
+            if close_date != today:
+                continue
+            fill_price = pos.get('fill_price', 0)
+            if fill_price < 0.05 or fill_price > 0.30:
+                continue
+            todays.append(pos)
+
+        if not todays:
+            return  # Nothing settled today
+
+        # Calculate today's stats
+        wins = []
+        losses = []
+        for pos in todays:
+            pnl = pos.get('settle_pnl', 0)
+            ticker = pos.get('ticker', '')
+            title = pos.get('title', '')[:40]
+            fill_price = pos.get('fill_price', 0)
+            fill_count = pos.get('fill_count', 0)
+            cost = round(fill_count * fill_price, 2)
+            result = pos.get('result', '?')
+            entry = {'ticker': ticker, 'title': title, 'pnl': pnl, 'cost': cost,
+                     'fill_price': fill_price, 'fill_count': fill_count, 'result': result}
+            if pnl > 0:
+                wins.append(entry)
+            else:
+                losses.append(entry)
+
+        n = len(todays)
+        total_cost = sum(p.get('fill_count', 0) * p.get('fill_price', 0) for p in todays)
+        total_pnl = sum(p.get('settle_pnl', 0) for p in todays)
+        wr = len(wins) / n * 100 if n > 0 else 0
+        roi = total_pnl / total_cost * 100 if total_cost > 0 else 0
+
+        # Cumulative: all-time bot mention trades (NO 5-30c)
+        all_bot = [p for p in closed_positions
+                   if p.get('signal_type') == 'mention_buy_no'
+                   and 0.05 <= p.get('fill_price', 0) <= 0.30]
+        cum_pnl = sum(p.get('settle_pnl', 0) for p in all_bot)
+        cum_cost = sum(p.get('fill_count', 0) * p.get('fill_price', 0) for p in all_bot)
+        cum_roi = cum_pnl / cum_cost * 100 if cum_cost > 0 else 0
+        cum_trades = len(all_bot)
+        cum_wins = sum(1 for p in all_bot if p.get('settle_pnl', 0) > 0)
+
+        # Build message
+        lines = [f"DAILY P&L SUMMARY — {today}", ""]
+
+        lines.append(f"Settled today: {n} trades")
+        lines.append(f"Wins: {len(wins)}, Losses: {len(losses)} ({wr:.0f}% WR)")
+        lines.append(f"Day cost: ${total_cost:.2f}")
+        lines.append(f"Day P&L: ${total_pnl:+.2f} ({roi:+.0f}% ROI)")
+        lines.append("")
+
+        if wins:
+            lines.append("WINS:")
+            for w in sorted(wins, key=lambda x: x['pnl'], reverse=True):
+                lines.append(f"  +${w['pnl']:.2f}  {w['ticker']}")
+        if losses:
+            lines.append("LOSSES:")
+            for l in sorted(losses, key=lambda x: x['pnl']):
+                lines.append(f"  -${abs(l['pnl']):.2f}  {l['ticker']}")
+
+        lines.append("")
+        lines.append(f"ALL-TIME (NO 5-30c):")
+        lines.append(f"  {cum_trades} trades, {cum_wins} wins ({cum_wins/cum_trades*100:.0f}% WR)" if cum_trades > 0 else "  0 trades")
+        lines.append(f"  Cost: ${cum_cost:.2f}")
+        lines.append(f"  Cumulative P&L: ${cum_pnl:+.2f} ({cum_roi:+.0f}% ROI)")
+
+        msg = "\n".join(lines)
+        await self._send(msg)
+
     async def _send(self, message):
         if not self.bot or not TELEGRAM_CHAT_ID:
             print(f'[TG] {message[:200]}...')
@@ -2109,6 +2193,7 @@ class KalshiReversionScanner:
         self._last_mention_scan = 0  # timestamp of last mention scan
         self._resting_mention_orders = {}  # ticker -> {order_id, placed_time, contracts, price_cents, sig}
         self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
+        self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
 
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
@@ -2400,6 +2485,17 @@ class KalshiReversionScanner:
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
             print(f"  Daily P&L: ${daily_pnl:.2f}")
+
+        # Daily P&L summary via Telegram — send once per day after 23:00 UTC
+        now_utc = datetime.fromtimestamp(now, tz=timezone.utc)
+        today_str = now_utc.strftime('%Y-%m-%d')
+        if now_utc.hour >= 23 and self._last_daily_summary_date != today_str:
+            self._last_daily_summary_date = today_str
+            try:
+                await self.notifier.send_daily_summary(self.positions.closed)
+                print(f"  Sent daily P&L summary for {today_str}")
+            except Exception as e:
+                print(f"  Daily summary error: {e}")
 
 
     async def _check_resting_mention_orders(self):
