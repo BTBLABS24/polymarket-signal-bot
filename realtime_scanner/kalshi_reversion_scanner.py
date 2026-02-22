@@ -2615,10 +2615,17 @@ class KalshiReversionScanner:
                           book_no_ask_cents=best_no_ask, slip_pct=round(slip_pct, 1))
                 return None
 
-        # Calculate contracts for MENTION_BET_DOLLARS
-        contracts = int(MENTION_BET_DOLLARS / (best_no_ask / 100))
+        # Per-category bet sizing
+        if is_nba_order:
+            mention_bet = 3
+        elif is_ncaa_order:
+            mention_bet = 3
+        else:
+            mention_bet = MENTION_BET_DOLLARS  # default & trump use global ($6)
+
+        contracts = int(mention_bet / (best_no_ask / 100))
         if contracts < 1:
-            print(f"    Can't buy even 1 contract at {best_no_ask}c for ${MENTION_BET_DOLLARS}, skipping")
+            print(f"    Can't buy even 1 contract at {best_no_ask}c for ${mention_bet}, skipping")
             return None
 
         bet_dollars = round(contracts * best_no_ask / 100, 2)
