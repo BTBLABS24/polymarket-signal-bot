@@ -2879,7 +2879,7 @@ class KalshiReversionScanner:
 
         # Per-category bet sizing
         if is_nba_order:
-            mention_bet = 3
+            mention_bet = 5
         elif is_ncaa_order:
             mention_bet = 3
         else:
