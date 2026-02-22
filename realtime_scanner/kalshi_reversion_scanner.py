@@ -177,6 +177,25 @@ MENTION_SCAN_SERIES = [
     'KXVANCEMENTION',
 ]
 
+# --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
+# Buys NO when market is below statistically-derived fair value based on
+# time-into-game degradation curves. Separate from main mention strategy.
+DEGRADE_BET_DOLLARS = 1
+DEGRADE_MIN_HOURS_LIVE = 1.0   # only bet >= 1h into game
+# Conservative fair NO prices (CI lower bound, 95%, n>=30) by word & half-hour.
+# If market NO <= this value, it's a buy.
+DEGRADE_BUY_BELOW = {
+    'RETI': {'1.0': 93, '1.5': 94, '2.0': 96, '2.5': 98},
+    'BUZZ': {'1.0': 74, '1.5': 82, '2.0': 90, '2.5': 97},
+    'ANKL': {'1.0': 58, '1.5': 61, '2.0': 72},
+    'TRIP': {'1.0': 70, '1.5': 72, '2.0': 85},
+    'AIR':  {'1.0': 65, '1.5': 67, '2.0': 78},
+    'ALLE': {'1.5': 72, '2.0': 88},
+    'TRAD': {'2.0': 66},
+    'MVP':  {'1.5': 55, '2.0': 72},
+    'PLAY': {'2.0': 58},
+}
+
 # State files
 STATE_DIR = Path(__file__).parent
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
@@ -2281,7 +2300,7 @@ class KalshiReversionScanner:
         if self._resting_mention_orders and self.client.can_trade:
             await self._check_resting_mention_orders()
 
-        mention_count = self.positions.count('mention_buy_no') + len(self._resting_mention_orders)
+        mention_count = self.positions.count('mention_buy_no') + self.positions.count('degrade_buy_no') + len(self._resting_mention_orders)
         mention_allowed = mention_count < MENTION_MAX_POSITIONS
         should_scan_mentions = (now - self._last_mention_scan) >= MENTION_SCAN_INTERVAL_SECONDS
 
@@ -2427,6 +2446,9 @@ class KalshiReversionScanner:
                         self.positions.add(sig, order_info)
                         mention_count += 1
                         mention_allowed = mention_count < MENTION_MAX_POSITIONS
+
+                # 3b. Degradation curve strategy (NBA, 1h+ live, $1/bet)
+                await self._scan_degradation_curve(mention_markets, milestones, now)
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
@@ -2435,8 +2457,8 @@ class KalshiReversionScanner:
         for atype, pos in alerts:
             exit_info = None
             if pos.get('is_live') and self.client.can_trade:
-                # Mention positions held until settlement — no manual exit needed
-                if pos.get('signal_type') != 'mention_buy_no':
+                # Mention/degrade positions held until settlement — no manual exit needed
+                if pos.get('signal_type') not in ('mention_buy_no', 'degrade_buy_no'):
                     exit_info = self.executor.execute_exit(pos)
 
             if atype == '24h_exit':
@@ -2555,6 +2577,246 @@ class KalshiReversionScanner:
         n_resting = len(self._resting_mention_orders)
         if n_resting > 0 or filled_tickers or canceled_tickers:
             print(f"  Resting orders: {n_resting} active, {len(filled_tickers)} filled, {len(canceled_tickers)} expired")
+
+    async def _scan_degradation_curve(self, mention_markets, milestones, now):
+        """Degradation curve strategy: buy NO on NBA mention markets where the
+        market is cheaper than the statistically-derived fair value, 1h+ into
+        a live game.  Runs independently of the main mention strategy."""
+        mention_count = self.positions.count('mention_buy_no') + self.positions.count('degrade_buy_no') + len(self._resting_mention_orders)
+        if mention_count >= MENTION_MAX_POSITIONS:
+            return
+
+        nba_markets = [m for m in mention_markets
+                       if 'NBAMENTION' in m.get('ticker', '').upper()
+                       and m.get('status') == 'open']
+        if not nba_markets:
+            return
+
+        signals = []
+        for m in nba_markets:
+            ticker = m.get('ticker', '')
+            ticker_upper = ticker.upper()
+            event_ticker = m.get('event_ticker', '')
+
+            # Already have position or resting order?
+            if self.positions.has_open_ticker(ticker):
+                continue
+            if ticker in self._resting_mention_orders:
+                continue
+
+            # Extract word from ticker: KXNBAMENTION-26FEB22CLEOKC-PLAYOFF → PLAYOFF
+            parts = ticker.split('-')
+            if len(parts) < 3:
+                continue
+            word = parts[-1].upper()
+            if word not in DEGRADE_BUY_BELOW:
+                continue
+
+            # Check game is live and >= 1h in
+            ms = milestones.get(event_ticker)
+            if not ms or not ms.get('start_ts'):
+                continue
+            hours_live = (now - ms['start_ts']) / 3600
+            if hours_live < DEGRADE_MIN_HOURS_LIVE:
+                continue
+            # Don't bet after game is over
+            if ms.get('end_ts') and ms['end_ts'] <= now:
+                continue
+
+            # Bucket into half-hour
+            half_hour = round(hours_live * 2) / 2
+            hh_key = f'{half_hour:.1f}' if half_hour != int(half_hour) else f'{half_hour:.1f}'
+            word_table = DEGRADE_BUY_BELOW[word]
+            if hh_key not in word_table:
+                continue
+            max_buy_cents = word_table[hh_key]
+
+            # Get current YES price
+            yes_price = None
+            yes_bid = m.get('yes_bid')
+            yes_ask = m.get('yes_ask')
+            if yes_bid is not None and yes_ask is not None:
+                try:
+                    yes_price = (int(yes_bid) + int(yes_ask)) / 2 / 100
+                except (ValueError, TypeError):
+                    pass
+            if yes_price is None:
+                last = m.get('last_price')
+                if last is not None:
+                    try:
+                        yes_price = int(last) / 100
+                    except (ValueError, TypeError):
+                        pass
+            if yes_price is None:
+                continue
+
+            # Word already said? (YES >= 90%)
+            if yes_price >= 0.90:
+                continue
+
+            no_price_cents = round((1 - yes_price) * 100)
+
+            # Core check: is market NO cheap enough vs fair value?
+            if no_price_cents > max_buy_cents:
+                continue
+
+            # Per-event exposure cap
+            if event_ticker:
+                event_exp = self.positions.event_exposure(event_ticker)
+                if event_exp >= MENTION_MAX_EVENT_DOLLARS:
+                    continue
+
+            signals.append({
+                'ticker': ticker,
+                'event_ticker': event_ticker,
+                'title': m.get('title', ''),
+                'no_price': no_price_cents / 100,
+                'no_price_cents': no_price_cents,
+                'max_buy_cents': max_buy_cents,
+                'word': word,
+                'hours_live': round(hours_live, 2),
+                'hh_bucket': hh_key,
+                'signal_type': 'degrade_buy_no',
+                'signal_time': datetime.now(timezone.utc).isoformat(),
+            })
+
+        if signals:
+            print(f"  DEGRADE scan: {len(signals)} signals from {len(nba_markets)} NBA markets")
+
+        for sig in signals:
+            if mention_count >= MENTION_MAX_POSITIONS:
+                print(f"    DEGRADE CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
+                break
+            if len(self._resting_mention_orders) >= MENTION_MAX_RESTING_ORDERS:
+                print(f"    DEGRADE RESTING CAP, waiting for fills")
+                break
+
+            print(f"  DEGRADE: BUY NO @ {sig['no_price_cents']}c <= fair {sig['max_buy_cents']}c "
+                  f"'{sig['word']}' {sig['hh_bucket']}h live ({sig['hours_live']:.1f}h) "
+                  f"'{sig['title'][:40]}'")
+
+            order_info = None
+            if self.client.can_trade:
+                order_info = self._execute_degradation_entry(sig)
+
+            if order_info:
+                await self.notifier.send_mention_signal(sig, order_info)
+                self.positions.add(sig, order_info)
+                mention_count += 1
+
+    def _execute_degradation_entry(self, sig):
+        """Execute a degradation-curve BUY NO entry. $1 bet, NBA only."""
+        ticker = sig['ticker']
+        max_buy_cents = sig['max_buy_cents']
+
+        orderbook = self.client.get_orderbook(ticker)
+        if not orderbook:
+            print(f"    DEGRADE: no orderbook for {ticker}, skipping")
+            return None
+
+        yes_bids = orderbook.get('yes', [])
+        if isinstance(yes_bids, dict):
+            yes_bids = yes_bids.get('bids', [])
+        if not yes_bids:
+            print(f"    DEGRADE: no YES bids for {ticker}, skipping")
+            return None
+
+        no_asks = sorted([[100 - b[0], b[1]] for b in yes_bids], key=lambda x: x[0])
+        if not no_asks:
+            return None
+
+        best_no_ask = no_asks[0][0]  # cents
+
+        # Only buy if book price is still within the fair value bound
+        if best_no_ask > max_buy_cents:
+            print(f"    DEGRADE: book {best_no_ask}c > fair {max_buy_cents}c, skipping")
+            return None
+
+        contracts = int(DEGRADE_BET_DOLLARS / (best_no_ask / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * best_no_ask / 100, 2)
+        buy_price = best_no_ask
+
+        print(f"    DEGRADE sizing: {contracts} NO @ {best_no_ask}c = ${bet_dollars:.2f}")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-DEG-{uuid.uuid4().hex[:8]}',
+                'fill_price': best_no_ask / 100,
+                'fill_count': contracts,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'degrade_buy_no',
+                'ticker': ticker, 'side': 'no', 'action': 'buy',
+                'contracts': contracts, 'price_cents': best_no_ask,
+                'bet_dollars': bet_dollars, 'dry_run': True,
+            })
+            print(f"    DEGRADE DRY RUN: {contracts} NO @ {best_no_ask}c (${bet_dollars:.2f})")
+            return order_info
+
+        order = self.client.create_order(
+            ticker=ticker, side='no', action='buy',
+            count=contracts, price_cents=buy_price,
+        )
+        if not order:
+            print(f"    DEGRADE: order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    DEGRADE order placed: {order_id} ({contracts} NO @ {buy_price}c)")
+        log_event('degrade_order_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=buy_price, bet_dollars=bet_dollars,
+                  word=sig.get('word'), hours_live=sig.get('hours_live'),
+                  hh_bucket=sig.get('hh_bucket'), max_buy_cents=max_buy_cents)
+
+        # Quick fill check
+        time.sleep(2)
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', buy_price)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'degrade_buy_no',
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'no', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': buy_price,
+                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                })
+                print(f"    DEGRADE FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
+                log_event('degrade_filled_instant', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
+                return info
+
+        # Not filled — leave resting
+        self._resting_mention_orders[ticker] = {
+            'order_id': order_id,
+            'placed_time': time.time(),
+            'contracts': contracts,
+            'price_cents': buy_price,
+            'sig': sig,
+        }
+        print(f"    DEGRADE resting on book")
+        log_event('degrade_order_resting', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=buy_price)
+        return None
 
     def _execute_mention_entry(self, sig):
         """Execute a mention BUY NO entry. Simpler than reversion — fixed $5 bet,
