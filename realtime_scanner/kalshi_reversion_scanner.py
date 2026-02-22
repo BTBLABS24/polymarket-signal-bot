@@ -2276,32 +2276,6 @@ class KalshiReversionScanner:
             tickers = set(t.get('ticker', '') for t in trades)
             print(f"  Unique markets: {len(tickers)}")
 
-            # 2. Detect signals
-            signals = self.detector.detect(trades, self.client, now)
-            print(f"  Signals: {len(signals)}")
-
-            for sig in signals:
-                entry_c = int(sig['entry_price'] * 100)
-                print(f"  SIGNAL: {sig['fade_action']} '{sig['title'][:50]}' @ {entry_c}c "
-                      f"(move {sig['price_move']:+.3f}, {sig['n_small_trades']} trades)")
-
-                # Skip if we already have an open position on this ticker
-                if self.positions.has_open_ticker(sig['ticker']):
-                    print(f"    DUPE: already have open position on {sig['ticker']}, skipping")
-                    continue
-
-                order_info = None
-                event = sig.get('event_ticker', '')
-                exposure = self.positions.event_exposure(event)
-                if exposure >= MAX_BET_DOLLARS and event:
-                    print(f"    EVENT CAP: already ${exposure:.2f} on {event} (max ${MAX_BET_DOLLARS}), skipping")
-                elif reversion_allowed and self.client.can_trade and not low_balance:
-                    order_info = self.executor.execute_entry(sig)
-
-                if order_info:
-                    await self.notifier.send_signal(sig, order_info)
-                    self.positions.add(sig, order_info)
-
         # 3. Mention BUY NO scan
         # First: check resting orders from previous cycles
         if self._resting_mention_orders and self.client.can_trade:
