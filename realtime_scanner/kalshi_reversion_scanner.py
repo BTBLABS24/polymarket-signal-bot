@@ -2368,9 +2368,6 @@ class KalshiReversionScanner:
                         self.positions.add(sig, order_info)
                         mention_count += 1
                         mention_allowed = mention_count < MENTION_MAX_POSITIONS
-                        # Set cooldown AFTER order placed (not on eligibility)
-                        self.mention_detector.signal_history[sig['ticker']] = time.time()
-                        self.mention_detector._save()
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
@@ -2594,6 +2591,11 @@ class KalshiReversionScanner:
             return None
 
         order_id = order.get('order_id', '')
+        # Set cooldown IMMEDIATELY on order placement (not on fill)
+        # This prevents double-betting the same ticker on subsequent scan cycles
+        self.mention_detector.signal_history[ticker] = time.time()
+        self.mention_detector._save()
+
         print(f"    Order placed: {order_id} ({contracts} NO @ {buy_price}c) — resting up to {MENTION_ORDER_REST_SECONDS//60}min")
         log_event('mention_order_placed', ticker=ticker, order_id=order_id,
                   contracts=contracts, price_cents=buy_price, bet_dollars=bet_dollars,
