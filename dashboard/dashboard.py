@@ -22,17 +22,23 @@ app = Flask(__name__)
 
 # ── Auth ────────────────────────────────────────────────────────────────────
 _private_key = None
+_key_error = None
 
 def _load_key():
-    global _private_key
-    if _private_key:
+    global _private_key, _key_error
+    if _private_key or _key_error:
         return
-    if KALSHI_PRIVATE_KEY_ENV:
-        pem = KALSHI_PRIVATE_KEY_ENV.replace('\\n', '\n').encode()
-        _private_key = serialization.load_pem_private_key(pem, password=None)
-    elif KALSHI_PRIVATE_KEY_B64:
-        pem = base64.b64decode(KALSHI_PRIVATE_KEY_B64)
-        _private_key = serialization.load_pem_private_key(pem, password=None)
+    try:
+        if KALSHI_PRIVATE_KEY_ENV:
+            pem = KALSHI_PRIVATE_KEY_ENV.replace('\\n', '\n').encode()
+            _private_key = serialization.load_pem_private_key(pem, password=None)
+        elif KALSHI_PRIVATE_KEY_B64:
+            pem = base64.b64decode(KALSHI_PRIVATE_KEY_B64)
+            _private_key = serialization.load_pem_private_key(pem, password=None)
+        else:
+            _key_error = "No KALSHI_PRIVATE_KEY or KALSHI_PRIVATE_KEY_B64 env var set"
+    except Exception as e:
+        _key_error = str(e)
 
 def auth_get(path, params=None):
     _load_key()
@@ -53,7 +59,7 @@ def auth_get(path, params=None):
     r = requests.get(f"https://api.elections.kalshi.com{path}", headers=headers, params=params)
     if r.status_code == 200:
         return r.json()
-    return None
+    return {'_error': f"HTTP {r.status_code}: {r.text[:200]}"}
 
 def pub_get(path, params=None):
     r = requests.get(f"https://api.elections.kalshi.com{path}", params=params)
@@ -116,6 +122,8 @@ def get_dashboard_data():
 
     # Balance
     bal_data = auth_get('/trade-api/v2/portfolio/balance') or {}
+    if '_error' in bal_data:
+        bal_data = {}
     balance = bal_data.get('balance', 0) / 100
     payout = bal_data.get('payout', 0) / 100
 
@@ -139,6 +147,8 @@ def get_dashboard_data():
 
     # Open positions
     pos_data = auth_get('/trade-api/v2/portfolio/positions', {'limit': 100}) or {}
+    if '_error' in pos_data:
+        pos_data = {}
     positions = pos_data.get('market_positions', [])
     open_positions = [p for p in positions if (p.get('market_exposure') or 0) != 0]
 
@@ -572,13 +582,35 @@ HISTORY_TEMPLATE = """
 # ── Routes ──────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
-    data = get_dashboard_data()
-    return render_template_string(TEMPLATE, data=data, rules=STRATEGY_RULES)
+    try:
+        data = get_dashboard_data()
+        return render_template_string(TEMPLATE, data=data, rules=STRATEGY_RULES)
+    except Exception as e:
+        import traceback
+        return f"<pre>Error rendering dashboard:\n{traceback.format_exc()}</pre>", 500
 
 @app.route('/history')
 def history():
-    data = get_dashboard_data()
-    return render_template_string(HISTORY_TEMPLATE, data=data)
+    try:
+        data = get_dashboard_data()
+        return render_template_string(HISTORY_TEMPLATE, data=data)
+    except Exception as e:
+        import traceback
+        return f"<pre>Error rendering history:\n{traceback.format_exc()}</pre>", 500
+
+@app.route('/debug')
+def debug():
+    _load_key()
+    lines = []
+    lines.append(f"KALSHI_API_KEY_ID set: {bool(KALSHI_API_KEY_ID)}")
+    lines.append(f"KALSHI_PRIVATE_KEY set: {bool(KALSHI_PRIVATE_KEY_ENV)}")
+    lines.append(f"KALSHI_PRIVATE_KEY_B64 set: {bool(KALSHI_PRIVATE_KEY_B64)}")
+    lines.append(f"Key loaded: {_private_key is not None}")
+    lines.append(f"Key error: {_key_error}")
+    # Test one API call
+    result = auth_get('/trade-api/v2/portfolio/balance')
+    lines.append(f"Balance API response: {result}")
+    return '<pre>' + '\n'.join(lines) + '</pre>'
 
 @app.route('/health')
 def health():
