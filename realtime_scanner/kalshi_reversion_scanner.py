@@ -147,7 +147,7 @@ IMPL_EXCLUDED_PREFIXES = [
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 3           # $3 per signal
+MENTION_BET_DOLLARS = 6           # $6 per signal
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
@@ -155,7 +155,7 @@ MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (event
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
-MENTION_MAX_EVENT_DOLLARS = 10    # Max $ per event (spread across tickers)
+MENTION_MAX_EVENT_DOLLARS = 26    # Max $ per event (spread across tickers)
 MENTION_ORDER_REST_SECONDS = 600  # Leave orders resting 10 min before canceling
 MENTION_MAX_RESTING_ORDERS = 10   # Max concurrent resting orders (capital lockup cap)
 # Series to scan (ex NBA/Earnings per backtest — weakest ROI categories)
@@ -1190,7 +1190,7 @@ class MentionBuyNoDetector:
             if is_ncaa:
                 max_no, min_no = 0.25, 0.06
             elif is_nba:
-                max_no, min_no = 0.25, 0.09
+                max_no, min_no = 0.30, 0.15
             else:
                 max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             if no_price < min_no or no_price > max_no:
@@ -2591,7 +2591,7 @@ class KalshiReversionScanner:
         if is_ncaa_order:
             max_no_order, min_no_order = 0.25, 0.06
         elif is_nba_order:
-            max_no_order, min_no_order = 0.25, 0.09
+            max_no_order, min_no_order = 0.30, 0.15
         else:
             max_no_order, min_no_order = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
         if best_no_ask / 100 < min_no_order or best_no_ask / 100 > max_no_order:
