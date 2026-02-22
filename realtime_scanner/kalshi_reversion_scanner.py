@@ -2885,18 +2885,63 @@ class KalshiReversionScanner:
         else:
             mention_bet = MENTION_BET_DOLLARS  # default & trump use global ($6)
 
-        contracts = int(mention_bet / (best_no_ask / 100))
-        if contracts < 1:
+        # Desired contracts at best ask price
+        desired_contracts = int(mention_bet / (best_no_ask / 100))
+        if desired_contracts < 1:
             print(f"    Can't buy even 1 contract at {best_no_ask}c for ${mention_bet}, skipping")
             return None
 
-        bet_dollars = round(contracts * best_no_ask / 100, 2)
-        print(f"    Sizing: {contracts} NO @ {best_no_ask}c = ${bet_dollars:.2f}")
+        # Slippage check: would this order move price more than 2c?
+        # Walk the book to see how many contracts are available before 2c slippage
+        MENTION_MAX_SLIPPAGE_CENTS = 2
+        max_sweep_price = best_no_ask + MENTION_MAX_SLIPPAGE_CENTS
+        # Don't sweep past category max NO price
+        max_sweep_price = min(max_sweep_price, int(max_no_order * 100))
+
+        # Count available depth within 2c
+        available = 0
+        cost_cents = 0
+        worst_fill = best_no_ask
+        for price_c, qty in no_asks:
+            if price_c > max_sweep_price:
+                break
+            take = min(qty, desired_contracts - available)
+            if take <= 0:
+                break
+            available += take
+            cost_cents += price_c * take
+            worst_fill = price_c
+
+        if available < 1:
+            print(f"    No depth within {MENTION_MAX_SLIPPAGE_CENTS}c of best ask {best_no_ask}c, skipping")
+            return None
+
+        # Use whatever we can fill within 2c (may be less than desired)
+        contracts = available
+        avg_fill_price_c = cost_cents / contracts
+        slippage = worst_fill - best_no_ask
+
+        # Per-event exposure cap
+        event = sig.get('event_ticker', '')
+        event_exp = self.positions.event_exposure(event) if event else 0
+        remaining_event_cap = max(MENTION_MAX_EVENT_DOLLARS - event_exp, 0)
+        if remaining_event_cap > 0:
+            max_contracts_by_cap = int(remaining_event_cap / (avg_fill_price_c / 100))
+            contracts = min(contracts, max_contracts_by_cap)
+
+        if contracts < 1:
+            print(f"    Event cap reached (${event_exp:.0f}/${MENTION_MAX_EVENT_DOLLARS}), skipping")
+            return None
+
+        bet_dollars = round(contracts * avg_fill_price_c / 100, 2)
+        print(f"    Depth check: want {desired_contracts} @ {best_no_ask}c, "
+              f"can fill {available} within {MENTION_MAX_SLIPPAGE_CENTS}c (slip={slippage}c)")
+        print(f"    Sizing: {contracts} NO @ avg {avg_fill_price_c:.1f}c = ${bet_dollars:.2f}")
 
         if DRY_RUN:
             order_info = {
                 'order_id': f'DRY-MEN-{uuid.uuid4().hex[:8]}',
-                'fill_price': best_no_ask / 100,
+                'fill_price': avg_fill_price_c / 100,
                 'fill_count': contracts,
                 'bet_dollars': bet_dollars,
                 'dry_run': True,
@@ -2908,16 +2953,15 @@ class KalshiReversionScanner:
                 'side': 'no',
                 'action': 'buy',
                 'contracts': contracts,
-                'price_cents': best_no_ask,
+                'price_cents': worst_fill,
                 'bet_dollars': bet_dollars,
                 'dry_run': True,
             })
-            print(f"    DRY RUN: would buy {contracts} NO @ {best_no_ask}c (${bet_dollars:.2f})")
+            print(f"    DRY RUN: would buy {contracts} NO @ avg {avg_fill_price_c:.1f}c, sweep to {worst_fill}c (${bet_dollars:.2f})")
             return order_info
 
-        # Live order: buy NO at best ask (hard cap at max NO price per category)
-        max_cents = int(max_no_order * 100)
-        buy_price = min(best_no_ask, max_cents)
+        # Live order: buy NO at worst fill price to sweep available depth
+        buy_price = worst_fill
         order = self.client.create_order(
             ticker=ticker,
             side='no',
@@ -2935,7 +2979,7 @@ class KalshiReversionScanner:
         self.mention_detector.signal_history[ticker] = time.time()
         self.mention_detector._save()
 
-        print(f"    Order placed: {order_id} ({contracts} NO @ {buy_price}c) — resting up to {MENTION_ORDER_REST_SECONDS//60}min")
+        print(f"    Order placed: {order_id} ({contracts} NO @ {buy_price}c, avg ~{avg_fill_price_c:.1f}c, ${bet_dollars:.2f}) — resting up to {MENTION_ORDER_REST_SECONDS//60}min")
         log_event('mention_order_placed', ticker=ticker, order_id=order_id,
                   contracts=contracts, price_cents=buy_price, bet_dollars=bet_dollars,
                   signal_no_cents=no_price_cents, book_no_ask_cents=best_no_ask,
