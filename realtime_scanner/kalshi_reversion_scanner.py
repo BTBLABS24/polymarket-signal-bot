@@ -79,9 +79,10 @@ MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 26    # Max $ per event (spread across tickers)
 MENTION_ORDER_REST_SECONDS = 600  # Leave orders resting 10 min before canceling
 MENTION_MAX_RESTING_ORDERS = 10   # Max concurrent resting orders (capital lockup cap)
-# Series to scan (ex NBA/Earnings per backtest — weakest ROI categories)
+# Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
-    # Sports (ex NBA) — NFL +80%, NCAA +60%, Fight +34%
+    # Sports — NBA (degradation curve), NFL +80%, NCAA +60%, Fight +34%
+    'KXNBAMENTION',
     'KXNFLMENTION', 'KXNCAAMENTION', 'KXNCAABMENTION',
     'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION', 'KXMLBMENTION',
     'KXFIGHTMENTION', 'KXSBMENTION',
