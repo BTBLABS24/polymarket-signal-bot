@@ -1973,7 +1973,7 @@ class KalshiReversionScanner:
                           rested_seconds=int(age))
 
                 # Taker fallback: cross the spread to get filled
-                taker_info = self._execute_mention_taker(info['sig'])
+                taker_info = self._execute_mention_taker(info['sig'], passive_price_cents=info['price_cents'])
                 if taker_info:
                     await self.notifier.send_mention_signal(info['sig'], taker_info)
                     self.positions.add(info['sig'], taker_info)
@@ -2572,9 +2572,10 @@ class KalshiReversionScanner:
                   contracts=contracts, price_cents=our_bid)
         return None
 
-    def _execute_mention_taker(self, sig):
+    def _execute_mention_taker(self, sig, passive_price_cents=None):
         """Cross the spread to fill as taker (3.5% fee) after passive bid expired.
         Only used for mention strategy — degradation stays passive-only.
+        Max 2c slippage from original passive bid price.
         Returns order info dict or None."""
         ticker = sig['ticker']
         print(f"    TAKER attempt: {ticker}")
@@ -2599,6 +2600,11 @@ class KalshiReversionScanner:
 
         if best_no_ask is None:
             print(f"    No NO ask available for {ticker}, taker skip")
+            return None
+
+        # Max 2c slippage from original passive bid
+        if passive_price_cents is not None and best_no_ask > passive_price_cents + 2:
+            print(f"    Taker slippage too high: ask {best_no_ask}c vs passive {passive_price_cents}c (+{best_no_ask - passive_price_cents}c > 2c), skip")
             return None
 
         # Per-category price range (same as passive)
