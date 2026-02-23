@@ -1814,10 +1814,14 @@ class KalshiReversionScanner:
                     if sig['ticker'] in self._resting_mention_orders:
                         continue
 
-                    # Per-event exposure cap (mention only)
+                    # Per-event exposure cap (mention only) — includes resting orders
                     event = sig.get('event_ticker', '')
                     if event:
                         event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
+                        # Also count resting orders on same event
+                        for rt, ri in self._resting_mention_orders.items():
+                            if ri.get('sig', {}).get('event_ticker') == event:
+                                event_exp += ri.get('contracts', 0) * ri.get('price_cents', 0) / 100
                         if event_exp >= MENTION_MAX_EVENT_DOLLARS:
                             continue
 
@@ -1957,15 +1961,13 @@ class KalshiReversionScanner:
                 filled_tickers.append(ticker)
 
             elif age > MENTION_ORDER_REST_SECONDS:
-                # Stale — cancel and clear cooldown so we can retry
+                # Stale — cancel but keep 24h cooldown to prevent repeated orders
                 try:
                     self.client.cancel_order(order_id)
                 except Exception:
                     pass
                 canceled_tickers.append(ticker)
-                self.mention_detector.signal_history.pop(ticker, None)
-                self.mention_detector._save()
-                print(f"  RESTING EXPIRED: {ticker} (no fill in {int(age/60)}min), canceled {order_id} — cooldown cleared")
+                print(f"  RESTING EXPIRED: {ticker} (no fill in {int(age/60)}min), canceled {order_id} — cooldown kept")
                 log_event('mention_order_expired', ticker=ticker, order_id=order_id,
                           price_cents=info['price_cents'], contracts=info['contracts'],
                           rested_seconds=int(age))
@@ -2404,10 +2406,13 @@ class KalshiReversionScanner:
         else:
             mention_bet = MENTION_BET_DOLLARS
 
-        # Per-event exposure cap
+        # Per-event exposure cap — includes resting orders
         event = sig.get('event_ticker', '')
         if event:
             event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
+            for rt, ri in self._resting_mention_orders.items():
+                if ri.get('sig', {}).get('event_ticker') == event:
+                    event_exp += ri.get('contracts', 0) * ri.get('price_cents', 0) / 100
             remaining_cap = MENTION_MAX_EVENT_DOLLARS - event_exp
             if remaining_cap <= 0:
                 print(f"    Event cap reached (${event_exp:.0f}/${MENTION_MAX_EVENT_DOLLARS}), skipping")
