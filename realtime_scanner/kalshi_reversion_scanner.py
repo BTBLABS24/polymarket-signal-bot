@@ -180,7 +180,7 @@ MENTION_SCAN_SERIES = [
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
 # Buys NO when market is below statistically-derived fair value based on
 # time-into-game degradation curves. Separate from main mention strategy.
-DEGRADE_BET_DOLLARS = 1
+DEGRADE_BET_DOLLARS = 5
 DEGRADE_MIN_HOURS_LIVE = 1.0   # only bet >= 1h into game
 # Conservative fair NO prices (CI lower bound, 95%, n>=30) by word & half-hour.
 # If market NO <= this value, it's a buy.
@@ -2705,7 +2705,9 @@ class KalshiReversionScanner:
                 mention_count += 1
 
     def _execute_degradation_entry(self, sig):
-        """Execute a degradation-curve BUY NO entry. $1 bet, NBA only."""
+        """Execute a degradation-curve BUY NO entry. $5 passive bid, NBA only.
+        Posts a NO bid at 1c above the current best NO bid, capped at the
+        fair value from the degradation table. This makes us top-of-book."""
         ticker = sig['ticker']
         max_buy_cents = sig['max_buy_cents']
 
@@ -2714,36 +2716,45 @@ class KalshiReversionScanner:
             print(f"    DEGRADE: no orderbook for {ticker}, skipping")
             return None
 
+        # Get current best NO bid from YES ask side
+        # YES asks → NO bids: if someone is asking 80c for YES, that's a 20c NO bid
+        yes_asks = orderbook.get('yes', [])
+        if isinstance(yes_asks, dict):
+            yes_asks = yes_asks.get('asks', [])
+
+        # Also get NO asks (from YES bids) to sanity check
         yes_bids = orderbook.get('yes', [])
         if isinstance(yes_bids, dict):
             yes_bids = yes_bids.get('bids', [])
-        if not yes_bids:
-            print(f"    DEGRADE: no YES bids for {ticker}, skipping")
+
+        # Derive current best NO bid: lowest YES ask → highest NO bid
+        no_bids = sorted([[100 - a[0], a[1]] for a in yes_asks], key=lambda x: -x[0]) if yes_asks else []
+        best_no_bid = no_bids[0][0] if no_bids else 0  # highest NO bid in cents
+
+        # Our bid: 1c above current best NO bid
+        our_bid = best_no_bid + 1
+
+        # Cap at the fair value from the degradation table
+        if our_bid > max_buy_cents:
+            print(f"    DEGRADE: best bid {best_no_bid}c + 1 = {our_bid}c > fair {max_buy_cents}c, skipping")
             return None
 
-        no_asks = sorted([[100 - b[0], b[1]] for b in yes_bids], key=lambda x: x[0])
-        if not no_asks:
-            return None
+        # Don't bid below 1c
+        if our_bid < 1:
+            our_bid = 1
 
-        best_no_ask = no_asks[0][0]  # cents
-
-        # Only buy if book price is still within the fair value bound
-        if best_no_ask > max_buy_cents:
-            print(f"    DEGRADE: book {best_no_ask}c > fair {max_buy_cents}c, skipping")
-            return None
-
-        contracts = int(DEGRADE_BET_DOLLARS / (best_no_ask / 100))
+        contracts = int(DEGRADE_BET_DOLLARS / (our_bid / 100))
         if contracts < 1:
             contracts = 1
-        bet_dollars = round(contracts * best_no_ask / 100, 2)
-        buy_price = best_no_ask
+        bet_dollars = round(contracts * our_bid / 100, 2)
+        buy_price = our_bid
 
-        print(f"    DEGRADE sizing: {contracts} NO @ {best_no_ask}c = ${bet_dollars:.2f}")
+        print(f"    DEGRADE sizing: {contracts} NO bid @ {our_bid}c (best bid was {best_no_bid}c, fair {max_buy_cents}c) = ${bet_dollars:.2f}")
 
         if DRY_RUN:
             order_info = {
                 'order_id': f'DRY-DEG-{uuid.uuid4().hex[:8]}',
-                'fill_price': best_no_ask / 100,
+                'fill_price': our_bid / 100,
                 'fill_count': contracts,
                 'bet_dollars': bet_dollars,
                 'dry_run': True,
@@ -2751,10 +2762,10 @@ class KalshiReversionScanner:
             self.trade_logger.record({
                 'type': 'entry', 'strategy': 'degrade_buy_no',
                 'ticker': ticker, 'side': 'no', 'action': 'buy',
-                'contracts': contracts, 'price_cents': best_no_ask,
+                'contracts': contracts, 'price_cents': our_bid,
                 'bet_dollars': bet_dollars, 'dry_run': True,
             })
-            print(f"    DEGRADE DRY RUN: {contracts} NO @ {best_no_ask}c (${bet_dollars:.2f})")
+            print(f"    DEGRADE DRY RUN: {contracts} NO bid @ {our_bid}c (${bet_dollars:.2f})")
             return order_info
 
         order = self.client.create_order(
@@ -2766,7 +2777,7 @@ class KalshiReversionScanner:
             return None
 
         order_id = order.get('order_id', '')
-        print(f"    DEGRADE order placed: {order_id} ({contracts} NO @ {buy_price}c)")
+        print(f"    DEGRADE order placed: {order_id} ({contracts} NO bid @ {buy_price}c, ${bet_dollars:.2f})")
         log_event('degrade_order_placed', ticker=ticker, order_id=order_id,
                   contracts=contracts, price_cents=buy_price, bet_dollars=bet_dollars,
                   word=sig.get('word'), hours_live=sig.get('hours_live'),
