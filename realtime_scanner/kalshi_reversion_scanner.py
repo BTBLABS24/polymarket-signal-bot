@@ -1904,8 +1904,34 @@ class KalshiReversionScanner:
         canceled_tickers = []
 
         for ticker, info in list(self._resting_mention_orders.items()):
-            order_id = info['order_id']
+            order_id = info.get('order_id')
             age = now - info['placed_time']
+
+            # Taker retry mode: passive order already canceled, just retry taker
+            if info.get('taker_retry'):
+                retries = info.get('taker_retries', 0)
+                if retries >= 5:
+                    canceled_tickers.append(ticker)
+                    print(f"  TAKER GAVE UP: {ticker} — 5 retries exhausted")
+                    continue
+                taker_info = self._execute_mention_taker(info['sig'], passive_price_cents=info['price_cents'])
+                if taker_info == 'retry':
+                    info['taker_retries'] = retries + 1
+                    info['placed_time'] = now
+                    print(f"  TAKER RETRY {retries+1}/5: {ticker} — slippage still too high")
+                elif taker_info:
+                    await self.notifier.send_mention_signal(info['sig'], taker_info)
+                    self.positions.add(info['sig'], taker_info)
+                    filled_tickers.append(ticker)
+                    print(f"  TAKER FILL: {ticker} — ${taker_info.get('bet_dollars', 0):.2f} (retry {retries+1})")
+                else:
+                    canceled_tickers.append(ticker)
+                    print(f"  TAKER SKIP: {ticker} — price out of range or caps hit")
+                continue
+
+            if not order_id:
+                canceled_tickers.append(ticker)
+                continue
 
             status = self.client.get_order(order_id)
             if not status:
@@ -1974,7 +2000,13 @@ class KalshiReversionScanner:
 
                 # Taker fallback: cross the spread to get filled
                 taker_info = self._execute_mention_taker(info['sig'], passive_price_cents=info['price_cents'])
-                if taker_info:
+                if taker_info == 'retry':
+                    # Slippage too high — keep in resting dict to retry next cycle
+                    info['taker_retry'] = True
+                    info['order_id'] = None  # passive order already canceled
+                    info['placed_time'] = now  # reset timer for next retry window
+                    print(f"  TAKER RETRY: {ticker} — slippage too high, will retry next cycle")
+                elif taker_info:
                     await self.notifier.send_mention_signal(info['sig'], taker_info)
                     self.positions.add(info['sig'], taker_info)
                     filled_tickers.append(ticker)
@@ -2602,10 +2634,10 @@ class KalshiReversionScanner:
             print(f"    No NO ask available for {ticker}, taker skip")
             return None
 
-        # Max 2c slippage from original passive bid
+        # Max 2c slippage from original passive bid — return 'retry' so caller retries next cycle
         if passive_price_cents is not None and best_no_ask > passive_price_cents + 2:
-            print(f"    Taker slippage too high: ask {best_no_ask}c vs passive {passive_price_cents}c (+{best_no_ask - passive_price_cents}c > 2c), skip")
-            return None
+            print(f"    Taker slippage too high: ask {best_no_ask}c vs passive {passive_price_cents}c (+{best_no_ask - passive_price_cents}c > 2c), will retry")
+            return 'retry'
 
         # Per-category price range (same as passive)
         ticker_upper = ticker.upper()
