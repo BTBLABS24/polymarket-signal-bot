@@ -2067,9 +2067,15 @@ class KalshiReversionScanner:
         if degrade_count >= DEGRADE_MAX_POSITIONS:
             return
 
-        nba_markets = [m for m in mention_markets
-                       if 'NBAMENTION' in m.get('ticker', '').upper()
-                       and m.get('status') == 'open']
+        nba_all = [m for m in mention_markets
+                   if 'NBAMENTION' in m.get('ticker', '').upper()]
+        nba_markets = [m for m in nba_all if m.get('status') in ('open', 'active')]
+        if nba_all and not nba_markets:
+            statuses = {}
+            for m in nba_all:
+                s = m.get('status', 'MISSING')
+                statuses[s] = statuses.get(s, 0) + 1
+            print(f"  DEGRADE: {len(nba_all)} NBA markets but 0 open — statuses: {statuses}")
         print(f"  DEGRADE scan: {len(nba_markets)} open NBA markets, "
               f"{degrade_count}/{DEGRADE_MAX_POSITIONS} positions")
         if not nba_markets:
