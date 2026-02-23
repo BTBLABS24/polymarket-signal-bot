@@ -76,7 +76,8 @@ MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (event
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
-MENTION_MAX_EVENT_DOLLARS = 26    # Max $ per event (spread across tickers)
+MENTION_MAX_EVENT_DOLLARS = 50    # Max $ per event (spread across tickers)
+MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
 MENTION_ORDER_REST_SECONDS = 600  # Leave orders resting 10 min before canceling
 MENTION_MAX_RESTING_ORDERS = 10   # Max concurrent resting orders (capital lockup cap)
 # Series to scan (NBA for degradation, others for mention strategy)
@@ -1961,16 +1962,27 @@ class KalshiReversionScanner:
                 filled_tickers.append(ticker)
 
             elif age > MENTION_ORDER_REST_SECONDS:
-                # Stale — cancel but keep 24h cooldown to prevent repeated orders
+                # Passive bid expired — cancel and attempt taker fallback
                 try:
                     self.client.cancel_order(order_id)
                 except Exception:
                     pass
-                canceled_tickers.append(ticker)
-                print(f"  RESTING EXPIRED: {ticker} (no fill in {int(age/60)}min), canceled {order_id} — cooldown kept")
+                print(f"  RESTING EXPIRED: {ticker} (no fill in {int(age/60)}min), canceled {order_id} — trying taker")
                 log_event('mention_order_expired', ticker=ticker, order_id=order_id,
                           price_cents=info['price_cents'], contracts=info['contracts'],
                           rested_seconds=int(age))
+
+                # Taker fallback: cross the spread to get filled
+                taker_info = self._execute_mention_taker(info['sig'])
+                if taker_info:
+                    await self.notifier.send_mention_signal(info['sig'], taker_info)
+                    self.positions.add(info['sig'], taker_info)
+                    filled_tickers.append(ticker)
+                    print(f"  TAKER FILL: {ticker} — ${taker_info.get('bet_dollars', 0):.2f}")
+                else:
+                    canceled_tickers.append(ticker)
+                    # Keep cooldown — don't retry this ticker
+                    print(f"  TAKER SKIP: {ticker} — price out of range or caps hit")
 
         for t in filled_tickers + canceled_tickers:
             self._resting_mention_orders.pop(t, None)
@@ -2439,6 +2451,23 @@ class KalshiReversionScanner:
         else:
             mention_bet = MENTION_BET_DOLLARS
 
+        # Per-market hard cap
+        mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
+
+        # Per-market exposure check — includes existing position + resting orders
+        ticker_exp = 0
+        for p in self.positions.positions:
+            if p.get('ticker') == ticker and p.get('status') == 'open':
+                ticker_exp += p.get('bet_dollars', 0)
+        if ticker in self._resting_mention_orders:
+            ri = self._resting_mention_orders[ticker]
+            ticker_exp += ri.get('contracts', 0) * ri.get('price_cents', 0) / 100
+        remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp
+        if remaining_market_cap <= 0:
+            print(f"    Market cap reached (${ticker_exp:.0f}/${MENTION_MAX_MARKET_DOLLARS}), skipping")
+            return None
+        mention_bet = min(mention_bet, remaining_market_cap)
+
         # Per-event exposure cap — includes resting orders
         event = sig.get('event_ticker', '')
         if event:
@@ -2541,6 +2570,172 @@ class KalshiReversionScanner:
         print(f"    Resting on book (will check next cycle)")
         log_event('mention_order_resting', ticker=ticker, order_id=order_id,
                   contracts=contracts, price_cents=our_bid)
+        return None
+
+    def _execute_mention_taker(self, sig):
+        """Cross the spread to fill as taker (3.5% fee) after passive bid expired.
+        Only used for mention strategy — degradation stays passive-only.
+        Returns order info dict or None."""
+        ticker = sig['ticker']
+        print(f"    TAKER attempt: {ticker}")
+
+        orderbook = self.client.get_orderbook(ticker)
+        if not orderbook:
+            print(f"    No orderbook for {ticker}, taker skip")
+            return None
+
+        # Find the best NO ask — the price we cross to get filled
+        no_side = orderbook.get('no', {})
+        no_asks_raw = no_side.get('asks', []) if isinstance(no_side, dict) else []
+        best_no_ask = None
+        if no_asks_raw:
+            best_no_ask = min(a[0] for a in no_asks_raw)
+        else:
+            # Derive from YES bids: NO ask = 100 - best YES bid
+            yes_side = orderbook.get('yes', {})
+            yes_bids_raw = yes_side.get('bids', []) if isinstance(yes_side, dict) else []
+            if yes_bids_raw:
+                best_no_ask = 100 - max(b[0] for b in yes_bids_raw)
+
+        if best_no_ask is None:
+            print(f"    No NO ask available for {ticker}, taker skip")
+            return None
+
+        # Per-category price range (same as passive)
+        ticker_upper = ticker.upper()
+        is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+        is_nba = 'NBAMENTION' in ticker_upper
+        is_trump = 'TRUMPMENTION' in ticker_upper
+        if is_ncaa:
+            max_no_c, min_no_c = 25, 6
+        elif is_nba:
+            max_no_c, min_no_c = 30, 15
+        else:
+            max_no_c, min_no_c = int(MENTION_MAX_NO_PRICE * 100), int(MENTION_MIN_NO_PRICE * 100)
+
+        if best_no_ask < min_no_c or best_no_ask > max_no_c:
+            print(f"    Taker NO ask {best_no_ask}c outside [{min_no_c}-{max_no_c}c], skip")
+            return None
+
+        taker_price = best_no_ask  # buy AT the ask to cross the spread
+
+        # Per-category bet sizing (same as passive)
+        if is_nba:
+            mention_bet = 5
+        elif is_ncaa:
+            mention_bet = 3
+        elif is_trump:
+            mention_bet = 10
+        else:
+            mention_bet = MENTION_BET_DOLLARS
+
+        # Per-market hard cap
+        mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
+
+        # Per-market exposure check
+        ticker_exp = 0
+        for p in self.positions.positions:
+            if p.get('ticker') == ticker and p.get('status') == 'open':
+                ticker_exp += p.get('bet_dollars', 0)
+        remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp
+        if remaining_market_cap <= 0:
+            print(f"    Taker market cap reached (${ticker_exp:.0f}/${MENTION_MAX_MARKET_DOLLARS}), skip")
+            return None
+        mention_bet = min(mention_bet, remaining_market_cap)
+
+        # Per-event exposure cap
+        event = sig.get('event_ticker', '')
+        if event:
+            event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
+            for rt, ri in self._resting_mention_orders.items():
+                if ri.get('sig', {}).get('event_ticker') == event:
+                    event_exp += ri.get('contracts', 0) * ri.get('price_cents', 0) / 100
+            remaining_cap = MENTION_MAX_EVENT_DOLLARS - event_exp
+            if remaining_cap <= 0:
+                print(f"    Taker event cap reached (${event_exp:.0f}/${MENTION_MAX_EVENT_DOLLARS}), skip")
+                return None
+            mention_bet = min(mention_bet, remaining_cap)
+
+        contracts = int(mention_bet / (taker_price / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * taker_price / 100, 2)
+
+        print(f"    Taker sizing: {contracts} NO @ {taker_price}c (ask) = ${bet_dollars:.2f} (3.5% fee)")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-TAKER-{uuid.uuid4().hex[:8]}',
+                'fill_price': taker_price / 100,
+                'fill_count': contracts,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+                'taker': True,
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'mention_buy_no',
+                'ticker': ticker, 'side': 'no', 'action': 'buy',
+                'contracts': contracts, 'price_cents': taker_price,
+                'bet_dollars': bet_dollars, 'dry_run': True, 'taker': True,
+            })
+            print(f"    DRY RUN TAKER: {contracts} NO @ {taker_price}c (${bet_dollars:.2f})")
+            return order_info
+
+        order = self.client.create_order(
+            ticker=ticker, side='no', action='buy',
+            count=contracts, price_cents=taker_price,
+        )
+        if not order:
+            print(f"    Taker order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    Taker order placed: {order_id} ({contracts} NO @ {taker_price}c, ${bet_dollars:.2f})")
+        log_event('mention_taker_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=taker_price, bet_dollars=bet_dollars)
+
+        # Taker should fill instantly — check after brief delay
+        time.sleep(2)
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', taker_price)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                    'taker': True,
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'mention_buy_no',
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'no', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': taker_price,
+                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                    'taker': True,
+                })
+                print(f"    TAKER FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
+                log_event('mention_taker_filled', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
+                return info
+
+        # Not filled even as taker — cancel and give up
+        try:
+            self.client.cancel_order(order_id)
+        except Exception:
+            pass
+        print(f"    Taker not filled for {ticker}, canceled")
+        log_event('mention_taker_unfilled', ticker=ticker, order_id=order_id)
         return None
 
 
