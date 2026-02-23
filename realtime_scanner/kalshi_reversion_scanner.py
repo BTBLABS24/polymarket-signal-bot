@@ -2340,10 +2340,7 @@ class KalshiReversionScanner:
             else:
                 best_no_bid = 0
 
-        # Our bid: 1c above current best NO bid, capped at signal NO price
-        our_bid = min(best_no_bid + 1, no_price_cents)
-
-        # Per-category price range check
+        # Per-category price range
         ticker_upper = ticker.upper()
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
         is_nba = 'NBAMENTION' in ticker_upper
@@ -2353,6 +2350,9 @@ class KalshiReversionScanner:
             max_no_c, min_no_c = 30, 15
         else:
             max_no_c, min_no_c = int(MENTION_MAX_NO_PRICE * 100), int(MENTION_MIN_NO_PRICE * 100)
+
+        # Our bid: 1c above current best NO bid, capped at category max
+        our_bid = min(best_no_bid + 1, max_no_c)
 
         if our_bid < min_no_c or our_bid > max_no_c:
             print(f"    Bid {our_bid}c outside range [{min_no_c}-{max_no_c}c], skipping")
