@@ -701,11 +701,11 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
                 elif is_nba:
-                    # NBA: live games only (0.5-2h after tipoff)
+                    # NBA: live games only (0.5-3h after tipoff)
                     if hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
                         continue
-                    if hours_to_event < -2:
+                    if hours_to_event < -3:
                         debug_counts['too_far'] += 1
                         continue
                 elif is_trump:
@@ -1775,7 +1775,7 @@ class KalshiReversionScanner:
                     if is_ncaa:
                         return -1.5 <= h <= -0.5  # live games, 0.5-1.5h after start
                     elif is_nba:
-                        return -2 <= h <= -0.5  # live games, 0.5-2h after tipoff
+                        return -3 <= h <= -0.5  # live games, 0.5-3h after tipoff
                     elif is_trump:
                         return -10/60 <= h <= 24
                     else:
@@ -2060,9 +2060,15 @@ class KalshiReversionScanner:
         nba_markets = [m for m in mention_markets
                        if 'NBAMENTION' in m.get('ticker', '').upper()
                        and m.get('status') == 'open']
+        print(f"  DEGRADE scan: {len(nba_markets)} open NBA markets, "
+              f"{degrade_count}/{DEGRADE_MAX_POSITIONS} positions")
         if not nba_markets:
             return
 
+        skip_reasons = {'no_word': 0, 'no_milestone': 0, 'too_early': 0,
+                        'ended': 0, 'bucket_placed': 0, 'no_bucket': 0,
+                        'no_price': 0, 'said': 0, 'too_expensive': 0,
+                        'event_cap': 0, 'resting': 0}
         signals = []
         for m in nba_markets:
             ticker = m.get('ticker', '')
@@ -2071,6 +2077,7 @@ class KalshiReversionScanner:
 
             # Skip if resting order already exists on this ticker
             if ticker in self._resting_degrade_orders:
+                skip_reasons['resting'] += 1
                 continue
 
             # Extract word from ticker: KXNBAMENTION-26FEB22CLEOKC-PLAYOFF → PLAYOFF
@@ -2079,17 +2086,21 @@ class KalshiReversionScanner:
                 continue
             word = parts[-1].upper()
             if word not in DEGRADE_BUY_BELOW:
+                skip_reasons['no_word'] += 1
                 continue
 
             # Check game is live and >= 1h in
             ms = milestones.get(event_ticker)
             if not ms or not ms.get('start_ts'):
+                skip_reasons['no_milestone'] += 1
                 continue
             hours_live = (now - ms['start_ts']) / 3600
             if hours_live < DEGRADE_MIN_HOURS_LIVE:
+                skip_reasons['too_early'] += 1
                 continue
             # Don't bet after game is over
             if ms.get('end_ts') and ms['end_ts'] <= now:
+                skip_reasons['ended'] += 1
                 continue
 
             # Bucket into half-hour
@@ -2097,6 +2108,7 @@ class KalshiReversionScanner:
             hh_key = f'{half_hour:.1f}' if half_hour != int(half_hour) else f'{half_hour:.1f}'
             word_table = DEGRADE_BUY_BELOW[word]
             if hh_key not in word_table:
+                skip_reasons['no_bucket'] += 1
                 continue
             max_buy_cents = word_table[hh_key]
 
@@ -2104,6 +2116,7 @@ class KalshiReversionScanner:
             # new bucket = new order allowed
             placed_buckets = self._degrade_bucket_placed.get(ticker, set())
             if hh_key in placed_buckets:
+                skip_reasons['bucket_placed'] += 1
                 continue
 
             # Get current YES price
@@ -2123,22 +2136,26 @@ class KalshiReversionScanner:
                     except (ValueError, TypeError):
                         pass
             if yes_price is None:
+                skip_reasons['no_price'] += 1
                 continue
 
             # Word already said? (YES >= 90%)
             if yes_price >= 0.90:
+                skip_reasons['said'] += 1
                 continue
 
             no_price_cents = round((1 - yes_price) * 100)
 
             # Core check: is market NO cheap enough vs fair value?
             if no_price_cents > max_buy_cents:
+                skip_reasons['too_expensive'] += 1
                 continue
 
             # Per-event exposure cap (degrade only — independent of mention)
             if event_ticker:
                 event_exp = self.positions.event_exposure(event_ticker, signal_type='degrade_buy_no')
                 if event_exp >= DEGRADE_MAX_EVENT_DOLLARS:
+                    skip_reasons['event_cap'] += 1
                     continue
 
             signals.append({
@@ -2155,8 +2172,8 @@ class KalshiReversionScanner:
                 'signal_time': datetime.now(timezone.utc).isoformat(),
             })
 
-        if signals:
-            print(f"  DEGRADE scan: {len(signals)} signals from {len(nba_markets)} NBA markets")
+        active_skips = {k: v for k, v in skip_reasons.items() if v > 0}
+        print(f"  DEGRADE filter: {len(signals)} signals, skips: {active_skips}")
 
         for sig in signals:
             if degrade_count >= DEGRADE_MAX_POSITIONS:
