@@ -2394,10 +2394,13 @@ class KalshiReversionScanner:
             return None
 
         # Per-category bet sizing
+        is_trump = 'TRUMPMENTION' in ticker_upper
         if is_nba:
             mention_bet = 5
         elif is_ncaa:
             mention_bet = 3
+        elif is_trump:
+            mention_bet = 10
         else:
             mention_bet = MENTION_BET_DOLLARS
 
