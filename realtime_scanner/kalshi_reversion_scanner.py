@@ -2193,20 +2193,22 @@ class KalshiReversionScanner:
             print(f"    DEGRADE: no orderbook for {ticker}, skipping")
             return None
 
-        # Get current best NO bid from YES ask side
-        # YES asks → NO bids: if someone is asking 80c for YES, that's a 20c NO bid
-        yes_asks = orderbook.get('yes', [])
-        if isinstance(yes_asks, dict):
-            yes_asks = yes_asks.get('asks', [])
-
-        # Also get NO asks (from YES bids) to sanity check
-        yes_bids = orderbook.get('yes', [])
-        if isinstance(yes_bids, dict):
-            yes_bids = yes_bids.get('bids', [])
-
-        # Derive current best NO bid: lowest YES ask → highest NO bid
-        no_bids = sorted([[100 - a[0], a[1]] for a in yes_asks], key=lambda x: -x[0]) if yes_asks else []
-        best_no_bid = no_bids[0][0] if no_bids else 0  # highest NO bid in cents
+        # Get best NO bid: try NO bids directly, fall back to YES asks
+        no_side = orderbook.get('no', {})
+        if isinstance(no_side, dict):
+            no_bids_raw = no_side.get('bids', [])
+        else:
+            no_bids_raw = no_side if isinstance(no_side, list) else []
+        if no_bids_raw:
+            best_no_bid = max(b[0] for b in no_bids_raw)
+        else:
+            yes_asks = orderbook.get('yes', {})
+            if isinstance(yes_asks, dict):
+                yes_asks = yes_asks.get('asks', [])
+            if yes_asks:
+                best_no_bid = 100 - min(a[0] for a in yes_asks)
+            else:
+                best_no_bid = 0
 
         # Our bid: lower of (fair - 5c) or (best_bid + 1c)
         bid_from_book = best_no_bid + 1
@@ -2320,15 +2322,26 @@ class KalshiReversionScanner:
             print(f"    No orderbook for {ticker}, skipping")
             return None
 
-        # Derive NO bids from YES asks: YES ask at Xc = NO bid at (100-X)c
-        yes_asks = orderbook.get('yes', [])
-        if isinstance(yes_asks, dict):
-            yes_asks = yes_asks.get('asks', [])
-        no_bids = sorted([[100 - a[0], a[1]] for a in yes_asks], key=lambda x: -x[0]) if yes_asks else []
-        best_no_bid = no_bids[0][0] if no_bids else 0
+        # Get best NO bid: try NO bids directly, fall back to YES asks
+        no_side = orderbook.get('no', {})
+        if isinstance(no_side, dict):
+            no_bids_raw = no_side.get('bids', [])
+        else:
+            no_bids_raw = no_side if isinstance(no_side, list) else []
+        if no_bids_raw:
+            best_no_bid = max(b[0] for b in no_bids_raw)
+        else:
+            # Fallback: derive from YES asks (YES ask Xc = NO bid (100-X)c)
+            yes_asks = orderbook.get('yes', {})
+            if isinstance(yes_asks, dict):
+                yes_asks = yes_asks.get('asks', [])
+            if yes_asks:
+                best_no_bid = 100 - min(a[0] for a in yes_asks)
+            else:
+                best_no_bid = 0
 
-        # Our bid: 1c above current best NO bid (top of book)
-        our_bid = best_no_bid + 1
+        # Our bid: 1c above current best NO bid, capped at signal NO price
+        our_bid = min(best_no_bid + 1, no_price_cents)
 
         # Per-category price range check
         ticker_upper = ticker.upper()
