@@ -182,6 +182,9 @@ MENTION_SCAN_SERIES = [
 # time-into-game degradation curves. Separate from main mention strategy.
 DEGRADE_BET_DOLLARS = 5
 DEGRADE_MIN_HOURS_LIVE = 1.0   # only bet >= 1h into game
+DEGRADE_MAX_POSITIONS = 20     # independent cap (does NOT share with mention)
+DEGRADE_MAX_EVENT_DOLLARS = 26 # independent per-event cap
+DEGRADE_MAX_RESTING_ORDERS = 5 # independent resting cap
 # Conservative fair NO prices (CI lower bound, 95%, n>=30) by word & half-hour.
 # If market NO <= this value, it's a buy.
 DEGRADE_BUY_BELOW = {
@@ -1497,14 +1500,17 @@ class KalshiPositionTracker:
         self._save()
         self._log_trade_csv(pos, 'ENTRY')
 
-    def event_exposure(self, event_ticker):
-        """Total dollars deployed on open positions for a given event."""
+    def event_exposure(self, event_ticker, signal_type=None):
+        """Total dollars deployed on open positions for a given event.
+        If signal_type is given, only count positions of that type."""
         if not event_ticker:
             return 0
         return sum(
             pos.get('bet_dollars', 0)
             for pos in self.positions
-            if pos.get('status') == 'open' and pos.get('event_ticker') == event_ticker
+            if pos.get('status') == 'open'
+            and pos.get('event_ticker') == event_ticker
+            and (signal_type is None or pos.get('signal_type') == signal_type)
         )
 
     def check(self, client):
@@ -1592,8 +1598,12 @@ class KalshiPositionTracker:
     def live_count(self):
         return sum(1 for p in self.positions if p.get('is_live'))
 
-    def has_open_ticker(self, ticker):
-        """Check if there's already an open position for this ticker."""
+    def has_open_ticker(self, ticker, signal_type=None):
+        """Check if there's already an open position for this ticker.
+        If signal_type is given, only check positions of that type."""
+        if signal_type:
+            return any(p.get('ticker') == ticker and p.get('signal_type') == signal_type
+                       for p in self.positions)
         return any(p.get('ticker') == ticker for p in self.positions)
 
 
@@ -2211,6 +2221,7 @@ class KalshiReversionScanner:
         self.executor = OrderExecutor(self.client, self.trade_logger)
         self._last_mention_scan = 0  # timestamp of last mention scan
         self._resting_mention_orders = {}  # ticker -> {order_id, placed_time, contracts, price_cents, sig}
+        self._resting_degrade_orders = {}  # ticker -> {order_id, placed_time, contracts, price_cents, sig}
         self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
         self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
 
@@ -2296,11 +2307,13 @@ class KalshiReversionScanner:
             print(f"  Unique markets: {len(tickers)}")
 
         # 3. Mention BUY NO scan
-        # First: check resting orders from previous cycles
+        # First: check resting orders from previous cycles (both strategies independently)
         if self._resting_mention_orders and self.client.can_trade:
             await self._check_resting_mention_orders()
+        if self._resting_degrade_orders and self.client.can_trade:
+            await self._check_resting_degrade_orders()
 
-        mention_count = self.positions.count('mention_buy_no') + self.positions.count('degrade_buy_no') + len(self._resting_mention_orders)
+        mention_count = self.positions.count('mention_buy_no') + len(self._resting_mention_orders)
         mention_allowed = mention_count < MENTION_MAX_POSITIONS
         should_scan_mentions = (now - self._last_mention_scan) >= MENTION_SCAN_INTERVAL_SECONDS
 
@@ -2410,16 +2423,16 @@ class KalshiReversionScanner:
                         print(f"    RESTING CAP: {len(self._resting_mention_orders)}/{MENTION_MAX_RESTING_ORDERS}, waiting for fills")
                         break
 
-                    # Skip if we already have an open position or resting order
-                    if self.positions.has_open_ticker(sig['ticker']):
+                    # Skip if we already have a MENTION position or resting order on this ticker
+                    if self.positions.has_open_ticker(sig['ticker'], signal_type='mention_buy_no'):
                         continue
                     if sig['ticker'] in self._resting_mention_orders:
                         continue
 
-                    # Per-event exposure cap
+                    # Per-event exposure cap (mention only)
                     event = sig.get('event_ticker', '')
                     if event:
-                        event_exp = self.positions.event_exposure(event)
+                        event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
                         if event_exp >= MENTION_MAX_EVENT_DOLLARS:
                             continue
 
@@ -2475,9 +2488,16 @@ class KalshiReversionScanner:
 
         rev_count = self.positions.count('reversion')
         mention_count = self.positions.count('mention_buy_no')
-        resting_count = len(self._resting_mention_orders)
-        resting_str = f", {resting_count} resting" if resting_count else ""
-        print(f"  Open positions: {self.positions.count()} (rev={rev_count}, mention={mention_count}{resting_str}, {self.positions.live_count()} live)")
+        degrade_count = self.positions.count('degrade_buy_no')
+        m_resting = len(self._resting_mention_orders)
+        d_resting = len(self._resting_degrade_orders)
+        resting_parts = []
+        if m_resting:
+            resting_parts.append(f"{m_resting} m-rest")
+        if d_resting:
+            resting_parts.append(f"{d_resting} d-rest")
+        resting_str = f", {', '.join(resting_parts)}" if resting_parts else ""
+        print(f"  Open positions: {self.positions.count()} (rev={rev_count}, mention={mention_count}, degrade={degrade_count}{resting_str}, {self.positions.live_count()} live)")
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
             print(f"  Daily P&L: ${daily_pnl:.2f}")
@@ -2576,14 +2596,96 @@ class KalshiReversionScanner:
 
         n_resting = len(self._resting_mention_orders)
         if n_resting > 0 or filled_tickers or canceled_tickers:
-            print(f"  Resting orders: {n_resting} active, {len(filled_tickers)} filled, {len(canceled_tickers)} expired")
+            print(f"  Mention resting: {n_resting} active, {len(filled_tickers)} filled, {len(canceled_tickers)} expired")
+
+    async def _check_resting_degrade_orders(self):
+        """Check resting degradation orders for fills, cancel stale ones.
+        Identical logic to mention resting, but uses its own dict."""
+        if not self._resting_degrade_orders:
+            return
+
+        now = time.time()
+        filled_tickers = []
+        canceled_tickers = []
+
+        for ticker, info in list(self._resting_degrade_orders.items()):
+            order_id = info['order_id']
+            age = now - info['placed_time']
+
+            status = self.client.get_order(order_id)
+            if not status:
+                if age > MENTION_ORDER_REST_SECONDS:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                    canceled_tickers.append(ticker)
+                continue
+
+            filled = status.get('quantity_filled', 0)
+            remaining = status.get('remaining_count', 0)
+
+            if filled > 0:
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+
+                avg_fill = status.get('average_fill_price', info['price_cents'])
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                order_info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                }
+                self.trade_logger.record({
+                    'type': 'entry',
+                    'strategy': 'degrade_buy_no',
+                    'ticker': ticker,
+                    'order_id': order_id,
+                    'side': 'no',
+                    'action': 'buy',
+                    'contracts_filled': filled,
+                    'price_cents': info['price_cents'],
+                    'avg_fill_price': avg_fill,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                })
+                print(f"  DEGRADE RESTING FILL: {filled} NO @ avg {avg_fill}c (${actual_dollars:.2f}) — {ticker}")
+                log_event('degrade_filled_resting', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
+                          rested_seconds=int(age))
+                await self.notifier.send_mention_signal(info['sig'], order_info)
+                self.positions.add(info['sig'], order_info)
+                filled_tickers.append(ticker)
+
+            elif age > MENTION_ORDER_REST_SECONDS:
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception:
+                    pass
+                canceled_tickers.append(ticker)
+                print(f"  DEGRADE RESTING EXPIRED: {ticker} (no fill in {int(age/60)}min), canceled {order_id}")
+                log_event('degrade_order_expired', ticker=ticker, order_id=order_id,
+                          price_cents=info['price_cents'], contracts=info['contracts'],
+                          rested_seconds=int(age))
+
+        for t in filled_tickers + canceled_tickers:
+            self._resting_degrade_orders.pop(t, None)
+
+        n_resting = len(self._resting_degrade_orders)
+        if n_resting > 0 or filled_tickers or canceled_tickers:
+            print(f"  Degrade resting: {n_resting} active, {len(filled_tickers)} filled, {len(canceled_tickers)} expired")
 
     async def _scan_degradation_curve(self, mention_markets, milestones, now):
         """Degradation curve strategy: buy NO on NBA mention markets where the
         market is cheaper than the statistically-derived fair value, 1h+ into
-        a live game.  Runs independently of the main mention strategy."""
-        mention_count = self.positions.count('mention_buy_no') + self.positions.count('degrade_buy_no') + len(self._resting_mention_orders)
-        if mention_count >= MENTION_MAX_POSITIONS:
+        a live game.  Runs completely independently of the main mention strategy."""
+        degrade_count = self.positions.count('degrade_buy_no') + len(self._resting_degrade_orders)
+        if degrade_count >= DEGRADE_MAX_POSITIONS:
             return
 
         nba_markets = [m for m in mention_markets
@@ -2598,10 +2700,10 @@ class KalshiReversionScanner:
             ticker_upper = ticker.upper()
             event_ticker = m.get('event_ticker', '')
 
-            # Already have position or resting order?
-            if self.positions.has_open_ticker(ticker):
+            # Already have a DEGRADE position or resting order on this ticker?
+            if self.positions.has_open_ticker(ticker, signal_type='degrade_buy_no'):
                 continue
-            if ticker in self._resting_mention_orders:
+            if ticker in self._resting_degrade_orders:
                 continue
 
             # Extract word from ticker: KXNBAMENTION-26FEB22CLEOKC-PLAYOFF → PLAYOFF
@@ -2660,10 +2762,10 @@ class KalshiReversionScanner:
             if no_price_cents > max_buy_cents:
                 continue
 
-            # Per-event exposure cap
+            # Per-event exposure cap (degrade only — independent of mention)
             if event_ticker:
-                event_exp = self.positions.event_exposure(event_ticker)
-                if event_exp >= MENTION_MAX_EVENT_DOLLARS:
+                event_exp = self.positions.event_exposure(event_ticker, signal_type='degrade_buy_no')
+                if event_exp >= DEGRADE_MAX_EVENT_DOLLARS:
                     continue
 
             signals.append({
@@ -2684,10 +2786,10 @@ class KalshiReversionScanner:
             print(f"  DEGRADE scan: {len(signals)} signals from {len(nba_markets)} NBA markets")
 
         for sig in signals:
-            if mention_count >= MENTION_MAX_POSITIONS:
-                print(f"    DEGRADE CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
+            if degrade_count >= DEGRADE_MAX_POSITIONS:
+                print(f"    DEGRADE CAP: {degrade_count}/{DEGRADE_MAX_POSITIONS}, skipping")
                 break
-            if len(self._resting_mention_orders) >= MENTION_MAX_RESTING_ORDERS:
+            if len(self._resting_degrade_orders) >= DEGRADE_MAX_RESTING_ORDERS:
                 print(f"    DEGRADE RESTING CAP, waiting for fills")
                 break
 
@@ -2702,7 +2804,7 @@ class KalshiReversionScanner:
             if order_info:
                 await self.notifier.send_mention_signal(sig, order_info)
                 self.positions.add(sig, order_info)
-                mention_count += 1
+                degrade_count += 1
 
     def _execute_degradation_entry(self, sig):
         """Execute a degradation-curve BUY NO entry. $5 passive bid, NBA only.
@@ -2816,8 +2918,8 @@ class KalshiReversionScanner:
                           filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
                 return info
 
-        # Not filled — leave resting
-        self._resting_mention_orders[ticker] = {
+        # Not filled — leave resting (in its own dict, independent of mention)
+        self._resting_degrade_orders[ticker] = {
             'order_id': order_id,
             'placed_time': time.time(),
             'contracts': contracts,
