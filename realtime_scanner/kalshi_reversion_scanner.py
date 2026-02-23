@@ -2228,12 +2228,14 @@ class KalshiReversionScanner:
             print(f"    DEGRADE: no orderbook for {ticker}, skipping")
             return None
 
-        # Get best NO bid: try NO bids directly, fall back to YES asks
+        # Get best NO bid and best NO ask from orderbook
         no_side = orderbook.get('no', {})
         if isinstance(no_side, dict):
             no_bids_raw = no_side.get('bids', [])
+            no_asks_raw = no_side.get('asks', [])
         else:
             no_bids_raw = no_side if isinstance(no_side, list) else []
+            no_asks_raw = []
         if no_bids_raw:
             best_no_bid = max(b[0] for b in no_bids_raw)
         else:
@@ -2245,8 +2247,21 @@ class KalshiReversionScanner:
             else:
                 best_no_bid = 0
 
+        # Get best NO ask: try NO asks directly, fall back to YES bids
+        best_no_ask = None
+        if no_asks_raw:
+            best_no_ask = min(a[0] for a in no_asks_raw)
+        else:
+            yes_side = orderbook.get('yes', {})
+            yes_bids_raw = yes_side.get('bids', []) if isinstance(yes_side, dict) else []
+            if yes_bids_raw:
+                best_no_ask = 100 - max(b[0] for b in yes_bids_raw)
+
         # Our bid: lower of (fair - 5c) or (best_bid + 1c)
+        # CRITICAL: stay below the NO ask to ensure maker-only (0% fee vs 3.5% taker)
         bid_from_book = best_no_bid + 1
+        if best_no_ask is not None and bid_from_book >= best_no_ask:
+            bid_from_book = best_no_ask - 1
         bid_from_fair = max_buy_cents - 5
         our_bid = min(bid_from_book, bid_from_fair)
 
@@ -2357,12 +2372,14 @@ class KalshiReversionScanner:
             print(f"    No orderbook for {ticker}, skipping")
             return None
 
-        # Get best NO bid: try NO bids directly, fall back to YES asks
+        # Get best NO bid and best NO ask from orderbook
         no_side = orderbook.get('no', {})
         if isinstance(no_side, dict):
             no_bids_raw = no_side.get('bids', [])
+            no_asks_raw = no_side.get('asks', [])
         else:
             no_bids_raw = no_side if isinstance(no_side, list) else []
+            no_asks_raw = []
         if no_bids_raw:
             best_no_bid = max(b[0] for b in no_bids_raw)
         else:
@@ -2374,6 +2391,16 @@ class KalshiReversionScanner:
                 best_no_bid = 100 - min(a[0] for a in yes_asks)
             else:
                 best_no_bid = 0
+
+        # Get best NO ask: try NO asks directly, fall back to YES bids
+        best_no_ask = None
+        if no_asks_raw:
+            best_no_ask = min(a[0] for a in no_asks_raw)
+        else:
+            yes_side = orderbook.get('yes', {})
+            yes_bids_raw = yes_side.get('bids', []) if isinstance(yes_side, dict) else []
+            if yes_bids_raw:
+                best_no_ask = 100 - max(b[0] for b in yes_bids_raw)
 
         # Per-category price range
         ticker_upper = ticker.upper()
@@ -2387,7 +2414,13 @@ class KalshiReversionScanner:
             max_no_c, min_no_c = int(MENTION_MAX_NO_PRICE * 100), int(MENTION_MIN_NO_PRICE * 100)
 
         # Our bid: 1c above current best NO bid, capped at category max
+        # CRITICAL: stay below the NO ask to ensure maker-only (0% fee vs 3.5% taker)
         our_bid = min(best_no_bid + 1, max_no_c)
+        if best_no_ask is not None and our_bid >= best_no_ask:
+            our_bid = best_no_ask - 1
+            if our_bid < min_no_c:
+                print(f"    Spread too tight: NO ask={best_no_ask}c, can't bid above {min_no_c}c as maker, skipping")
+                return None
 
         if our_bid < min_no_c or our_bid > max_no_c:
             print(f"    Bid {our_bid}c outside range [{min_no_c}-{max_no_c}c], skipping")
