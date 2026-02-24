@@ -130,7 +130,7 @@ DEGRADE_BUY_BELOW = {
 # Backtest: YES overpriced on earnings mentions, especially 0-20min into call.
 EARNINGS_ENABLED = True
 EARNINGS_BET_DOLLARS = 3
-EARNINGS_MIN_NO_PRICE = 0.15     # 15c
+EARNINGS_MIN_NO_PRICE = 0.50     # 50c — only bucket with real edge (t=5.57)
 EARNINGS_MAX_NO_PRICE = 0.70     # 70c
 EARNINGS_MAX_POSITIONS = 20      # independent cap
 EARNINGS_MAX_EVENT_DOLLARS = 26  # per-event cap
