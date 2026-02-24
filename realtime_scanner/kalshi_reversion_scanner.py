@@ -103,7 +103,7 @@ MENTION_SCAN_SERIES = [
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
 # Buys NO when market is below statistically-derived fair value based on
 # time-into-game degradation curves. Separate from main mention strategy.
-DEGRADE_BET_DOLLARS = 5
+DEGRADE_BET_DOLLARS = 3
 DEGRADE_MIN_HOURS_LIVE = 1.0   # only bet >= 1h into game
 DEGRADE_MAX_POSITIONS = 20     # independent cap (does NOT share with mention)
 DEGRADE_MAX_EVENT_DOLLARS = 26 # independent per-event cap
@@ -698,7 +698,7 @@ class MentionBuyNoDetector:
             event_ticker = m.get('event_ticker', '')
             is_trump = 'TRUMPMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
-            is_nba = 'NBAMENTION' in ticker_upper
+            is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
             ms = milestone_map.get(event_ticker)
             if ms:
                 event_start_ts = ms.get('start_ts', 0)
@@ -1782,7 +1782,7 @@ class KalshiReversionScanner:
                     ticker_up = s.get('ticker', '').upper()
                     is_trump = 'TRUMPMENTION' in ticker_up
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
-                    is_nba = 'NBAMENTION' in ticker_up
+                    is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if is_ncaa:
                         return -1.5 <= h <= -0.5  # live games, 0.5-1.5h after start
                     elif is_nba:
@@ -2449,7 +2449,7 @@ class KalshiReversionScanner:
         # Per-category price range
         ticker_upper = ticker.upper()
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
-        is_nba = 'NBAMENTION' in ticker_upper
+        is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
         if is_ncaa:
             max_no_c, min_no_c = 25, 6
         elif is_nba:
@@ -2475,7 +2475,7 @@ class KalshiReversionScanner:
         # Per-category bet sizing
         is_trump = 'TRUMPMENTION' in ticker_upper
         if is_nba:
-            mention_bet = 5
+            mention_bet = 6
         elif is_ncaa:
             mention_bet = 3
         elif is_trump:
@@ -2642,7 +2642,7 @@ class KalshiReversionScanner:
         # Per-category price range (same as passive)
         ticker_upper = ticker.upper()
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
-        is_nba = 'NBAMENTION' in ticker_upper
+        is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
         is_trump = 'TRUMPMENTION' in ticker_upper
         if is_ncaa:
             max_no_c, min_no_c = 25, 6
@@ -2659,7 +2659,7 @@ class KalshiReversionScanner:
 
         # Per-category bet sizing (same as passive)
         if is_nba:
-            mention_bet = 5
+            mention_bet = 6
         elif is_ncaa:
             mention_bet = 3
         elif is_trump:
