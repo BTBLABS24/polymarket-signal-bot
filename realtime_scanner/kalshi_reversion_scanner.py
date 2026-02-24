@@ -103,6 +103,7 @@ MENTION_SCAN_SERIES = [
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
 # Buys NO when market is below statistically-derived fair value based on
 # time-into-game degradation curves. Separate from main mention strategy.
+DEGRADE_ENABLED = False          # paused — low edge vs mention strategies
 DEGRADE_BET_DOLLARS = 10
 DEGRADE_MIN_HOURS_LIVE = 1.0   # only bet >= 1h into game
 DEGRADE_MAX_POSITIONS = 20     # independent cap (does NOT share with mention)
@@ -1505,7 +1506,7 @@ class KalshiNotifier:
         msg = (
             f"Kalshi Auto-Trading Bot Started\n\n"
             f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE TRADING'}\n"
-            f"Strategies: Mention BUY NO (${MENTION_BET_DOLLARS}/bet), Degradation (${DEGRADE_BET_DOLLARS}/bet)\n"
+            f"Strategies: Mention BUY NO (${MENTION_BET_DOLLARS}/bet), Degradation ({'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet'})\n"
             f"Max mention positions: {MENTION_MAX_POSITIONS}\n"
             f"{bal_line}"
             f"Open positions: {n_open}\n"
@@ -1637,7 +1638,7 @@ class KalshiReversionScanner:
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
         print(f"Strategy 1: Mention BUY NO, ${MENTION_BET_DOLLARS}/bet, hold until settlement")
-        print(f"Strategy 2: Degradation curve, ${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids")
+        print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -1852,8 +1853,9 @@ class KalshiReversionScanner:
                         mention_count += 1
                         mention_allowed = mention_count < MENTION_MAX_POSITIONS
 
-                # 3b. Degradation curve strategy (NBA, 1h+ live, $1/bet)
-                await self._scan_degradation_curve(mention_markets, milestones, now)
+                # 3b. Degradation curve strategy (NBA, paused)
+                if DEGRADE_ENABLED:
+                    await self._scan_degradation_curve(mention_markets, milestones, now)
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
