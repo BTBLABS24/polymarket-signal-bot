@@ -475,6 +475,34 @@ class KalshiClient:
                                 'end_ts': end_ts,
                                 'title': title,
                             }
+                # Fallback: parse sub_title date for events without milestones.
+                # Kalshi stores the event date in sub_title (e.g. "Feb 24, 2026")
+                # but sometimes doesn't create a milestone record. For Trump/political
+                # events we assume 9pm ET (02:00 UTC next day) as start time.
+                for ev in data.get('events', []):
+                    et = ev.get('event_ticker', '')
+                    if et in milestone_map:
+                        continue
+                    sub = ev.get('sub_title', '')
+                    if not sub:
+                        continue
+                    # Strip leading "On " if present
+                    sub_clean = sub.replace('On ', '').strip()
+                    try:
+                        # Parse "Feb 24, 2026" → assume 9pm ET = 02:00 UTC next day
+                        dt = datetime.strptime(sub_clean, '%b %d, %Y')
+                        # 9pm ET = next day 02:00 UTC
+                        start_ts = dt.replace(
+                            hour=2, minute=0, second=0,
+                            tzinfo=timezone.utc,
+                        ).timestamp() + 86400
+                        milestone_map[et] = {
+                            'start_ts': start_ts,
+                            'end_ts': None,
+                            'title': ev.get('title', ''),
+                        }
+                    except ValueError:
+                        pass
             except Exception as e:
                 print(f'  Milestones fetch error ({series}): {e}')
 
@@ -739,14 +767,9 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
             else:
-                # No milestone data — Trump has a 24h window so we can fall
-                # back to close_time: allow if market closes within 7 days.
-                # Other categories need precise start time, so skip them.
-                if is_trump and close_ts and close_ts - now_ts < 7 * 86400:
-                    pass  # allow Trump without milestone
-                else:
-                    debug_counts['no_milestone'] += 1
-                    continue
+                # No milestone data — skip (can't time entry)
+                debug_counts['no_milestone'] += 1
+                continue
 
             # Get current YES price → derive NO price
             yes_price = None
