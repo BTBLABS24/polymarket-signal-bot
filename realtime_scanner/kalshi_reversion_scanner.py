@@ -804,9 +804,27 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
             else:
-                # No milestone data — skip (can't time entry)
-                debug_counts['no_milestone'] += 1
-                continue
+                # No milestone — fallback: use market open_time as proxy.
+                # Mention markets open ~1-2h before their event starts.
+                # If a market opened recently, the event is imminent/live.
+                # Estimate event_start ≈ open_time + 1.5h (typical lead time).
+                open_time_str = m.get('open_time', '')
+                if open_time_str and not is_trump:
+                    try:
+                        open_dt = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
+                        hours_since_open = (now_ts - open_dt.timestamp()) / 3600
+                        # Only use proxy for recently-opened markets (< 4h)
+                        if hours_since_open < 0 or hours_since_open > 4:
+                            debug_counts['no_milestone'] += 1
+                            continue
+                        estimated_start = open_dt.timestamp() + 1.5 * 3600
+                        hours_to_event = (estimated_start - now_ts) / 3600
+                    except Exception:
+                        debug_counts['no_milestone'] += 1
+                        continue
+                else:
+                    debug_counts['no_milestone'] += 1
+                    continue
 
             # Get current YES price → derive NO price
             yes_price = None
@@ -860,7 +878,7 @@ class MentionBuyNoDetector:
 
             title = m.get('title', ticker)
             no_price_cents = int(no_price * 100)
-            hours_to_event_val = round((ms['start_ts'] - now_ts) / 3600, 2) if ms else None
+            hours_to_event_val = round(hours_to_event, 2) if hours_to_event is not None else None
 
             # Volume as proxy for "event is live" — high volume = active event
             volume_24h = 0
@@ -1841,6 +1859,11 @@ class KalshiReversionScanner:
                         started = ms['start_ts'] <= now
                         ended = ms.get('end_ts') and ms['end_ts'] <= now
                         sig['event_live'] = started and not ended
+                    elif sig.get('hours_to_event') is not None:
+                        # Detector already computed hours_to_event via open_time fallback
+                        sig.setdefault('event_start_ts', None)
+                        sig.setdefault('event_end_ts', None)
+                        sig.setdefault('event_live', sig['hours_to_event'] <= 0)
                     else:
                         sig['event_start_ts'] = None
                         sig['event_end_ts'] = None
