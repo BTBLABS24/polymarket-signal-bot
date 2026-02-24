@@ -739,9 +739,14 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
             else:
-                # No milestone data — skip (can't time entry)
-                debug_counts['no_milestone'] += 1
-                continue
+                # No milestone data — Trump has a 24h window so we can fall
+                # back to close_time: allow if market closes within 7 days.
+                # Other categories need precise start time, so skip them.
+                if is_trump and close_ts and close_ts - now_ts < 7 * 86400:
+                    pass  # allow Trump without milestone
+                else:
+                    debug_counts['no_milestone'] += 1
+                    continue
 
             # Get current YES price → derive NO price
             yes_price = None
