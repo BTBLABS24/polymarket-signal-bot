@@ -103,7 +103,7 @@ MENTION_SCAN_SERIES = [
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
 # Buys NO when market is below statistically-derived fair value based on
 # time-into-game degradation curves. Separate from main mention strategy.
-DEGRADE_BET_DOLLARS = 3
+DEGRADE_BET_DOLLARS = 10
 DEGRADE_MIN_HOURS_LIVE = 1.0   # only bet >= 1h into game
 DEGRADE_MAX_POSITIONS = 20     # independent cap (does NOT share with mention)
 DEGRADE_MAX_EVENT_DOLLARS = 26 # independent per-event cap
