@@ -441,84 +441,95 @@ class KalshiClient:
 
         for series in series_list:
             try:
-                resp = self.session.get(
-                    f'{KALSHI_BASE}/events',
-                    params={
+                # Paginate: some series (KXNBAMENTION) have 150+ events
+                cursor = None
+                while True:
+                    params = {
                         'series_ticker': series,
-                        'limit': 100,
+                        'limit': 200,
                         'with_milestones': 'true',
-                    },
-                    timeout=15,
-                )
-                if resp.status_code == 429:
-                    time.sleep(2)
-                    continue
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                for ms in data.get('milestones', []):
-                    start_str = ms.get('start_date', '')
-                    if not start_str:
-                        continue
-                    try:
-                        start_ts = datetime.fromisoformat(
-                            start_str.replace('Z', '+00:00')
-                        ).timestamp()
-                    except Exception:
-                        continue
-
-                    end_ts = None
-                    end_str = ms.get('end_date', '')
-                    if end_str:
+                    }
+                    if cursor:
+                        params['cursor'] = cursor
+                    resp = self.session.get(
+                        f'{KALSHI_BASE}/events',
+                        params=params,
+                        timeout=15,
+                    )
+                    if resp.status_code == 429:
+                        time.sleep(2)
+                        break
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    for ms in data.get('milestones', []):
+                        start_str = ms.get('start_date', '')
+                        if not start_str:
+                            continue
                         try:
-                            end_ts = datetime.fromisoformat(
-                                end_str.replace('Z', '+00:00')
+                            start_ts = datetime.fromisoformat(
+                                start_str.replace('Z', '+00:00')
                             ).timestamp()
                         except Exception:
-                            pass
+                            continue
 
-                    title = ms.get('title', '')
-                    for et in ms.get('primary_event_tickers', []):
-                        milestone_map[et] = {
-                            'start_ts': start_ts,
-                            'end_ts': end_ts,
-                            'title': title,
-                        }
-                    for et in ms.get('related_event_tickers', []):
-                        if et not in milestone_map:
+                        end_ts = None
+                        end_str = ms.get('end_date', '')
+                        if end_str:
+                            try:
+                                end_ts = datetime.fromisoformat(
+                                    end_str.replace('Z', '+00:00')
+                                ).timestamp()
+                            except Exception:
+                                pass
+
+                        title = ms.get('title', '')
+                        for et in ms.get('primary_event_tickers', []):
                             milestone_map[et] = {
                                 'start_ts': start_ts,
                                 'end_ts': end_ts,
                                 'title': title,
                             }
-                # Fallback: parse sub_title date for events without milestones.
-                # Kalshi stores the event date in sub_title (e.g. "Feb 24, 2026")
-                # but sometimes doesn't create a milestone record. For Trump/political
-                # events we assume 9pm ET (02:00 UTC next day) as start time.
-                for ev in data.get('events', []):
-                    et = ev.get('event_ticker', '')
-                    if et in milestone_map:
-                        continue
-                    sub = ev.get('sub_title', '')
-                    if not sub:
-                        continue
-                    # Strip leading "On " if present
-                    sub_clean = sub.replace('On ', '').strip()
-                    try:
-                        # Parse "Feb 24, 2026" → assume 9pm ET = 02:00 UTC next day
-                        dt = datetime.strptime(sub_clean, '%b %d, %Y')
-                        # 9pm ET = next day 02:00 UTC
-                        start_ts = dt.replace(
-                            hour=2, minute=0, second=0,
-                            tzinfo=timezone.utc,
-                        ).timestamp() + 86400
-                        milestone_map[et] = {
-                            'start_ts': start_ts,
-                            'end_ts': None,
-                            'title': ev.get('title', ''),
-                        }
-                    except ValueError:
-                        pass
+                        for et in ms.get('related_event_tickers', []):
+                            if et not in milestone_map:
+                                milestone_map[et] = {
+                                    'start_ts': start_ts,
+                                    'end_ts': end_ts,
+                                    'title': title,
+                                }
+                    # Fallback: parse sub_title date for events without milestones.
+                    # Kalshi stores the event date in sub_title (e.g. "Feb 24, 2026")
+                    # but sometimes doesn't create a milestone record. For Trump/political
+                    # events we assume 9pm ET (02:00 UTC next day) as start time.
+                    for ev in data.get('events', []):
+                        et = ev.get('event_ticker', '')
+                        if et in milestone_map:
+                            continue
+                        sub = ev.get('sub_title', '')
+                        if not sub:
+                            continue
+                        # Strip leading "On " if present
+                        sub_clean = sub.replace('On ', '').strip()
+                        try:
+                            # Parse "Feb 24, 2026" → assume 9pm ET = 02:00 UTC next day
+                            dt = datetime.strptime(sub_clean, '%b %d, %Y')
+                            # 9pm ET = next day 02:00 UTC
+                            start_ts = dt.replace(
+                                hour=2, minute=0, second=0,
+                                tzinfo=timezone.utc,
+                            ).timestamp() + 86400
+                            milestone_map[et] = {
+                                'start_ts': start_ts,
+                                'end_ts': None,
+                                'title': ev.get('title', ''),
+                            }
+                        except ValueError:
+                            pass
+                    # Check for next page
+                    cursor = data.get('cursor', '')
+                    if not cursor or not data.get('events', []):
+                        break
+                    time.sleep(0.3)
             except Exception as e:
                 print(f'  Milestones fetch error ({series}): {e}')
 
@@ -1723,7 +1734,7 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy 1: Mention BUY NO, ${MENTION_BET_DOLLARS}/bet, hold until settlement")
+        print(f"Strategy 1: Mention BUY NO (Trump $10, NBA $10, NCAA $3, Other ${MENTION_BET_DOLLARS}), hold until settlement")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, live to +{EARNINGS_MAX_MINUTES_LIVE}min")
         print(f"Open positions: {self.positions.count()}")
