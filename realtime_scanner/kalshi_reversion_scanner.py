@@ -800,10 +800,15 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
             else:
-                # No milestone — fallback: use market open_time as proxy.
+                # No milestone — NBA/NCAA MUST have milestones to confirm
+                # game is live. The open_time fallback is too unreliable
+                # (markets open hours before tipoff, causing false "live" signals).
+                if is_nba or is_ncaa:
+                    debug_counts['no_milestone'] += 1
+                    continue
+
+                # For non-live categories (Trump, Other): use open_time as proxy.
                 # Mention markets open ~1-2h before their event starts.
-                # If a market opened recently, the event is imminent/live.
-                # Estimate event_start ≈ open_time + 1.5h (typical lead time).
                 open_time_str = m.get('open_time', '')
                 if open_time_str and not is_trump:
                     try:
