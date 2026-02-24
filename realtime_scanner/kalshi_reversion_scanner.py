@@ -110,16 +110,20 @@ DEGRADE_MAX_EVENT_DOLLARS = 26 # independent per-event cap
 DEGRADE_MAX_RESTING_ORDERS = 5 # independent resting cap
 # Fair NO prices (Wilson CI lower bound, 95%, n>=20) by word & half-hour.
 # If market NO <= this value, it's a buy.
-# Derived from LAST 60 DAYS (105 games) — reflects current announcer behavior.
-# FILTERED: only cells with ROI >= 20% at fair price. Removed RETI, ALLE, MVP entirely.
+# Derived from LAST 30 DAYS (63 games, Jan 17 – Feb 16 2026).
+# FILTERED: only cells with ROI >= 20% at fair price.
 DEGRADE_BUY_BELOW = {
-    'BUZZ': {'1.0': 67},                                      # ROI: +21%
-    'TRIP': {'1.0': 64, '1.5': 65},                           # ROI: +21/+23%
-    'AIR':  {'1.0': 61},                                      # ROI: +21%
-    'ANKL': {'1.0': 56, '1.5': 59},                           # ROI: +23/+22%
-    'JORD': {'1.0': 58, '1.5': 65},                           # ROI: +24/+22%
-    'TRAD': {'1.0': 38, '1.5': 42, '2.0': 56},               # ROI: +41/+45/+33%
-    'PLAY': {'1.0': 32, '1.5': 38, '2.0': 50, '2.5': 70},   # ROI: +46/+42/+32/+20%
+    'AIR':  {'1.0': 53, '1.5': 54, '2.0': 63, '2.5': 76},   # ROI: +31/+32/+28/+22%
+    'ALLE': {'1.0': 56, '1.5': 65},                           # ROI: +26/+24%
+    'ANKL': {'1.0': 58, '1.5': 59, '2.0': 65},               # ROI: +26/+26/+23%
+    'BUZZ': {'1.0': 58, '1.5': 65},                           # ROI: +24/+21%
+    'ELBO': {'1.0': 26, '1.5': 32},                           # ROI: +58/+56%
+    'JORD': {'1.0': 54, '1.5': 63, '2.5': 77},               # ROI: +30/+26/+21%
+    'MVP':  {'1.0': 42, '1.5': 48, '2.0': 66},               # ROI: +36/+34/+26%
+    'PLAY': {'1.0': 24, '1.5': 28, '2.0': 44},               # ROI: +59/+58/+48%
+    'TECH': {'1.0': 29, '1.5': 32, '2.0': 49, '2.5': 69},   # ROI: +47/+48/+38/+30%
+    'TRAD': {'1.0': 33, '1.5': 33},                           # ROI: +52/+57%
+    'TRIP': {'1.0': 56, '1.5': 56, '2.0': 68},               # ROI: +25/+26/+22%
 }
 
 # State files
