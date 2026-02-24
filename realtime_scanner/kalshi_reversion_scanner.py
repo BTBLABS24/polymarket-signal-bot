@@ -128,7 +128,7 @@ DEGRADE_BUY_BELOW = {
 # --- Earnings Mention Strategy ---
 # Buy NO on earnings call mention markets during live call.
 # Backtest: YES overpriced on earnings mentions, especially 0-20min into call.
-EARNINGS_ENABLED = True
+EARNINGS_ENABLED = False
 EARNINGS_BET_DOLLARS = 3
 EARNINGS_MIN_NO_PRICE = 0.50     # 50c — only bucket with real edge (t=5.57)
 EARNINGS_MAX_NO_PRICE = 0.70     # 70c
@@ -2303,7 +2303,7 @@ class KalshiReversionScanner:
         # Per-category bet sizing
         is_trump = 'TRUMPMENTION' in ticker_upper
         if is_nba:
-            mention_bet = 6
+            mention_bet = 10
         elif is_ncaa:
             mention_bet = 3
         elif is_trump:
