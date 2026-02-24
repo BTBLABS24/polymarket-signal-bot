@@ -2316,12 +2316,27 @@ class KalshiReversionScanner:
                       min_no_c=min_no_c, max_no_c=max_no_c)
             return None
 
-        # Slippage guard: don't pay more than 2c above what the detector saw
-        if taker_price > no_price_cents + 2:
-            print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + 2c, skipping")
+        # Slippage guard: only buy within 2c of signal price.
+        # Walk the book and cap bet size to depth available within that window.
+        max_slip_price = no_price_cents + 2
+        if taker_price > max_slip_price:
+            print(f"    Slippage: best ask {taker_price}c > signal {no_price_cents}c + 2c, skipping")
             log_event('mention_skip_slippage', ticker=ticker,
                       no_ask_cents=taker_price, signal_cents=no_price_cents)
             return None
+
+        # Depth within 2c: sum contracts on NO asks at <= max_slip_price
+        depth_contracts = 0
+        for ask_price, ask_qty in no_asks_raw:
+            if ask_price <= max_slip_price:
+                depth_contracts += ask_qty
+        # Also count YES bid depth (NO ask = 100 - YES bid)
+        yes_side = orderbook.get('yes', {})
+        yes_bids_raw = yes_side.get('bids', []) if isinstance(yes_side, dict) else []
+        for bid_price, bid_qty in yes_bids_raw:
+            if (100 - bid_price) <= max_slip_price:
+                depth_contracts += bid_qty
+        depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
         # Per-category bet sizing
         is_trump = 'TRUMPMENTION' in ticker_upper
@@ -2358,12 +2373,20 @@ class KalshiReversionScanner:
                 return None
             mention_bet = min(mention_bet, remaining_cap)
 
+        # Cap bet to depth within 2c of signal
+        if depth_dollars > 0 and mention_bet > depth_dollars:
+            print(f"    Depth cap: ${depth_dollars:.2f} within {max_slip_price}c (wanted ${mention_bet:.2f})")
+            mention_bet = depth_dollars
+
         contracts = int(mention_bet / (taker_price / 100))
         if contracts < 1:
             contracts = 1
         bet_dollars = round(contracts * taker_price / 100, 2)
 
-        print(f"    Mention taker: {contracts} NO @ {taker_price}c (ask) = ${bet_dollars:.2f}")
+        # Set order price at max_slip_price so it fills at best available within 2c
+        order_price = max_slip_price
+
+        print(f"    Mention taker: {contracts} NO @ {taker_price}c (limit {order_price}c, depth ${depth_dollars:.2f}) = ${bet_dollars:.2f}")
 
         if DRY_RUN:
             order_info = {
@@ -2384,7 +2407,7 @@ class KalshiReversionScanner:
 
         order = self.client.create_order(
             ticker=ticker, side='no', action='buy',
-            count=contracts, price_cents=taker_price,
+            count=contracts, price_cents=order_price,
         )
         if not order:
             print(f"    Mention order failed for {ticker}")
@@ -2394,9 +2417,9 @@ class KalshiReversionScanner:
         self.mention_detector.signal_history[ticker] = time.time()
         self.mention_detector._save()
 
-        print(f"    Taker order placed: {order_id} ({contracts} NO @ {taker_price}c, ${bet_dollars:.2f})")
+        print(f"    Taker order placed: {order_id} ({contracts} NO @ limit {order_price}c, ${bet_dollars:.2f})")
         log_event('mention_taker_placed', ticker=ticker, order_id=order_id,
-                  contracts=contracts, price_cents=taker_price, bet_dollars=bet_dollars,
+                  contracts=contracts, price_cents=order_price, bet_dollars=bet_dollars,
                   signal_no_cents=no_price_cents,
                   hours_to_event=sig.get('hours_to_event'),
                   event_volume_24h=sig.get('event_volume_24h', 0),
@@ -2479,10 +2502,23 @@ class KalshiReversionScanner:
             print(f"    Earnings NO ask {taker_price}c outside [{min_no_c}-{max_no_c}c], skipping")
             return None
 
-        # Slippage guard: don't pay more than 2c above what the detector saw
-        if taker_price > no_price_cents + 2:
+        # Slippage guard: only buy within 2c of signal price
+        max_slip_price = no_price_cents + 2
+        if taker_price > max_slip_price:
             print(f"    Earnings slippage: ask {taker_price}c > signal {no_price_cents}c + 2c, skipping")
             return None
+
+        # Depth within 2c: sum contracts on NO asks at <= max_slip_price
+        depth_contracts = 0
+        for ask_price, ask_qty in no_asks_raw:
+            if ask_price <= max_slip_price:
+                depth_contracts += ask_qty
+        yes_side_e = orderbook.get('yes', {})
+        yes_bids_e = yes_side_e.get('bids', []) if isinstance(yes_side_e, dict) else []
+        for bid_price, bid_qty in yes_bids_e:
+            if (100 - bid_price) <= max_slip_price:
+                depth_contracts += bid_qty
+        depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
         # Per-event exposure cap (earnings)
         event = sig.get('event_ticker', '')
@@ -2495,12 +2531,19 @@ class KalshiReversionScanner:
                 return None
             earnings_bet = min(earnings_bet, remaining_cap)
 
+        # Cap bet to depth within 2c of signal
+        if depth_dollars > 0 and earnings_bet > depth_dollars:
+            print(f"    Earnings depth cap: ${depth_dollars:.2f} within {max_slip_price}c (wanted ${earnings_bet:.2f})")
+            earnings_bet = depth_dollars
+
         contracts = int(earnings_bet / (taker_price / 100))
         if contracts < 1:
             contracts = 1
         bet_dollars = round(contracts * taker_price / 100, 2)
 
-        print(f"    Earnings taker: {contracts} NO @ {taker_price}c (ask) = ${bet_dollars:.2f}")
+        order_price = max_slip_price
+
+        print(f"    Earnings taker: {contracts} NO @ {taker_price}c (limit {order_price}c, depth ${depth_dollars:.2f}) = ${bet_dollars:.2f}")
 
         if DRY_RUN:
             order_info = {
@@ -2513,7 +2556,7 @@ class KalshiReversionScanner:
             self.trade_logger.record({
                 'type': 'entry', 'strategy': 'earnings_buy_no',
                 'ticker': ticker, 'side': 'no', 'action': 'buy',
-                'contracts': contracts, 'price_cents': taker_price,
+                'contracts': contracts, 'price_cents': order_price,
                 'bet_dollars': bet_dollars, 'dry_run': True,
             })
             print(f"    DRY RUN: {contracts} NO @ {taker_price}c (${bet_dollars:.2f})")
@@ -2521,7 +2564,7 @@ class KalshiReversionScanner:
 
         order = self.client.create_order(
             ticker=ticker, side='no', action='buy',
-            count=contracts, price_cents=taker_price,
+            count=contracts, price_cents=order_price,
         )
         if not order:
             print(f"    Earnings order failed for {ticker}")
