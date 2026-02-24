@@ -2316,6 +2316,13 @@ class KalshiReversionScanner:
                       min_no_c=min_no_c, max_no_c=max_no_c)
             return None
 
+        # Slippage guard: don't pay more than 2c above what the detector saw
+        if taker_price > no_price_cents + 2:
+            print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + 2c, skipping")
+            log_event('mention_skip_slippage', ticker=ticker,
+                      no_ask_cents=taker_price, signal_cents=no_price_cents)
+            return None
+
         # Per-category bet sizing
         is_trump = 'TRUMPMENTION' in ticker_upper
         if is_nba:
@@ -2470,6 +2477,11 @@ class KalshiReversionScanner:
         taker_price = best_no_ask
         if taker_price < min_no_c or taker_price > max_no_c:
             print(f"    Earnings NO ask {taker_price}c outside [{min_no_c}-{max_no_c}c], skipping")
+            return None
+
+        # Slippage guard: don't pay more than 2c above what the detector saw
+        if taker_price > no_price_cents + 2:
+            print(f"    Earnings slippage: ask {taker_price}c > signal {no_price_cents}c + 2c, skipping")
             return None
 
         # Per-event exposure cap (earnings)
