@@ -2046,7 +2046,8 @@ class KalshiReversionScanner:
 
 
     async def _check_resting_premarket_orders(self):
-        """Check pre-event resting orders for fills. Kalshi auto-cancels at event start via expiration_ts."""
+        """Check pre-event resting orders for fills and adverse spread movement.
+        Kalshi auto-cancels at event start via expiration_ts."""
         if not self._resting_premarket_orders:
             return
         to_remove = []
@@ -2055,6 +2056,22 @@ class KalshiReversionScanner:
             price_cents = info['price_cents']
             contracts = info['contracts']
             category = info['category']
+
+            # Check if spread has narrowed — someone moving against us
+            ob = self.client.get_orderbook(ticker)
+            if ob:
+                no_bids = ob.get('no', [])
+                yes_bids = ob.get('yes', [])
+                best_no_bid = max(b[0] for b in no_bids) if no_bids else 0
+                best_no_ask = (100 - max(b[0] for b in yes_bids)) if yes_bids else 99
+                spread = best_no_ask - best_no_bid if best_no_bid > 0 and best_no_ask > 0 else 99
+                if spread < 3:
+                    print(f"    PREMARKET CANCEL: {ticker} spread narrowed to {spread}c (<3c), cancelling")
+                    self.client.cancel_order(order_id)
+                    log_event('premarket_cancel_spread', ticker=ticker, order_id=order_id,
+                              spread=spread, no_bid=best_no_bid, no_ask=best_no_ask)
+                    to_remove.append(order_id)
+                    continue
 
             # Check fill status
             status = self.client.get_order(order_id)
