@@ -1759,6 +1759,24 @@ class KalshiNotifier:
         msg = "\n".join(lines)
         await self._send(msg)
 
+    async def send_order_event(self, event_type, ticker, **kwargs):
+        """Send telegram for any order event: placed, filled, rebid, cancelled."""
+        price = kwargs.get('price_cents', 0)
+        contracts = kwargs.get('contracts', 0)
+        dollars = kwargs.get('bet_dollars', 0)
+        title = kwargs.get('title', '')
+        extra = kwargs.get('extra', '')
+        url = f"https://kalshi.com/markets/{ticker}"
+        lines = [event_type, '']
+        if title:
+            lines.append(title)
+        lines.append(f"Ticker: {ticker}")
+        lines.append(f"{contracts} NO @ {price}c (${dollars:.2f})")
+        if extra:
+            lines.append(extra)
+        lines.append(url)
+        await self._send('\n'.join(lines))
+
     async def _send(self, message):
         if not self.bot or not TELEGRAM_CHAT_ID:
             print(f'[TG] {message[:200]}...')
@@ -1789,6 +1807,17 @@ class KalshiReversionScanner:
         self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
         self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
         self._resting_premarket_orders = {}  # order_id -> {ticker, price_cents, contracts, bet_dollars, placed_ts, category, signal}
+        self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
+
+    def _queue_tg(self, event_type, ticker, **kwargs):
+        """Queue a telegram notification from sync code. Flushed in async main loop."""
+        self._pending_tg.append((event_type, ticker, kwargs))
+
+    async def _flush_tg(self):
+        """Send all queued telegram notifications."""
+        while self._pending_tg:
+            event_type, ticker, kwargs = self._pending_tg.pop(0)
+            await self.notifier.send_order_event(event_type, ticker, **kwargs)
 
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
@@ -1830,6 +1859,7 @@ class KalshiReversionScanner:
         while True:
             try:
                 await self._cycle()
+                await self._flush_tg()
                 print(f"Next scan in {SCAN_INTERVAL_SECONDS}s...")
                 await asyncio.sleep(SCAN_INTERVAL_SECONDS)
             except KeyboardInterrupt:
@@ -2156,6 +2186,11 @@ class KalshiReversionScanner:
                             log_event('premarket_rebid', ticker=ticker, old_order=order_id,
                                       new_order=new_oid, old_price=price_cents, new_price=new_price,
                                       spread=spread, best_bid=best_no_bid)
+                            await self.notifier.send_order_event(
+                                f"MAKER REBID ({category})", ticker,
+                                price_cents=new_price, contracts=new_contracts, bet_dollars=new_bet,
+                                title=info.get('signal', {}).get('title', '')[:60],
+                                extra=f"Was {price_cents}c, outbid → rebid {new_price}c (spread={spread}c)")
                         else:
                             print(f"    PREMARKET REBID FAILED: {ticker} cancel succeeded but new order failed")
                         to_remove.append(order_id)
@@ -2180,11 +2215,16 @@ class KalshiReversionScanner:
                     'side': 'no', 'action': 'buy',
                     'contracts_filled': filled, 'price_cents': price_cents,
                     'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                    'fill_price': avg_fill / 100, 'fill_count': filled,
                 }
                 sig = info.get('signal', {})
                 sig['signal_type'] = 'mention_buy_no'
                 self.positions.add(sig, order_info)
-                await self.notifier.send_mention_signal(sig, order_info)
+                await self.notifier.send_order_event(
+                    f"MAKER FILLED ({category})", ticker,
+                    price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                    title=sig.get('title', '')[:60],
+                    extra=f"Rested @ {price_cents}c, filled @ {avg_fill}c")
                 log_event('premarket_filled', ticker=ticker, order_id=order_id,
                           filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
                           category=category)
@@ -2449,6 +2489,9 @@ class KalshiReversionScanner:
                 print(f"    DEGRADE FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
                 log_event('degrade_filled', ticker=ticker, order_id=order_id,
                           filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
+                self._queue_tg("DEGRADE TAKER FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                               title=sig.get('title', '')[:60])
                 return info
 
         # Not filled even as taker — cancel and give up
@@ -2620,6 +2663,10 @@ class KalshiReversionScanner:
                           contracts=contracts, price_cents=resting_price, bet_dollars=bet_dollars,
                           no_bid=best_no_bid, no_ask=best_no_ask, spread=spread,
                           h2e=h2e, category=cat_label)
+                self._queue_tg(f"MAKER LIMIT PLACED ({cat_label})", ticker,
+                               price_cents=resting_price, contracts=contracts, bet_dollars=bet_dollars,
+                               title=sig.get('title', '')[:60],
+                               extra=f"Bid={best_no_bid}c Ask={best_no_ask}c Spread={spread}c h2e={h2e:.1f}h")
                 return None  # No immediate fill — _check_resting_premarket_orders handles it
 
         # Slippage guard: cap how far above signal price we'll pay.
@@ -2759,6 +2806,9 @@ class KalshiReversionScanner:
                 print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
                 log_event('mention_filled', ticker=ticker, order_id=order_id,
                           filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
+                self._queue_tg("TAKER FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                               title=sig.get('title', '')[:60])
                 return info
 
         # Not filled even as taker — cancel and give up
@@ -2904,6 +2954,9 @@ class KalshiReversionScanner:
                 print(f"    EARNINGS FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
                 log_event('earnings_filled', ticker=ticker, order_id=order_id,
                           filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
+                self._queue_tg("EARNINGS TAKER FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                               title=sig.get('title', '')[:60])
                 return info
 
         # Not filled even as taker — cancel and give up
