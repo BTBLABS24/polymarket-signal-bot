@@ -94,6 +94,11 @@ PRERECORDED_SERIES = {
     'KXMRBEASTMENTION',       # MrBeast (pre-recorded YouTube)
     'KXGOLDENMENTION',        # Golden Bachelor (pre-recorded reality)
 }
+# Active series allowlist — only these get signals. Set to None to allow all.
+ACTIVE_SERIES = {
+    'KXMAMDANIMENTION',       # Mamdani
+    'KXNEWSOMMENTION',        # Newsom
+}
 # Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
     # Sports — NBA (degradation curve), NFL +80%, NCAA +60%, Fight +34%
@@ -796,6 +801,10 @@ class MentionBuyNoDetector:
             if series in PRERECORDED_SERIES:
                 debug_counts['prerecorded'] = debug_counts.get('prerecorded', 0) + 1
                 continue
+            # Active series allowlist — skip anything not in the list
+            if ACTIVE_SERIES is not None and series not in ACTIVE_SERIES:
+                debug_counts['paused_series'] = debug_counts.get('paused_series', 0) + 1
+                continue
             is_trump = 'TRUMPMENTION' in ticker_upper
             is_mamdani = 'MAMDANIMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
@@ -976,6 +985,7 @@ class MentionBuyNoDetector:
         print(f"  Mention filter: {debug_counts['total']} checked, "
               f"{debug_counts['skipped_cat']} skipped(cat), "
               f"{debug_counts.get('prerecorded', 0)} prerecorded, "
+              f"{debug_counts.get('paused_series', 0)} paused, "
               f"{debug_counts['no_milestone']} no milestone, "
               f"{debug_counts['too_early']} too early, "
               f"{debug_counts['too_far']} too far, "
