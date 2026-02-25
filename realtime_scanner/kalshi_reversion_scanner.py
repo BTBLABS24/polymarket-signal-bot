@@ -854,6 +854,7 @@ class MentionBuyNoDetector:
                     # NBA: pre-event maker (0.5-7d) + live taker (0.5-3h after tipoff)
                     if hours_to_event > PREMARKET_MAX_HOURS:
                         debug_counts['too_early'] += 1
+                        print(f"    NBA SKIP too_early: {ticker} h2e={hours_to_event:.1f}h > {PREMARKET_MAX_HOURS}h")
                         continue
                     if hours_to_event < -3:
                         debug_counts['too_far'] += 1
@@ -861,6 +862,7 @@ class MentionBuyNoDetector:
                     # Gap between pre-event and live: skip 0 to 0.5h before start
                     if -0.5 < hours_to_event < PREMARKET_CANCEL_HOURS:
                         debug_counts['too_early'] += 1
+                        print(f"    NBA SKIP gap: {ticker} h2e={hours_to_event:.1f}h (gap zone)")
                         continue
                 elif is_trump or is_mamdani or is_newsom:
                     # Trump/Mamdani/Newsom: 0.5-7d before event start (cancel resting at 0.5h)
@@ -946,6 +948,8 @@ class MentionBuyNoDetector:
                 max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             if no_price < min_no or no_price > max_no:
                 debug_counts['price_out_range'] += 1
+                if is_nba and hours_to_event is not None and hours_to_event > 0.5:
+                    print(f"    NBA SKIP price_OOR: {ticker} no={no_price:.2f} range=[{min_no:.2f}-{max_no:.2f}] h2e={hours_to_event:.1f}h premarket={hours_to_event > PREMARKET_CANCEL_HOURS}")
                 continue
 
             # Cooldown check — use longer cooldown since we're not time-gated
@@ -953,6 +957,8 @@ class MentionBuyNoDetector:
             last_signal = self.signal_history.get(ticker, 0)
             if now_ts - last_signal < 24 * 3600:
                 debug_counts['cooldown'] += 1
+                if is_nba:
+                    print(f"    NBA SKIP cooldown: {ticker} last={int((now_ts-last_signal)/60)}min ago")
                 continue
 
             debug_counts['eligible'] += 1
