@@ -2172,20 +2172,16 @@ class KalshiReversionScanner:
             print(f"    DEGRADE: no orderbook for {ticker}, skipping")
             return None
 
-        # Get best NO ask from orderbook
-        no_side = orderbook.get('no', {})
-        no_asks_raw = no_side.get('asks', []) if isinstance(no_side, dict) else []
+        # Get best NO ask from orderbook (NO ask = 100 - best YES bid)
+        yes_bids_raw = orderbook.get('yes', [])
+        if not isinstance(yes_bids_raw, list):
+            yes_bids_raw = []
         best_no_ask = None
-        if no_asks_raw:
-            best_no_ask = min(a[0] for a in no_asks_raw)
-        else:
-            yes_side = orderbook.get('yes', {})
-            yes_bids_raw = yes_side.get('bids', []) if isinstance(yes_side, dict) else []
-            if yes_bids_raw:
-                best_no_ask = 100 - max(b[0] for b in yes_bids_raw)
+        if yes_bids_raw:
+            best_no_ask = 100 - max(b[0] for b in yes_bids_raw)
 
-        if best_no_ask is None:
-            print(f"    DEGRADE: no NO ask for {ticker}, skipping")
+        if best_no_ask is None or best_no_ask < 1:
+            print(f"    DEGRADE: no NO ask for {ticker} (no YES bids), skipping")
             return None
 
         # Respect fair value ceiling from degradation table
@@ -2289,21 +2285,20 @@ class KalshiReversionScanner:
             print(f"    No orderbook for {ticker}, skipping")
             return None
 
-        # Get best NO ask from orderbook
-        no_side = orderbook.get('no', {})
-        no_asks_raw = no_side.get('asks', []) if isinstance(no_side, dict) else []
+        # Get best NO ask from orderbook.
+        # Kalshi orderbook format: {"yes": [[price, qty], ...], "no": [[price, qty], ...]}
+        # "yes" list = YES bids; "no" list = NO bids.
+        # To BUY NO as taker: NO ask = 100 - YES bid.
+        yes_bids_raw = orderbook.get('yes', [])
+        if not isinstance(yes_bids_raw, list):
+            yes_bids_raw = []
         best_no_ask = None
-        if no_asks_raw:
-            best_no_ask = min(a[0] for a in no_asks_raw)
-        else:
-            # Derive from YES bids: NO ask = 100 - best YES bid
-            yes_side = orderbook.get('yes', {})
-            yes_bids_raw = yes_side.get('bids', []) if isinstance(yes_side, dict) else []
-            if yes_bids_raw:
-                best_no_ask = 100 - max(b[0] for b in yes_bids_raw)
+        if yes_bids_raw:
+            best_yes_bid = max(b[0] for b in yes_bids_raw)
+            best_no_ask = 100 - best_yes_bid
 
-        if best_no_ask is None:
-            print(f"    No NO ask for {ticker}, skipping")
+        if best_no_ask is None or best_no_ask < 1:
+            print(f"    No NO ask for {ticker} (no YES bids in book), skipping")
             return None
 
         # Per-category price range
@@ -2333,16 +2328,12 @@ class KalshiReversionScanner:
                       no_ask_cents=taker_price, signal_cents=no_price_cents)
             return None
 
-        # Depth within 2c: sum contracts on NO asks at <= max_slip_price
+        # Depth within 2c: sum YES bid contracts where (100 - bid_price) <= max_slip_price
+        # i.e. YES bids >= (100 - max_slip_price)
+        min_yes_bid = 100 - max_slip_price
         depth_contracts = 0
-        for ask_price, ask_qty in no_asks_raw:
-            if ask_price <= max_slip_price:
-                depth_contracts += ask_qty
-        # Also count YES bid depth (NO ask = 100 - YES bid)
-        yes_side = orderbook.get('yes', {})
-        yes_bids_raw = yes_side.get('bids', []) if isinstance(yes_side, dict) else []
         for bid_price, bid_qty in yes_bids_raw:
-            if (100 - bid_price) <= max_slip_price:
+            if bid_price >= min_yes_bid:
                 depth_contracts += bid_qty
         depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
@@ -2486,20 +2477,16 @@ class KalshiReversionScanner:
             print(f"    No orderbook for {ticker}, skipping")
             return None
 
-        # Get best NO ask from orderbook
-        no_side = orderbook.get('no', {})
-        no_asks_raw = no_side.get('asks', []) if isinstance(no_side, dict) else []
+        # Get best NO ask from orderbook (NO ask = 100 - best YES bid)
+        yes_bids_raw = orderbook.get('yes', [])
+        if not isinstance(yes_bids_raw, list):
+            yes_bids_raw = []
         best_no_ask = None
-        if no_asks_raw:
-            best_no_ask = min(a[0] for a in no_asks_raw)
-        else:
-            yes_side = orderbook.get('yes', {})
-            yes_bids_raw = yes_side.get('bids', []) if isinstance(yes_side, dict) else []
-            if yes_bids_raw:
-                best_no_ask = 100 - max(b[0] for b in yes_bids_raw)
+        if yes_bids_raw:
+            best_no_ask = 100 - max(b[0] for b in yes_bids_raw)
 
-        if best_no_ask is None:
-            print(f"    No NO ask for {ticker}, skipping")
+        if best_no_ask is None or best_no_ask < 1:
+            print(f"    No NO ask for {ticker} (no YES bids), skipping")
             return None
 
         min_no_c = int(EARNINGS_MIN_NO_PRICE * 100)
@@ -2516,15 +2503,11 @@ class KalshiReversionScanner:
             print(f"    Earnings slippage: ask {taker_price}c > signal {no_price_cents}c + 2c, skipping")
             return None
 
-        # Depth within 2c: sum contracts on NO asks at <= max_slip_price
+        # Depth within 2c: sum YES bid contracts where bid >= (100 - max_slip_price)
+        min_yes_bid = 100 - max_slip_price
         depth_contracts = 0
-        for ask_price, ask_qty in no_asks_raw:
-            if ask_price <= max_slip_price:
-                depth_contracts += ask_qty
-        yes_side_e = orderbook.get('yes', {})
-        yes_bids_e = yes_side_e.get('bids', []) if isinstance(yes_side_e, dict) else []
-        for bid_price, bid_qty in yes_bids_e:
-            if (100 - bid_price) <= max_slip_price:
+        for bid_price, bid_qty in yes_bids_raw:
+            if bid_price >= min_yes_bid:
                 depth_contracts += bid_qty
         depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
