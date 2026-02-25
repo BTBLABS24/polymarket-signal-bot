@@ -1965,7 +1965,7 @@ class KalshiReversionScanner:
                             event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
                             # Add resting order exposure for this event
                             for v in self._resting_premarket_orders.values():
-                                if v['event_ticker'] == event:
+                                if v.get('signal', {}).get('event_ticker', '') == event:
                                     event_exp += v.get('bet_dollars', 0)
                             if event_exp >= MENTION_MAX_EVENT_DOLLARS:
                                 continue
