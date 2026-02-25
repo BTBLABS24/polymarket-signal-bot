@@ -827,20 +827,28 @@ class MentionBuyNoDetector:
                         debug_counts['skipped_cat'] += 1
                         continue
                 elif is_ncaa:
-                    # NCAA: live games only (0.5-1.5h after start)
-                    if hours_to_event > -0.5:
+                    # NCAA: pre-event maker (0.5-24h) + live taker (0.5-1.5h after start)
+                    if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         continue
                     if hours_to_event < -1.5:
                         debug_counts['too_far'] += 1
                         continue
+                    # Gap between pre-event and live: skip 0 to 0.5h before start
+                    if -0.5 < hours_to_event < PREMARKET_CANCEL_HOURS:
+                        debug_counts['too_early'] += 1
+                        continue
                 elif is_nba:
-                    # NBA: live games only (0.5-3h after tipoff)
-                    if hours_to_event > -0.5:
+                    # NBA: pre-event maker (0.5-24h) + live taker (0.5-3h after tipoff)
+                    if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         continue
                     if hours_to_event < -3:
                         debug_counts['too_far'] += 1
+                        continue
+                    # Gap between pre-event and live: skip 0 to 0.5h before start
+                    if -0.5 < hours_to_event < PREMARKET_CANCEL_HOURS:
+                        debug_counts['too_early'] += 1
                         continue
                 elif is_trump or is_mamdani or is_newsom:
                     # Trump/Mamdani/Newsom: 0.5-24h before event start (cancel resting at 0.5h)
@@ -1948,9 +1956,11 @@ class KalshiReversionScanner:
                         # Earnings: live to +30min
                         return -EARNINGS_MAX_MINUTES_LIVE/60 <= h <= -EARNINGS_MIN_MINUTES_LIVE/60
                     elif is_ncaa:
-                        return -1.5 <= h <= -0.5  # live games, 0.5-1.5h after start
+                        # Pre-event maker (0.5-24h) + live taker (0.5-1.5h after start)
+                        return (PREMARKET_CANCEL_HOURS <= h <= 24) or (-1.5 <= h <= -0.5)
                     elif is_nba:
-                        return -3 <= h <= -0.5  # live games, 0.5-3h after tipoff
+                        # Pre-event maker (0.5-24h) + live taker (0.5-3h after tipoff)
+                        return (PREMARKET_CANCEL_HOURS <= h <= 24) or (-3 <= h <= -0.5)
                     elif is_trump or is_mamdani or is_newsom:
                         return PREMARKET_CANCEL_HOURS <= h <= 24
                     else:
