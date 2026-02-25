@@ -18,6 +18,7 @@ import base64
 import csv
 import json
 import os
+import re
 import time
 import uuid
 import requests
@@ -84,6 +85,8 @@ PREMARKET_MAX_RESTING = 50        # Max total resting orders ($1 test bets)
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MIN_SPREAD = 8          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 50       # Max NO price for resting orders
+PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
+PREMARKET_NEW_SERIES_BET = 2      # $ bet for new/unknown series
 # Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
     # Sports — NBA (degradation curve), NFL +80%, NCAA +60%, Fight +34%
@@ -444,6 +447,7 @@ class KalshiClient:
         series_list = getattr(self, '_mention_series_cache', list(MENTION_SCAN_SERIES))
         # Start from previous cache so partial failures don't lose milestones
         milestone_map = dict(getattr(self, '_milestones_cache', {}))
+        series_resolved = dict(getattr(self, '_series_resolved_counts', {}))
 
         for series in series_list:
             try:
@@ -508,6 +512,12 @@ class KalshiClient:
                                     'end_ts': end_ts,
                                     'title': title,
                                 }
+                    # Count resolved events per series (for new-series bet sizing)
+                    for ev in data.get('events', []):
+                        ev_status = ev.get('status', '')
+                        if ev_status in ('settled', 'finalized', 'closed'):
+                            series_resolved[series] = series_resolved.get(series, 0) + 1
+
                     # Fallback: parse sub_title date for events without milestones.
                     # Kalshi stores the event date in sub_title (e.g. "Feb 24, 2026")
                     # but sometimes doesn't create a milestone record. For Trump/political
@@ -548,6 +558,7 @@ class KalshiClient:
 
         self._milestones_cache = milestone_map
         self._milestones_cache_ts = now
+        self._series_resolved_counts = series_resolved
         print(f"  Milestones: {len(milestone_map)} events with start times")
         return milestone_map
 
@@ -2555,6 +2566,13 @@ class KalshiReversionScanner:
             mention_bet = 10
         else:
             mention_bet = MENTION_BET_DOLLARS
+            # New/unknown series: cap at $2 until we have enough history
+            event_ticker = sig.get('event_ticker', '')
+            series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
+            resolved = getattr(self.client, '_series_resolved_counts', {}).get(series, 0)
+            if resolved < PREMARKET_NEW_SERIES_MIN:
+                mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
+                print(f"    New series {series} ({resolved} resolved < {PREMARKET_NEW_SERIES_MIN}), capping at ${PREMARKET_NEW_SERIES_BET}")
 
         # Per-market hard cap
         mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
