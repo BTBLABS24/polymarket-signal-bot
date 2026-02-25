@@ -760,11 +760,13 @@ class MentionBuyNoDetector:
             # Event start timing filter — per-category windows:
             # Earnings: live to +30min (backtest: best ROI 0-20min live)
             # Trump: 0-24h before event start (backtest: +88% ROI, t=8.15)
+            # Mamdani: 0-24h before event start (backtest: +235% ROI, t=7.55, N=175)
             # NCAA: live only, 0.5-1.5h after start (backtest: +151% ROI, t=9.13)
             # NBA: live only, 0.5-2h after start (backtest: +113% ROI, t=11.79)
             # Default: 0-1.5h before event start (backtest: +73% ROI, t=4.48)
             event_ticker = m.get('event_ticker', '')
             is_trump = 'TRUMPMENTION' in ticker_upper
+            is_mamdani = 'MAMDANIMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
             ms = milestone_map.get(event_ticker)
@@ -802,8 +804,8 @@ class MentionBuyNoDetector:
                     if hours_to_event < -3:
                         debug_counts['too_far'] += 1
                         continue
-                elif is_trump:
-                    # Trump: 0-24h before event start
+                elif is_trump or is_mamdani:
+                    # Trump/Mamdani: 0-24h before event start
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         continue
@@ -1742,7 +1744,7 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy 1: Mention BUY NO (Trump $10, NBA $10, NCAA $3, Other ${MENTION_BET_DOLLARS}), hold until settlement")
+        print(f"Strategy 1: Mention BUY NO (Trump $10, Mamdani $10, NBA $10, NCAA $3, Other ${MENTION_BET_DOLLARS}), hold until settlement")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, live to +{EARNINGS_MAX_MINUTES_LIVE}min")
         print(f"Open positions: {self.positions.count()}")
@@ -1889,6 +1891,7 @@ class KalshiReversionScanner:
                         return False
                     ticker_up = s.get('ticker', '').upper()
                     is_trump = 'TRUMPMENTION' in ticker_up
+                    is_mamdani = 'MAMDANIMENTION' in ticker_up
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
@@ -1898,7 +1901,7 @@ class KalshiReversionScanner:
                         return -1.5 <= h <= -0.5  # live games, 0.5-1.5h after start
                     elif is_nba:
                         return -3 <= h <= -0.5  # live games, 0.5-3h after tipoff
-                    elif is_trump:
+                    elif is_trump or is_mamdani:
                         return -10/60 <= h <= 24
                     else:
                         return -10/60 <= h <= 1.5
@@ -2341,11 +2344,12 @@ class KalshiReversionScanner:
 
         # Per-category bet sizing
         is_trump = 'TRUMPMENTION' in ticker_upper
+        is_mamdani = 'MAMDANIMENTION' in ticker_upper
         if is_nba:
             mention_bet = 10
         elif is_ncaa:
             mention_bet = 3
-        elif is_trump:
+        elif is_trump or is_mamdani:
             mention_bet = 10
         else:
             mention_bet = MENTION_BET_DOLLARS
