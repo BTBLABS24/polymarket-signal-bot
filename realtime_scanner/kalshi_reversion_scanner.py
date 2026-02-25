@@ -925,18 +925,18 @@ class MentionBuyNoDetector:
             # NCAA live 0.5-1.5h: 6-25c (backtest: +151% ROI, t=9.13)
             # NBA live 0.5-2h: 9-25c (backtest: +113% ROI, t=11.79)
             # All others: 5-30c
-            if is_earnings:
+            # Pre-event maker: wide range (1-50c) for all categories
+            # Live taker: category-specific narrow ranges
+            if hours_to_event is not None and hours_to_event > PREMARKET_CANCEL_HOURS:
+                max_no, min_no = PREMARKET_MAX_NO_PRICE / 100, MENTION_MIN_NO_PRICE
+            elif is_earnings:
                 max_no, min_no = EARNINGS_MAX_NO_PRICE, EARNINGS_MIN_NO_PRICE
             elif is_ncaa:
                 max_no, min_no = 0.25, 0.06
             elif is_nba:
                 max_no, min_no = 0.30, 0.15
             else:
-                # Wider range for pre-event resting (up to 50c), taker path enforces 5-30c itself
-                if hours_to_event is not None and hours_to_event > PREMARKET_CANCEL_HOURS:
-                    max_no, min_no = PREMARKET_MAX_NO_PRICE / 100, MENTION_MIN_NO_PRICE
-                else:
-                    max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
+                max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             if no_price < min_no or no_price > max_no:
                 debug_counts['price_out_range'] += 1
                 continue
