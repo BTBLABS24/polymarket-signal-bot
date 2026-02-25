@@ -70,7 +70,7 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 3           # $3 per signal (Other category)
+MENTION_BET_DOLLARS = 5           # $5 per signal (Other category)
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
@@ -83,7 +83,7 @@ MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 50        # Max total resting orders ($1 test bets)
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
-PREMARKET_MIN_SPREAD = 8          # Min spread (cents) to place resting order
+PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 50       # Max NO price for resting orders
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
 PREMARKET_NEW_SERIES_BET = 2      # $ bet for new/unknown series
@@ -95,10 +95,7 @@ PRERECORDED_SERIES = {
     'KXGOLDENMENTION',        # Golden Bachelor (pre-recorded reality)
 }
 # Active series allowlist — only these get signals. Set to None to allow all.
-ACTIVE_SERIES = {
-    'KXMAMDANIMENTION',       # Mamdani
-    'KXNEWSOMMENTION',        # Newsom
-}
+ACTIVE_SERIES = None              # All categories active
 # Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
     # Sports — NBA (degradation curve), NFL +80%, NCAA +60%, Fight +34%
@@ -2500,8 +2497,8 @@ class KalshiReversionScanner:
                         print(f"    PREMARKET: already resting on {ticker}, skipping")
                         return None
 
-                # $3 premarket resting bets
-                mention_bet = 3
+                # $5 premarket resting bets
+                mention_bet = 5
 
                 # Per-event exposure cap
                 event = sig.get('event_ticker', '')
