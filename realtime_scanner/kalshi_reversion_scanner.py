@@ -145,7 +145,7 @@ DEGRADE_BUY_BELOW = {
 # --- Earnings Mention Strategy ---
 # Buy NO on earnings call mention markets during live call.
 # Backtest: YES overpriced on earnings mentions, especially 0-20min into call.
-EARNINGS_ENABLED = False
+EARNINGS_ENABLED = True
 EARNINGS_BET_DOLLARS = 3
 EARNINGS_MIN_NO_PRICE = 0.50     # 50c — only bucket with real edge (t=5.57)
 EARNINGS_MAX_NO_PRICE = 0.70     # 70c
@@ -812,13 +812,17 @@ class MentionBuyNoDetector:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
                 if is_earnings:
-                    # Earnings: live only, 0-30min after call start
+                    # Earnings: pre-event maker (0.5-24h) + live taker (0-30min after call)
                     minutes_live = -hours_to_event * 60
-                    if minutes_live < EARNINGS_MIN_MINUTES_LIVE:
+                    if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         continue
                     if minutes_live > EARNINGS_MAX_MINUTES_LIVE:
                         debug_counts['too_far'] += 1
+                        continue
+                    # Gap: skip 0 to 0.5h before call start
+                    if -0.5 < hours_to_event < PREMARKET_CANCEL_HOURS:
+                        debug_counts['too_early'] += 1
                         continue
                     # Exclude hot words
                     parts = ticker.split('-')
@@ -1953,8 +1957,8 @@ class KalshiReversionScanner:
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
-                        # Earnings: live to +30min
-                        return -EARNINGS_MAX_MINUTES_LIVE/60 <= h <= -EARNINGS_MIN_MINUTES_LIVE/60
+                        # Earnings: pre-event maker (0.5-24h) + live taker (0-30min)
+                        return (PREMARKET_CANCEL_HOURS <= h <= 24) or (-EARNINGS_MAX_MINUTES_LIVE/60 <= h <= -EARNINGS_MIN_MINUTES_LIVE/60)
                     elif is_ncaa:
                         # Pre-event maker (0.5-24h) + live taker (0.5-1.5h after start)
                         return (PREMARKET_CANCEL_HOURS <= h <= 24) or (-1.5 <= h <= -0.5)
