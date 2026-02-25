@@ -70,7 +70,7 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 6           # $6 per signal
+MENTION_BET_DOLLARS = 3           # $3 per signal (Other category)
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
@@ -1781,7 +1781,7 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy 1: Mention BUY NO (Trump $10, NBA $10, NCAA $3, Other ${MENTION_BET_DOLLARS}) + premarket resting $1 test (spread>{PREMARKET_MIN_SPREAD}c, NO<{PREMARKET_MAX_NO_PRICE}c)")
+        print(f"Strategy 1: Mention BUY NO (Trump $10, NBA $10, NCAA $3, Other ${MENTION_BET_DOLLARS}) + premarket resting $3 (spread>{PREMARKET_MIN_SPREAD}c, NO<{PREMARKET_MAX_NO_PRICE}c)")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, live to +{EARNINGS_MAX_MINUTES_LIVE}min")
         print(f"Open positions: {self.positions.count()}")
@@ -2484,8 +2484,8 @@ class KalshiReversionScanner:
                         print(f"    PREMARKET: already resting on {ticker}, skipping")
                         return None
 
-                # $1 test bets for all resting orders
-                mention_bet = 1
+                # $3 premarket resting bets
+                mention_bet = 3
 
                 # Per-event exposure cap
                 event = sig.get('event_ticker', '')
