@@ -813,17 +813,12 @@ class MentionBuyNoDetector:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
                 if is_earnings:
-                    # Earnings: pre-event maker (0.5-7d) + live taker (0-30min after call)
-                    minutes_live = -hours_to_event * 60
+                    # Earnings: pre-event maker only (0.5h-7d before call)
                     if hours_to_event > PREMARKET_MAX_HOURS:
                         debug_counts['too_early'] += 1
                         continue
-                    if minutes_live > EARNINGS_MAX_MINUTES_LIVE:
+                    if hours_to_event < PREMARKET_CANCEL_HOURS:
                         debug_counts['too_far'] += 1
-                        continue
-                    # Gap: skip 0 to 0.5h before call start
-                    if -0.5 < hours_to_event < PREMARKET_CANCEL_HOURS:
-                        debug_counts['too_early'] += 1
                         continue
                     # Exclude hot words
                     parts = ticker.split('-')
@@ -1958,8 +1953,8 @@ class KalshiReversionScanner:
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
-                        # Earnings: pre-event maker (0.5-24h) + live taker (0-30min)
-                        return (PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS) or (-EARNINGS_MAX_MINUTES_LIVE/60 <= h <= -EARNINGS_MIN_MINUTES_LIVE/60)
+                        # Earnings: pre-event maker only (0.5h-7d)
+                        return PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS
                     elif is_ncaa:
                         # Pre-event maker (0.5-24h) + live taker (0.5-1.5h after start)
                         return (PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS) or (-1.5 <= h <= -0.5)
@@ -2043,8 +2038,8 @@ class KalshiReversionScanner:
                     order_info = None
                     if self.client.can_trade:
                         if is_earn and h2e is not None and h2e < PREMARKET_CANCEL_HOURS:
-                            # Live earnings → taker
-                            order_info = self._execute_earnings_entry(sig)
+                            # Live earnings → skip (maker-only, no taker)
+                            continue
                         else:
                             # Pre-event (all categories including earnings) → maker
                             order_info = self._execute_mention_entry(sig)
