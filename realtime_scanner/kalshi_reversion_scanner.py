@@ -79,6 +79,9 @@ MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 50    # Max $ per event (spread across tickers)
 MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
+# Pre-event resting orders (Mamdani/Trump only — fade retail, capture spread)
+PREMARKET_MAX_RESTING = 5         # Max resting orders per pre-event category
+PREMARKET_CANCEL_HOURS = 0.5      # Cancel 30min before event start
 # Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
     # Sports — NBA (degradation curve), NFL +80%, NCAA +60%, Fight +34%
@@ -805,11 +808,11 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
                 elif is_trump or is_mamdani:
-                    # Trump/Mamdani: 0-24h before event start
+                    # Trump/Mamdani: 0.5-24h before event start (cancel resting at 0.5h)
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         continue
-                    if hours_to_event < 0:
+                    if hours_to_event < PREMARKET_CANCEL_HOURS:
                         debug_counts['too_far'] += 1
                         continue
                 else:
@@ -1736,6 +1739,7 @@ class KalshiReversionScanner:
         self._degrade_bucket_placed = {}  # ticker -> set of hh_keys already bet on
         self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
         self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
+        self._resting_premarket_orders = {}  # order_id -> {ticker, event_ticker, price_cents, contracts, placed_ts, category, signal}
 
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
@@ -1803,8 +1807,13 @@ class KalshiReversionScanner:
                 log_event('low_balance', balance_cents=bal)
                 low_balance = True
 
+        # Check pre-event resting orders for fills / cancellation
+        milestones_for_resting = getattr(self.client, '_milestones_cache', {})
+        if self._resting_premarket_orders:
+            await self._check_resting_premarket_orders(milestones_for_resting)
+
         # Mention BUY NO scan
-        mention_count = self.positions.count('mention_buy_no')
+        mention_count = self.positions.count('mention_buy_no') + len(self._resting_premarket_orders)
         mention_allowed = mention_count < MENTION_MAX_POSITIONS
         should_scan_mentions = (now - self._last_mention_scan) >= MENTION_SCAN_INTERVAL_SECONDS
 
@@ -1902,7 +1911,7 @@ class KalshiReversionScanner:
                     elif is_nba:
                         return -3 <= h <= -0.5  # live games, 0.5-3h after tipoff
                     elif is_trump or is_mamdani:
-                        return -10/60 <= h <= 24
+                        return PREMARKET_CANCEL_HOURS <= h <= 24
                     else:
                         return -10/60 <= h <= 1.5
 
@@ -1935,14 +1944,20 @@ class KalshiReversionScanner:
                             print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
                             break
 
-                        # Skip if we already have a MENTION position on this ticker
+                        # Skip if we already have a MENTION position or resting order on this ticker
                         if self.positions.has_open_ticker(sig['ticker'], signal_type='mention_buy_no'):
                             continue
+                        if any(v['ticker'] == sig['ticker'] for v in self._resting_premarket_orders.values()):
+                            continue
 
-                        # Per-event exposure cap (mention only)
+                        # Per-event exposure cap (mention only, includes resting exposure)
                         event = sig.get('event_ticker', '')
                         if event:
                             event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
+                            # Add resting order exposure for this event
+                            for v in self._resting_premarket_orders.values():
+                                if v['event_ticker'] == event:
+                                    event_exp += v.get('bet_dollars', 0)
                             if event_exp >= MENTION_MAX_EVENT_DOLLARS:
                                 continue
 
@@ -1996,11 +2011,14 @@ class KalshiReversionScanner:
         mention_count = self.positions.count('mention_buy_no')
         degrade_count = self.positions.count('degrade_buy_no')
         earnings_count = self.positions.count('earnings_buy_no')
+        premarket_resting = len(self._resting_premarket_orders)
         parts = [f"mention={mention_count}"]
         if degrade_count:
             parts.append(f"degrade={degrade_count}")
         if earnings_count:
             parts.append(f"earnings={earnings_count}")
+        if premarket_resting:
+            parts.append(f"resting={premarket_resting}")
         print(f"  Open positions: {self.positions.count()} ({', '.join(parts)}, {self.positions.live_count()} live)")
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
@@ -2017,6 +2035,72 @@ class KalshiReversionScanner:
             except Exception as e:
                 print(f"  Daily summary error: {e}")
 
+
+    async def _check_resting_premarket_orders(self, milestones):
+        """Check pre-event resting orders: cancel if near event start, record fills."""
+        if not self._resting_premarket_orders:
+            return
+        now = time.time()
+        to_remove = []
+        for order_id, info in list(self._resting_premarket_orders.items()):
+            ticker = info['ticker']
+            event_ticker = info['event_ticker']
+            price_cents = info['price_cents']
+            contracts = info['contracts']
+            category = info['category']
+
+            # Check hours to event
+            ms = milestones.get(event_ticker)
+            hours_to_event = None
+            if ms:
+                hours_to_event = (ms['start_ts'] - now) / 3600
+
+            # Cancel if within 30min of event start (or already started)
+            if hours_to_event is not None and hours_to_event < PREMARKET_CANCEL_HOURS:
+                print(f"    PREMARKET CANCEL: {ticker} h2e={hours_to_event:+.1f}h < {PREMARKET_CANCEL_HOURS}h, cancelling")
+                self.client.cancel_order(order_id)
+                to_remove.append(order_id)
+                continue
+
+            # Check fill status
+            status = self.client.get_order(order_id)
+            if not status:
+                to_remove.append(order_id)
+                continue
+
+            filled = status.get('quantity_filled', 0)
+            order_status = status.get('status', '')
+
+            if filled > 0:
+                avg_fill = status.get('average_fill_price', price_cents)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                print(f"    PREMARKET FILLED: {ticker} {filled}/{contracts} NO @ {avg_fill}c (${actual_dollars:.2f})")
+
+                order_info = {
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'no', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': price_cents,
+                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                }
+                sig = info.get('signal', {})
+                sig['signal_type'] = 'mention_buy_no'
+                self.positions.add(sig, order_info)
+                await self.notifier.send_mention_signal(sig, order_info)
+                log_event('premarket_filled', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
+                          category=category)
+                to_remove.append(order_id)
+
+            elif order_status in ('canceled', 'cancelled', 'expired'):
+                print(f"    PREMARKET EXPIRED: {ticker} order {order_status}")
+                to_remove.append(order_id)
+
+        for oid in to_remove:
+            self._resting_premarket_orders.pop(oid, None)
+
+        if self._resting_premarket_orders:
+            tickers = [v['ticker'].split('-')[-1] for v in self._resting_premarket_orders.values()]
+            print(f"  Premarket resting: {len(self._resting_premarket_orders)} orders ({', '.join(tickers)})")
 
     async def _scan_degradation_curve(self, mention_markets, milestones, now):
         """Degradation curve strategy: buy NO on NBA mention markets where the
@@ -2321,6 +2405,102 @@ class KalshiReversionScanner:
             log_event('mention_skip_range', ticker=ticker, no_ask_cents=taker_price,
                       min_no_c=min_no_c, max_no_c=max_no_c)
             return None
+
+        # ── Pre-event resting order path (Mamdani/Trump only) ──
+        # Fade retail: rest NO buy at bid+1c inside the spread.
+        # Adverse selection doesn't apply pre-event (words haven't been said).
+        is_trump_cat = 'TRUMPMENTION' in ticker_upper
+        is_mamdani_cat = 'MAMDANIMENTION' in ticker_upper
+        h2e = sig.get('hours_to_event', 0)
+        is_premarket = (is_trump_cat or is_mamdani_cat) and h2e > PREMARKET_CANCEL_HOURS
+
+        if is_premarket:
+            # Check resting caps
+            cat_label = 'mamdani' if is_mamdani_cat else 'trump'
+            resting_same_cat = sum(1 for v in self._resting_premarket_orders.values() if v['category'] == cat_label)
+            if resting_same_cat >= PREMARKET_MAX_RESTING:
+                print(f"    PREMARKET: {cat_label} resting cap ({resting_same_cat}/{PREMARKET_MAX_RESTING}), skipping")
+                return None
+
+            # Check not already resting on this ticker
+            for v in self._resting_premarket_orders.values():
+                if v['ticker'] == ticker:
+                    print(f"    PREMARKET: already resting on {ticker}, skipping")
+                    return None
+
+            # Get NO bid from orderbook
+            no_bids_raw = orderbook.get('no', [])
+            if not isinstance(no_bids_raw, list):
+                no_bids_raw = []
+            best_no_bid = max(b[0] for b in no_bids_raw) if no_bids_raw else 0
+
+            # Price: bid+1c if there's a bid, else half the ask
+            if best_no_bid > 0:
+                resting_price = best_no_bid + 1
+            else:
+                resting_price = best_no_ask // 2
+
+            # Must be within range
+            if resting_price < min_no_c or resting_price > max_no_c:
+                print(f"    PREMARKET: resting price {resting_price}c outside [{min_no_c}-{max_no_c}c], skipping")
+                return None
+
+            # Bet sizing ($1 for Mamdani testing, $10 for Trump)
+            mention_bet = 1 if is_mamdani_cat else 10
+            mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
+
+            # Per-event exposure cap
+            event = sig.get('event_ticker', '')
+            if event:
+                event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
+                # Include resting exposure in event cap
+                for v in self._resting_premarket_orders.values():
+                    if v['event_ticker'] == event:
+                        event_exp += v.get('bet_dollars', 0)
+                remaining_cap = MENTION_MAX_EVENT_DOLLARS - event_exp
+                if remaining_cap <= 0:
+                    print(f"    PREMARKET: event cap reached (${event_exp:.0f}/${MENTION_MAX_EVENT_DOLLARS}), skipping")
+                    return None
+                mention_bet = min(mention_bet, remaining_cap)
+
+            contracts = int(mention_bet / (resting_price / 100))
+            if contracts < 1:
+                contracts = 1
+            bet_dollars = round(contracts * resting_price / 100, 2)
+
+            print(f"    PREMARKET REST: {contracts} NO @ {resting_price}c (bid={best_no_bid}c ask={best_no_ask}c h2e={h2e:.1f}h) = ${bet_dollars:.2f}")
+
+            if DRY_RUN:
+                print(f"    DRY RUN: would rest {contracts} NO @ {resting_price}c")
+                return None  # Don't create position for dry run resting orders
+
+            order = self.client.create_order(
+                ticker=ticker, side='no', action='buy',
+                count=contracts, price_cents=resting_price,
+            )
+            if not order:
+                print(f"    PREMARKET: order failed for {ticker}")
+                return None
+
+            order_id = order.get('order_id', '')
+            self._resting_premarket_orders[order_id] = {
+                'ticker': ticker,
+                'event_ticker': sig.get('event_ticker', ''),
+                'price_cents': resting_price,
+                'contracts': contracts,
+                'bet_dollars': bet_dollars,
+                'placed_ts': time.time(),
+                'category': cat_label,
+                'signal': dict(sig),
+            }
+            self.mention_detector.signal_history[ticker] = time.time()
+            self.mention_detector._save()
+
+            print(f"    PREMARKET: resting order {order_id} ({contracts} NO @ {resting_price}c)")
+            log_event('premarket_placed', ticker=ticker, order_id=order_id,
+                      contracts=contracts, price_cents=resting_price, bet_dollars=bet_dollars,
+                      no_bid=best_no_bid, no_ask=best_no_ask, h2e=h2e, category=cat_label)
+            return None  # No immediate fill — _check_resting_premarket_orders handles it
 
         # Slippage guard: cap how far above signal price we'll pay.
         # NBA: 4c (edge is +68% ROI even at 4c slip, t=8.09)
