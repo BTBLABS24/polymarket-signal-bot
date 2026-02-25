@@ -2106,6 +2106,42 @@ class KalshiReversionScanner:
                     to_remove.append(order_id)
                     continue
 
+                # Outbid detection: if someone bid above us AND spread still >= 10c, rebid at their price + 1c
+                if spread >= 10 and best_no_bid >= price_cents:
+                    new_price = best_no_bid + 1
+                    if new_price < best_no_ask and new_price <= PREMARKET_MAX_NO_PRICE:
+                        print(f"    PREMARKET OUTBID: {ticker} best_bid={best_no_bid}c >= our {price_cents}c (spread={spread}c), rebidding @ {new_price}c")
+                        self.client.cancel_order(order_id)
+                        # Recalculate contracts for new price
+                        new_contracts = int(info['bet_dollars'] / (new_price / 100))
+                        if new_contracts < 1:
+                            new_contracts = 1
+                        new_bet = round(new_contracts * new_price / 100, 2)
+                        new_order = self.client.create_order(
+                            ticker=ticker, side='no', action='buy',
+                            count=new_contracts, price_cents=new_price,
+                            expiration_ts=info.get('signal', {}).get('event_start_ts'),
+                        )
+                        if new_order:
+                            new_oid = new_order.get('order_id', '')
+                            self._resting_premarket_orders[new_oid] = {
+                                'ticker': ticker,
+                                'price_cents': new_price,
+                                'contracts': new_contracts,
+                                'bet_dollars': new_bet,
+                                'placed_ts': time.time(),
+                                'category': category,
+                                'signal': info.get('signal', {}),
+                            }
+                            print(f"    PREMARKET REBID: {new_oid} {new_contracts} NO @ {new_price}c (was {price_cents}c)")
+                            log_event('premarket_rebid', ticker=ticker, old_order=order_id,
+                                      new_order=new_oid, old_price=price_cents, new_price=new_price,
+                                      spread=spread, best_bid=best_no_bid)
+                        else:
+                            print(f"    PREMARKET REBID FAILED: {ticker} cancel succeeded but new order failed")
+                        to_remove.append(order_id)
+                        continue
+
             # Check fill status
             status = self.client.get_order(order_id)
             if not status:
@@ -2484,8 +2520,8 @@ class KalshiReversionScanner:
                     resting_price = best_no_ask // 2
 
                 # Must be within premarket range (5-50c)
-                if resting_price < 5 or resting_price > PREMARKET_MAX_NO_PRICE:
-                    print(f"    PREMARKET: resting price {resting_price}c outside [5-{PREMARKET_MAX_NO_PRICE}c], skipping")
+                if resting_price < 1 or resting_price > PREMARKET_MAX_NO_PRICE:
+                    print(f"    PREMARKET: resting price {resting_price}c outside [1-{PREMARKET_MAX_NO_PRICE}c], skipping")
                     return None
 
                 # Check total resting cap
