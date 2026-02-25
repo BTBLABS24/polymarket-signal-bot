@@ -2423,11 +2423,19 @@ class KalshiReversionScanner:
             print(f"    No NO ask for {ticker} (no YES bids in book), skipping")
             return None
 
+        # Detect premarket vs taker path early (affects price range check)
+        h2e = sig.get('hours_to_event', 0)
+        is_premarket = h2e > PREMARKET_CANCEL_HOURS
+
         # Per-category price range
         ticker_upper = ticker.upper()
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
-        if is_ncaa:
+
+        if is_premarket:
+            # Premarket resting: wider range (5-50c) — we rest at bid+1c, not at ask
+            max_no_c, min_no_c = PREMARKET_MAX_NO_PRICE, 5
+        elif is_ncaa:
             max_no_c, min_no_c = 25, 6
         elif is_nba:
             max_no_c, min_no_c = 30, 15
@@ -2445,8 +2453,6 @@ class KalshiReversionScanner:
         # Fade retail: rest NO buy at best_bid+1c inside the spread.
         # Adverse selection doesn't apply pre-event (words haven't been said).
         # Only when spread > 8c and NO < 50c — wide markets where maker edge exists.
-        h2e = sig.get('hours_to_event', 0)
-        is_premarket = h2e > PREMARKET_CANCEL_HOURS
 
         if is_premarket:
             # Get NO bid from orderbook
