@@ -595,13 +595,14 @@ class KalshiClient:
             print(f'  Orderbook error ({ticker}): {e}')
         return {}
 
-    def create_order(self, ticker, side, action, count, price_cents):
+    def create_order(self, ticker, side, action, count, price_cents, expiration_ts=None):
         """
         POST /portfolio/orders
         side: 'yes' or 'no'
         action: 'buy' or 'sell'
         count: number of contracts
         price_cents: limit price in cents (1-99)
+        expiration_ts: optional Unix timestamp — order auto-cancels at this time
         Returns order dict or None.
         """
         path = '/trade-api/v2/portfolio/orders'
@@ -618,6 +619,8 @@ class KalshiClient:
             'yes_price': price_cents if side == 'yes' else (100 - price_cents),
             'client_order_id': str(uuid.uuid4()),
         }
+        if expiration_ts:
+            body['expiration_ts'] = int(expiration_ts)
         try:
             resp = self.session.post(
                 f'{KALSHI_BASE}/portfolio/orders',
@@ -1807,10 +1810,9 @@ class KalshiReversionScanner:
                 log_event('low_balance', balance_cents=bal)
                 low_balance = True
 
-        # Check pre-event resting orders for fills / cancellation
-        milestones_for_resting = getattr(self.client, '_milestones_cache', {})
+        # Check pre-event resting orders for fills (Kalshi auto-cancels at event start)
         if self._resting_premarket_orders:
-            await self._check_resting_premarket_orders(milestones_for_resting)
+            await self._check_resting_premarket_orders()
 
         # Mention BUY NO scan
         mention_count = self.positions.count('mention_buy_no') + len(self._resting_premarket_orders)
@@ -2036,31 +2038,16 @@ class KalshiReversionScanner:
                 print(f"  Daily summary error: {e}")
 
 
-    async def _check_resting_premarket_orders(self, milestones):
-        """Check pre-event resting orders: cancel if near event start, record fills."""
+    async def _check_resting_premarket_orders(self):
+        """Check pre-event resting orders for fills. Kalshi auto-cancels at event start via expiration_ts."""
         if not self._resting_premarket_orders:
             return
-        now = time.time()
         to_remove = []
         for order_id, info in list(self._resting_premarket_orders.items()):
             ticker = info['ticker']
-            event_ticker = info['event_ticker']
             price_cents = info['price_cents']
             contracts = info['contracts']
             category = info['category']
-
-            # Check hours to event
-            ms = milestones.get(event_ticker)
-            hours_to_event = None
-            if ms:
-                hours_to_event = (ms['start_ts'] - now) / 3600
-
-            # Cancel if within 30min of event start (or already started)
-            if hours_to_event is not None and hours_to_event < PREMARKET_CANCEL_HOURS:
-                print(f"    PREMARKET CANCEL: {ticker} h2e={hours_to_event:+.1f}h < {PREMARKET_CANCEL_HOURS}h, cancelling")
-                self.client.cancel_order(order_id)
-                to_remove.append(order_id)
-                continue
 
             # Check fill status
             status = self.client.get_order(order_id)
@@ -2474,9 +2461,12 @@ class KalshiReversionScanner:
                 print(f"    DRY RUN: would rest {contracts} NO @ {resting_price}c")
                 return None  # Don't create position for dry run resting orders
 
+            # Auto-cancel at event start via Kalshi expiration_ts
+            event_start_ts = sig.get('event_start_ts')
             order = self.client.create_order(
                 ticker=ticker, side='no', action='buy',
                 count=contracts, price_cents=resting_price,
+                expiration_ts=event_start_ts,
             )
             if not order:
                 print(f"    PREMARKET: order failed for {ticker}")
@@ -2485,7 +2475,6 @@ class KalshiReversionScanner:
             order_id = order.get('order_id', '')
             self._resting_premarket_orders[order_id] = {
                 'ticker': ticker,
-                'event_ticker': sig.get('event_ticker', ''),
                 'price_cents': resting_price,
                 'contracts': contracts,
                 'bet_dollars': bet_dollars,
