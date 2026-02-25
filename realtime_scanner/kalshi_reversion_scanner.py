@@ -80,7 +80,7 @@ MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 50    # Max $ per event (spread across tickers)
 MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
 # Pre-event resting orders — fade retail on wide-spread mention markets
-PREMARKET_MAX_RESTING = 15        # Max total resting orders across all categories
+PREMARKET_MAX_RESTING = 50        # Max total resting orders ($1 test bets)
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MIN_SPREAD = 8          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 50       # Max NO price for resting orders
