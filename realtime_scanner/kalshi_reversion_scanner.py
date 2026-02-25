@@ -2396,14 +2396,13 @@ class KalshiReversionScanner:
         # ── Pre-event resting order path (Mamdani/Trump only) ──
         # Fade retail: rest NO buy at bid+1c inside the spread.
         # Adverse selection doesn't apply pre-event (words haven't been said).
-        is_trump_cat = 'TRUMPMENTION' in ticker_upper
         is_mamdani_cat = 'MAMDANIMENTION' in ticker_upper
         h2e = sig.get('hours_to_event', 0)
-        is_premarket = (is_trump_cat or is_mamdani_cat) and h2e > PREMARKET_CANCEL_HOURS
+        is_premarket = is_mamdani_cat and h2e > PREMARKET_CANCEL_HOURS
 
         if is_premarket:
             # Check resting caps
-            cat_label = 'mamdani' if is_mamdani_cat else 'trump'
+            cat_label = 'mamdani'
             resting_same_cat = sum(1 for v in self._resting_premarket_orders.values() if v['category'] == cat_label)
             if resting_same_cat >= PREMARKET_MAX_RESTING:
                 print(f"    PREMARKET: {cat_label} resting cap ({resting_same_cat}/{PREMARKET_MAX_RESTING}), skipping")
@@ -2433,7 +2432,7 @@ class KalshiReversionScanner:
                 return None
 
             # Bet sizing ($1 for Mamdani testing, $10 for Trump)
-            mention_bet = 1 if is_mamdani_cat else 10
+            mention_bet = 1  # Mamdani testing size
             mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
 
             # Per-event exposure cap
