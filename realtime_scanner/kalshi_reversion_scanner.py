@@ -804,6 +804,7 @@ class MentionBuyNoDetector:
                 continue
             is_trump = 'TRUMPMENTION' in ticker_upper
             is_mamdani = 'MAMDANIMENTION' in ticker_upper
+            is_newsom = 'NEWSOMMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
             ms = milestone_map.get(event_ticker)
@@ -841,8 +842,8 @@ class MentionBuyNoDetector:
                     if hours_to_event < -3:
                         debug_counts['too_far'] += 1
                         continue
-                elif is_trump or is_mamdani:
-                    # Trump/Mamdani: 0.5-24h before event start (cancel resting at 0.5h)
+                elif is_trump or is_mamdani or is_newsom:
+                    # Trump/Mamdani/Newsom: 0.5-24h before event start (cancel resting at 0.5h)
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         continue
@@ -1940,6 +1941,7 @@ class KalshiReversionScanner:
                     ticker_up = s.get('ticker', '').upper()
                     is_trump = 'TRUMPMENTION' in ticker_up
                     is_mamdani = 'MAMDANIMENTION' in ticker_up
+                    is_newsom = 'NEWSOMMENTION' in ticker_up
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
@@ -1949,7 +1951,7 @@ class KalshiReversionScanner:
                         return -1.5 <= h <= -0.5  # live games, 0.5-1.5h after start
                     elif is_nba:
                         return -3 <= h <= -0.5  # live games, 0.5-3h after tipoff
-                    elif is_trump or is_mamdani:
+                    elif is_trump or is_mamdani or is_newsom:
                         return PREMARKET_CANCEL_HOURS <= h <= 24
                     else:
                         # Other: taker near event (-10min to 1.5h) OR premarket resting (0.5-24h)
@@ -2096,8 +2098,8 @@ class KalshiReversionScanner:
                 best_no_bid = max(b[0] for b in no_bids) if no_bids else 0
                 best_no_ask = (100 - max(b[0] for b in yes_bids)) if yes_bids else 99
                 spread = best_no_ask - best_no_bid if best_no_bid > 0 and best_no_ask > 0 else 99
-                if spread < 3:
-                    print(f"    PREMARKET CANCEL: {ticker} spread narrowed to {spread}c (<3c), cancelling")
+                if spread < PREMARKET_MIN_SPREAD:
+                    print(f"    PREMARKET CANCEL: {ticker} spread narrowed to {spread}c (<{PREMARKET_MIN_SPREAD}c), cancelling")
                     self.client.cancel_order(order_id)
                     log_event('premarket_cancel_spread', ticker=ticker, order_id=order_id,
                               spread=spread, no_bid=best_no_bid, no_ask=best_no_ask)
@@ -2581,24 +2583,15 @@ class KalshiReversionScanner:
                 depth_contracts += bid_qty
         depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
-        # Per-category bet sizing
-        is_trump = 'TRUMPMENTION' in ticker_upper
-        is_mamdani = 'MAMDANIMENTION' in ticker_upper
-        if is_nba:
-            mention_bet = 10
-        elif is_ncaa:
-            mention_bet = 3
-        elif is_trump or is_mamdani:
-            mention_bet = 10
-        else:
-            mention_bet = MENTION_BET_DOLLARS
-            # New/unknown series: cap at $2 until we have enough history
-            event_ticker = sig.get('event_ticker', '')
-            series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
-            resolved = getattr(self.client, '_series_resolved_counts', {}).get(series, 0)
-            if resolved < PREMARKET_NEW_SERIES_MIN:
-                mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
-                print(f"    New series {series} ({resolved} resolved < {PREMARKET_NEW_SERIES_MIN}), capping at ${PREMARKET_NEW_SERIES_BET}")
+        # Flat $5 taker bet for all categories
+        mention_bet = MENTION_BET_DOLLARS
+        # New/unknown series: cap at $2 until we have enough history
+        event_ticker_taker = sig.get('event_ticker', '')
+        series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker_taker)
+        resolved = getattr(self.client, '_series_resolved_counts', {}).get(series, 0)
+        if resolved < PREMARKET_NEW_SERIES_MIN:
+            mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
+            print(f"    New series {series} ({resolved} resolved < {PREMARKET_NEW_SERIES_MIN}), capping at ${PREMARKET_NEW_SERIES_BET}")
 
         # Per-market hard cap
         mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
