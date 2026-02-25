@@ -87,6 +87,13 @@ PREMARKET_MIN_SPREAD = 8          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 50       # Max NO price for resting orders
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
 PREMARKET_NEW_SERIES_BET = 2      # $ bet for new/unknown series
+# Pre-recorded/scripted shows — insider edge too high, skip entirely
+PRERECORDED_SERIES = {
+    'KXSURVIVORMENTION',      # Survivor (pre-recorded reality TV)
+    'KXSOUTHPARKMENTION',     # South Park (scripted animated)
+    'KXMRBEASTMENTION',       # MrBeast (pre-recorded YouTube)
+    'KXGOLDENMENTION',        # Golden Bachelor (pre-recorded reality)
+}
 # Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
     # Sports — NBA (degradation curve), NFL +80%, NCAA +60%, Fight +34%
@@ -784,6 +791,11 @@ class MentionBuyNoDetector:
             # NBA: live only, 0.5-2h after start (backtest: +113% ROI, t=11.79)
             # Default: 0-1.5h before event start (backtest: +73% ROI, t=4.48)
             event_ticker = m.get('event_ticker', '')
+            # Skip pre-recorded/scripted shows — insider edge too high
+            series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
+            if series in PRERECORDED_SERIES:
+                debug_counts['prerecorded'] = debug_counts.get('prerecorded', 0) + 1
+                continue
             is_trump = 'TRUMPMENTION' in ticker_upper
             is_mamdani = 'MAMDANIMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
@@ -963,6 +975,7 @@ class MentionBuyNoDetector:
         # Print debug breakdown
         print(f"  Mention filter: {debug_counts['total']} checked, "
               f"{debug_counts['skipped_cat']} skipped(cat), "
+              f"{debug_counts.get('prerecorded', 0)} prerecorded, "
               f"{debug_counts['no_milestone']} no milestone, "
               f"{debug_counts['too_early']} too early, "
               f"{debug_counts['too_far']} too far, "
