@@ -1990,9 +1990,16 @@ class KalshiReversionScanner:
                             continue
                         if self.positions.has_open_ticker(sig['ticker'], signal_type='earnings_buy_no'):
                             continue
+                        # Also skip if we have a resting premarket order on this ticker
+                        if any(v['ticker'] == sig['ticker'] for v in self._resting_premarket_orders.values()):
+                            continue
                         event = sig.get('event_ticker', '')
                         if event:
                             event_exp = self.positions.event_exposure(event, signal_type='earnings_buy_no')
+                            # Include resting order exposure for this event
+                            for v in self._resting_premarket_orders.values():
+                                if v.get('signal', {}).get('event_ticker', '') == event:
+                                    event_exp += v.get('bet_dollars', 0)
                             if event_exp >= EARNINGS_MAX_EVENT_DOLLARS:
                                 continue
                     else:
@@ -2035,9 +2042,11 @@ class KalshiReversionScanner:
 
                     order_info = None
                     if self.client.can_trade:
-                        if is_earn:
+                        if is_earn and h2e is not None and h2e < PREMARKET_CANCEL_HOURS:
+                            # Live earnings → taker
                             order_info = self._execute_earnings_entry(sig)
                         else:
+                            # Pre-event (all categories including earnings) → maker
                             order_info = self._execute_mention_entry(sig)
 
                     if order_info:
@@ -2554,16 +2563,19 @@ class KalshiReversionScanner:
                 mention_bet = 5
 
                 # Per-event exposure cap
+                sig_type = sig.get('signal_type', 'mention_buy_no')
+                is_earn_sig = sig_type == 'earnings_buy_no'
                 event = sig.get('event_ticker', '')
                 if event:
-                    event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
+                    event_exp = self.positions.event_exposure(event, signal_type=sig_type)
                     for v in self._resting_premarket_orders.values():
                         sig_evt = v.get('signal', {}).get('event_ticker', '')
                         if sig_evt == event:
                             event_exp += v.get('bet_dollars', 0)
-                    remaining_cap = MENTION_MAX_EVENT_DOLLARS - event_exp
+                    max_event_cap = EARNINGS_MAX_EVENT_DOLLARS if is_earn_sig else MENTION_MAX_EVENT_DOLLARS
+                    remaining_cap = max_event_cap - event_exp
                     if remaining_cap <= 0:
-                        print(f"    PREMARKET: event cap reached (${event_exp:.0f}/${MENTION_MAX_EVENT_DOLLARS}), skipping")
+                        print(f"    PREMARKET: event cap reached (${event_exp:.0f}/${max_event_cap}), skipping")
                         return None
                     mention_bet = min(mention_bet, remaining_cap)
 
@@ -2572,7 +2584,8 @@ class KalshiReversionScanner:
                     contracts = 1
                 bet_dollars = round(contracts * resting_price / 100, 2)
 
-                if 'TRUMPMENTION' in ticker_upper: cat_label = 'trump'
+                if 'EARNINGS' in ticker_upper: cat_label = 'earnings'
+                elif 'TRUMPMENTION' in ticker_upper: cat_label = 'trump'
                 elif 'MAMDANIMENTION' in ticker_upper: cat_label = 'mamdani'
                 elif 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper: cat_label = 'nba'
                 elif 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper: cat_label = 'ncaa'
