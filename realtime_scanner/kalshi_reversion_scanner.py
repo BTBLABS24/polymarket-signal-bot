@@ -72,7 +72,7 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # is NOT the event time. We filter by price range only.
 MENTION_BET_DOLLARS = 5           # $5 per signal (Other category)
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
-MENTION_MIN_NO_PRICE = 0.05       # Skip extremely cheap NO
+MENTION_MIN_NO_PRICE = 0.01       # Allow NO down to 1c
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (events live with 24h close)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
@@ -2442,8 +2442,8 @@ class KalshiReversionScanner:
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
 
         if is_premarket:
-            # Premarket resting: wider range (5-50c) — we rest at bid+1c, not at ask
-            max_no_c, min_no_c = PREMARKET_MAX_NO_PRICE, 5
+            # Premarket resting: wider range (1-50c) — we rest at bid+1c, not at ask
+            max_no_c, min_no_c = PREMARKET_MAX_NO_PRICE, 1
         elif is_ncaa:
             max_no_c, min_no_c = 25, 6
         elif is_nba:
