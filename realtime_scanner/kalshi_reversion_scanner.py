@@ -2319,16 +2319,18 @@ class KalshiReversionScanner:
                       min_no_c=min_no_c, max_no_c=max_no_c)
             return None
 
-        # Slippage guard: only buy within 2c of signal price.
-        # Walk the book and cap bet size to depth available within that window.
-        max_slip_price = no_price_cents + 2
+        # Slippage guard: cap how far above signal price we'll pay.
+        # NBA: 4c (edge is +68% ROI even at 4c slip, t=8.09)
+        # Others: 2c
+        max_slip = 4 if is_nba else 2
+        max_slip_price = no_price_cents + max_slip
         if taker_price > max_slip_price:
-            print(f"    Slippage: best ask {taker_price}c > signal {no_price_cents}c + 2c, skipping")
+            print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + {max_slip}c, skipping")
             log_event('mention_skip_slippage', ticker=ticker,
                       no_ask_cents=taker_price, signal_cents=no_price_cents)
             return None
 
-        # Depth within 2c: sum YES bid contracts where (100 - bid_price) <= max_slip_price
+        # Depth within slippage window: sum YES bid contracts where (100 - bid) <= max_slip_price
         # i.e. YES bids >= (100 - max_slip_price)
         min_yes_bid = 100 - max_slip_price
         depth_contracts = 0
