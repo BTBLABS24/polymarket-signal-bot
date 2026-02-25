@@ -83,6 +83,7 @@ MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 50        # Max total resting orders ($1 test bets)
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
+PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 50       # Max NO price for resting orders
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
@@ -812,9 +813,9 @@ class MentionBuyNoDetector:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
                 if is_earnings:
-                    # Earnings: pre-event maker (0.5-24h) + live taker (0-30min after call)
+                    # Earnings: pre-event maker (0.5-7d) + live taker (0-30min after call)
                     minutes_live = -hours_to_event * 60
-                    if hours_to_event > 24:
+                    if hours_to_event > PREMARKET_MAX_HOURS:
                         debug_counts['too_early'] += 1
                         continue
                     if minutes_live > EARNINGS_MAX_MINUTES_LIVE:
@@ -831,8 +832,8 @@ class MentionBuyNoDetector:
                         debug_counts['skipped_cat'] += 1
                         continue
                 elif is_ncaa:
-                    # NCAA: pre-event maker (0.5-24h) + live taker (0.5-1.5h after start)
-                    if hours_to_event > 24:
+                    # NCAA: pre-event maker (0.5-7d) + live taker (0.5-1.5h after start)
+                    if hours_to_event > PREMARKET_MAX_HOURS:
                         debug_counts['too_early'] += 1
                         continue
                     if hours_to_event < -1.5:
@@ -843,8 +844,8 @@ class MentionBuyNoDetector:
                         debug_counts['too_early'] += 1
                         continue
                 elif is_nba:
-                    # NBA: pre-event maker (0.5-24h) + live taker (0.5-3h after tipoff)
-                    if hours_to_event > 24:
+                    # NBA: pre-event maker (0.5-7d) + live taker (0.5-3h after tipoff)
+                    if hours_to_event > PREMARKET_MAX_HOURS:
                         debug_counts['too_early'] += 1
                         continue
                     if hours_to_event < -3:
@@ -855,16 +856,16 @@ class MentionBuyNoDetector:
                         debug_counts['too_early'] += 1
                         continue
                 elif is_trump or is_mamdani or is_newsom:
-                    # Trump/Mamdani/Newsom: 0.5-24h before event start (cancel resting at 0.5h)
-                    if hours_to_event > 24:
+                    # Trump/Mamdani/Newsom: 0.5-7d before event start (cancel resting at 0.5h)
+                    if hours_to_event > PREMARKET_MAX_HOURS:
                         debug_counts['too_early'] += 1
                         continue
                     if hours_to_event < PREMARKET_CANCEL_HOURS:
                         debug_counts['too_far'] += 1
                         continue
                 else:
-                    # Other: taker near event (0-1.5h) or premarket resting (0.5-24h)
-                    if hours_to_event > 24:
+                    # Other: taker near event (0-1.5h) or premarket resting (0.5-7d)
+                    if hours_to_event > PREMARKET_MAX_HOURS:
                         debug_counts['too_early'] += 1
                         continue
                     if hours_to_event < -10/60:
@@ -1958,18 +1959,18 @@ class KalshiReversionScanner:
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
                         # Earnings: pre-event maker (0.5-24h) + live taker (0-30min)
-                        return (PREMARKET_CANCEL_HOURS <= h <= 24) or (-EARNINGS_MAX_MINUTES_LIVE/60 <= h <= -EARNINGS_MIN_MINUTES_LIVE/60)
+                        return (PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS) or (-EARNINGS_MAX_MINUTES_LIVE/60 <= h <= -EARNINGS_MIN_MINUTES_LIVE/60)
                     elif is_ncaa:
                         # Pre-event maker (0.5-24h) + live taker (0.5-1.5h after start)
-                        return (PREMARKET_CANCEL_HOURS <= h <= 24) or (-1.5 <= h <= -0.5)
+                        return (PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS) or (-1.5 <= h <= -0.5)
                     elif is_nba:
                         # Pre-event maker (0.5-24h) + live taker (0.5-3h after tipoff)
-                        return (PREMARKET_CANCEL_HOURS <= h <= 24) or (-3 <= h <= -0.5)
+                        return (PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS) or (-3 <= h <= -0.5)
                     elif is_trump or is_mamdani or is_newsom:
-                        return PREMARKET_CANCEL_HOURS <= h <= 24
+                        return PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS
                     else:
                         # Other: taker near event (-10min to 1.5h) OR premarket resting (0.5-24h)
-                        return -10/60 <= h <= 24
+                        return -10/60 <= h <= PREMARKET_MAX_HOURS
 
                 eligible = [s for s in mention_signals if in_entry_window(s)]
                 n_total = len(mention_signals)
