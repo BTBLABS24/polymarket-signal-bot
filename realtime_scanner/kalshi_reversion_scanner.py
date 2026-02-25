@@ -509,19 +509,31 @@ class KalshiClient:
                                 pass
 
                         title = ms.get('title', '')
+                        new_entry = {
+                            'start_ts': start_ts,
+                            'end_ts': end_ts,
+                            'title': title,
+                        }
                         for et in ms.get('primary_event_tickers', []):
-                            milestone_map[et] = {
-                                'start_ts': start_ts,
-                                'end_ts': end_ts,
-                                'title': title,
-                            }
+                            # Keep the nearest future milestone (avoid stale overrides
+                            # when multiple milestones map to the same event)
+                            existing = milestone_map.get(et)
+                            if existing:
+                                old_dist = abs(existing['start_ts'] - now)
+                                new_dist = abs(start_ts - now)
+                                if new_dist < old_dist:
+                                    milestone_map[et] = new_entry
+                            else:
+                                milestone_map[et] = new_entry
                         for et in ms.get('related_event_tickers', []):
-                            if et not in milestone_map:
-                                milestone_map[et] = {
-                                    'start_ts': start_ts,
-                                    'end_ts': end_ts,
-                                    'title': title,
-                                }
+                            existing = milestone_map.get(et)
+                            if existing:
+                                old_dist = abs(existing['start_ts'] - now)
+                                new_dist = abs(start_ts - now)
+                                if new_dist < old_dist:
+                                    milestone_map[et] = new_entry
+                            else:
+                                milestone_map[et] = new_entry
                     # Count resolved events per series (for new-series bet sizing)
                     for ev in data.get('events', []):
                         ev_status = ev.get('status', '')
