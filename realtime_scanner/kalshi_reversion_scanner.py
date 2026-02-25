@@ -437,7 +437,8 @@ class KalshiClient:
             return self._milestones_cache
 
         series_list = getattr(self, '_mention_series_cache', list(MENTION_SCAN_SERIES))
-        milestone_map = {}  # event_ticker -> {start_ts, end_ts, title}
+        # Start from previous cache so partial failures don't lose milestones
+        milestone_map = dict(getattr(self, '_milestones_cache', {}))
 
         for series in series_list:
             try:
@@ -451,13 +452,18 @@ class KalshiClient:
                     }
                     if cursor:
                         params['cursor'] = cursor
-                    resp = self.session.get(
-                        f'{KALSHI_BASE}/events',
-                        params=params,
-                        timeout=15,
-                    )
-                    if resp.status_code == 429:
-                        time.sleep(2)
+                    # Retry up to 3 times on rate limit
+                    resp = None
+                    for attempt in range(3):
+                        resp = self.session.get(
+                            f'{KALSHI_BASE}/events',
+                            params=params,
+                            timeout=15,
+                        )
+                        if resp.status_code != 429:
+                            break
+                        time.sleep(2 * (attempt + 1))
+                    if resp is None or resp.status_code == 429:
                         break
                     if resp.status_code != 200:
                         break
@@ -530,6 +536,8 @@ class KalshiClient:
                     if not cursor or not data.get('events', []):
                         break
                     time.sleep(0.3)
+                # Small delay between series to avoid rate limits (295 series)
+                time.sleep(0.1)
             except Exception as e:
                 print(f'  Milestones fetch error ({series}): {e}')
 
