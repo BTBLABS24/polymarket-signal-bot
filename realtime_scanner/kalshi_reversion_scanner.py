@@ -81,7 +81,7 @@ MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 50    # Max $ per event (spread across tickers)
 MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
 # Pre-event resting orders — fade retail on wide-spread mention markets
-PREMARKET_MAX_RESTING = 50        # Max total resting orders ($1 test bets)
+PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
@@ -952,14 +952,15 @@ class MentionBuyNoDetector:
                     print(f"    NBA SKIP price_OOR: {ticker} no={no_price:.2f} range=[{min_no:.2f}-{max_no:.2f}] h2e={hours_to_event:.1f}h premarket={hours_to_event > PREMARKET_CANCEL_HOURS}")
                 continue
 
-            # Cooldown check — use longer cooldown since we're not time-gated
-            # Once we bet on a ticker, don't bet again for 24h
-            last_signal = self.signal_history.get(ticker, 0)
-            if now_ts - last_signal < 24 * 3600:
-                debug_counts['cooldown'] += 1
-                if is_nba:
-                    print(f"    NBA SKIP cooldown: {ticker} last={int((now_ts-last_signal)/60)}min ago")
-                continue
+            # Cooldown check — skip for premarket maker (we want resting orders
+            # on every qualifying ticker; most won't fill anyway).
+            # Only apply cooldown for live taker path.
+            is_premarket_signal = hours_to_event is not None and hours_to_event > PREMARKET_CANCEL_HOURS
+            if not is_premarket_signal:
+                last_signal = self.signal_history.get(ticker, 0)
+                if now_ts - last_signal < 24 * 3600:
+                    debug_counts['cooldown'] += 1
+                    continue
 
             debug_counts['eligible'] += 1
 
