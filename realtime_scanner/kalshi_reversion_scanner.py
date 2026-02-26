@@ -830,56 +830,44 @@ class MentionBuyNoDetector:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
                 if is_earnings:
-                    # Earnings: pre-event maker only (0.5h-7d before call)
-                    if hours_to_event > PREMARKET_MAX_HOURS:
-                        debug_counts['too_early'] += 1
-                        continue
-                    if hours_to_event < PREMARKET_CANCEL_HOURS:
-                        debug_counts['too_far'] += 1
-                        continue
-                    # Exclude hot words
-                    parts = ticker.split('-')
-                    word = parts[-1].upper() if len(parts) >= 3 else ''
-                    if word in EARNINGS_EXCLUDED_WORDS:
-                        debug_counts['skipped_cat'] += 1
-                        continue
+                    # Earnings: excluded (no milestones)
+                    debug_counts['skipped_cat'] += 1
+                    continue
                 elif is_ncaa:
-                    # NCAA: pre-event maker (0.5-7d) + live taker (0.5-1.5h after start)
-                    if hours_to_event > PREMARKET_MAX_HOURS:
-                        debug_counts['too_early'] += 1
-                        continue
-                    if hours_to_event < -1.5:
+                    # NCAA: live taker 0.5-1.5h after start
+                    if hours_to_event > 0 or hours_to_event < -1.5:
                         debug_counts['too_far'] += 1
                         continue
-                    # Gap between pre-event and live: skip 0 to 0.5h before start
-                    if -0.5 < hours_to_event < PREMARKET_CANCEL_HOURS:
+                    if hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
                         continue
                 elif is_nba:
-                    # NBA: pre-event maker (0.5-7d) + live taker (0.5-3h after tipoff)
-                    if hours_to_event > PREMARKET_MAX_HOURS:
-                        debug_counts['too_early'] += 1
-                        print(f"    NBA SKIP too_early: {ticker} h2e={hours_to_event:.1f}h > {PREMARKET_MAX_HOURS}h")
-                        continue
-                    if hours_to_event < -3:
+                    # NBA: live taker 0.5-2h after tipoff
+                    if hours_to_event > 0 or hours_to_event < -2:
                         debug_counts['too_far'] += 1
                         continue
-                    # Gap between pre-event and live: skip 0 to 0.5h before start
-                    if -0.5 < hours_to_event < PREMARKET_CANCEL_HOURS:
-                        debug_counts['too_early'] += 1
-                        print(f"    NBA SKIP gap: {ticker} h2e={hours_to_event:.1f}h (gap zone)")
-                        continue
-                elif is_trump or is_mamdani or is_newsom:
-                    # Trump/Mamdani/Newsom: 0.5-7d before event start (cancel resting at 0.5h)
-                    if hours_to_event > PREMARKET_MAX_HOURS:
+                    if hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
                         continue
-                    if hours_to_event < PREMARKET_CANCEL_HOURS:
+                elif is_trump:
+                    # Trump: 0-24h before event
+                    if hours_to_event > 24:
+                        debug_counts['too_early'] += 1
+                        continue
+                    if hours_to_event < 0:
+                        debug_counts['too_far'] += 1
+                        continue
+                elif is_mamdani or is_newsom:
+                    # Mamdani/Newsom: 0-1.5h before event
+                    if hours_to_event > 1.5:
+                        debug_counts['too_early'] += 1
+                        continue
+                    if hours_to_event < 0:
                         debug_counts['too_far'] += 1
                         continue
                 else:
-                    # Other: taker near event (0-1.5h) or premarket resting (0.5-7d)
-                    if hours_to_event > PREMARKET_MAX_HOURS:
+                    # Other: 0-1.5h before event
+                    if hours_to_event > 1.5:
                         debug_counts['too_early'] += 1
                         continue
                     if hours_to_event < -10/60:
@@ -934,18 +922,11 @@ class MentionBuyNoDetector:
                 continue
 
             no_price = 1 - yes_price
-            # Per-category price ranges:
-            # Earnings live 0-30min: 15-70c
+            # Per-category price ranges (taker):
             # NCAA live 0.5-1.5h: 6-25c (backtest: +151% ROI, t=9.13)
             # NBA live 0.5-2h: 9-25c (backtest: +113% ROI, t=11.79)
             # All others: 5-30c
-            # Pre-event maker: wide range (1-50c) for all categories
-            # Live taker: category-specific narrow ranges
-            if hours_to_event is not None and hours_to_event > PREMARKET_CANCEL_HOURS:
-                max_no, min_no = PREMARKET_MAX_NO_PRICE / 100, MENTION_MIN_NO_PRICE
-            elif is_earnings:
-                max_no, min_no = EARNINGS_MAX_NO_PRICE, EARNINGS_MIN_NO_PRICE
-            elif is_ncaa:
+            if is_ncaa:
                 max_no, min_no = 0.25, 0.06
             elif is_nba:
                 max_no, min_no = 0.30, 0.15
@@ -954,18 +935,14 @@ class MentionBuyNoDetector:
             if no_price < min_no or no_price > max_no:
                 debug_counts['price_out_range'] += 1
                 if is_nba and hours_to_event is not None and hours_to_event > 0.5:
-                    print(f"    NBA SKIP price_OOR: {ticker} no={no_price:.2f} range=[{min_no:.2f}-{max_no:.2f}] h2e={hours_to_event:.1f}h premarket={hours_to_event > PREMARKET_CANCEL_HOURS}")
+                    print(f"    NBA SKIP price_OOR: {ticker} no={no_price:.2f} range=[{min_no:.2f}-{max_no:.2f}] h2e={hours_to_event:.1f}h")
                 continue
 
-            # Cooldown check — skip for premarket maker (we want resting orders
-            # on every qualifying ticker; most won't fill anyway).
-            # Only apply cooldown for live taker path.
-            is_premarket_signal = hours_to_event is not None and hours_to_event > PREMARKET_CANCEL_HOURS
-            if not is_premarket_signal:
-                last_signal = self.signal_history.get(ticker, 0)
-                if now_ts - last_signal < 24 * 3600:
-                    debug_counts['cooldown'] += 1
-                    continue
+            # Cooldown check — 24h per ticker
+            last_signal = self.signal_history.get(ticker, 0)
+            if now_ts - last_signal < 24 * 3600:
+                debug_counts['cooldown'] += 1
+                continue
 
             debug_counts['eligible'] += 1
 
@@ -1830,7 +1807,7 @@ class KalshiReversionScanner:
         self._degrade_bucket_placed = {}  # ticker -> set of hh_keys already bet on
         self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
         self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
-        self._resting_premarket_orders = {}  # order_id -> {ticker, price_cents, contracts, bet_dollars, placed_ts, category, signal}
+        self._resting_premarket_orders = {}  # DEPRECATED — will be cleaned up on first run
         self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
 
     def _queue_tg(self, event_type, ticker, **kwargs):
@@ -1850,7 +1827,7 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy 1: Mention BUY NO (Trump $10, NBA $10, NCAA $3, Other ${MENTION_BET_DOLLARS}) + premarket resting $3 (spread>{PREMARKET_MIN_SPREAD}c, NO<{PREMARKET_MAX_NO_PRICE}c)")
+        print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 9-25c, NCAA live 0.5-1.5h 6-25c, Other 0-1.5h 5-30c)")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, live to +{EARNINGS_MAX_MINUTES_LIVE}min")
         print(f"Open positions: {self.positions.count()}")
@@ -1910,12 +1887,8 @@ class KalshiReversionScanner:
                 log_event('low_balance', balance_cents=bal)
                 low_balance = True
 
-        # Check pre-event resting orders for fills (Kalshi auto-cancels at event start)
-        if self._resting_premarket_orders:
-            await self._check_resting_premarket_orders()
-
         # Mention BUY NO scan
-        mention_count = self.positions.count('mention_buy_no') + len(self._resting_premarket_orders)
+        mention_count = self.positions.count('mention_buy_no')
         mention_allowed = mention_count < MENTION_MAX_POSITIONS
         should_scan_mentions = (now - self._last_mention_scan) >= MENTION_SCAN_INTERVAL_SECONDS
 
@@ -2007,19 +1980,22 @@ class KalshiReversionScanner:
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
-                        # Earnings: pre-event maker only (0.5h-7d)
-                        return PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS
+                        return False  # Earnings excluded
                     elif is_ncaa:
-                        # Pre-event maker (0.5-24h) + live taker (0.5-1.5h after start)
-                        return (PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS) or (-1.5 <= h <= -0.5)
+                        # NCAA: live taker 0.5-1.5h after start
+                        return -1.5 <= h <= -0.5
                     elif is_nba:
-                        # Pre-event maker (0.5-24h) + live taker (0.5-3h after tipoff)
-                        return (PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS) or (-3 <= h <= -0.5)
-                    elif is_trump or is_mamdani or is_newsom:
-                        return PREMARKET_CANCEL_HOURS <= h <= PREMARKET_MAX_HOURS
+                        # NBA: live taker 0.5-2h after tipoff
+                        return -2 <= h <= -0.5
+                    elif is_trump:
+                        # Trump: 0-24h before event
+                        return 0 <= h <= 24
+                    elif is_mamdani or is_newsom:
+                        # Mamdani/Newsom: 0-1.5h before event
+                        return 0 <= h <= 1.5
                     else:
-                        # Other: taker near event (-10min to 1.5h) OR premarket resting (0.5-24h)
-                        return -10/60 <= h <= PREMARKET_MAX_HOURS
+                        # Other: 0-1.5h before event (10min grace past start)
+                        return -10/60 <= h <= 1.5
 
                 eligible = [s for s in mention_signals if in_entry_window(s)]
                 n_total = len(mention_signals)
@@ -2033,44 +2009,22 @@ class KalshiReversionScanner:
                     is_earn = sig.get('is_earnings', False)
 
                     if is_earn:
-                        # Earnings caps (independent from mention)
-                        earn_count = self.positions.count('earnings_buy_no')
-                        if earn_count >= EARNINGS_MAX_POSITIONS:
-                            continue
-                        if self.positions.has_open_ticker(sig['ticker'], signal_type='earnings_buy_no'):
-                            continue
-                        # Also skip if we have a resting premarket order on this ticker
-                        if any(v['ticker'] == sig['ticker'] for v in self._resting_premarket_orders.values()):
-                            continue
-                        event = sig.get('event_ticker', '')
-                        if event:
-                            event_exp = self.positions.event_exposure(event, signal_type='earnings_buy_no')
-                            # Include resting order exposure for this event
-                            for v in self._resting_premarket_orders.values():
-                                if v.get('signal', {}).get('event_ticker', '') == event:
-                                    event_exp += v.get('bet_dollars', 0)
-                            if event_exp >= EARNINGS_MAX_EVENT_DOLLARS:
-                                continue
+                        # Earnings excluded from taker strategy
+                        continue
                     else:
                         # Mention caps
                         if not mention_allowed:
                             print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
                             break
 
-                        # Skip if we already have a MENTION position or resting order on this ticker
+                        # Skip if we already have a MENTION position on this ticker
                         if self.positions.has_open_ticker(sig['ticker'], signal_type='mention_buy_no'):
                             continue
-                        if any(v['ticker'] == sig['ticker'] for v in self._resting_premarket_orders.values()):
-                            continue
 
-                        # Per-event exposure cap (mention only, includes resting exposure)
+                        # Per-event exposure cap
                         event = sig.get('event_ticker', '')
                         if event:
                             event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
-                            # Add resting order exposure for this event
-                            for v in self._resting_premarket_orders.values():
-                                if v.get('signal', {}).get('event_ticker', '') == event:
-                                    event_exp += v.get('bet_dollars', 0)
                             if event_exp >= MENTION_MAX_EVENT_DOLLARS:
                                 continue
 
@@ -2091,12 +2045,7 @@ class KalshiReversionScanner:
 
                     order_info = None
                     if self.client.can_trade:
-                        if is_earn and h2e is not None and h2e < PREMARKET_CANCEL_HOURS:
-                            # Live earnings → skip (maker-only, no taker)
-                            continue
-                        else:
-                            # Pre-event (all categories including earnings) → maker
-                            order_info = self._execute_mention_entry(sig)
+                        order_info = self._execute_mention_entry(sig)
 
                     if order_info:
                         await self.notifier.send_mention_signal(sig, order_info)
@@ -2126,14 +2075,11 @@ class KalshiReversionScanner:
         mention_count = self.positions.count('mention_buy_no')
         degrade_count = self.positions.count('degrade_buy_no')
         earnings_count = self.positions.count('earnings_buy_no')
-        premarket_resting = len(self._resting_premarket_orders)
         parts = [f"mention={mention_count}"]
         if degrade_count:
             parts.append(f"degrade={degrade_count}")
         if earnings_count:
             parts.append(f"earnings={earnings_count}")
-        if premarket_resting:
-            parts.append(f"resting={premarket_resting}")
         print(f"  Open positions: {self.positions.count()} ({', '.join(parts)}, {self.positions.live_count()} live)")
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
@@ -2554,22 +2500,15 @@ class KalshiReversionScanner:
             print(f"    No NO ask for {ticker} (no YES bids in book), skipping")
             return None
 
-        # Detect premarket vs taker path early (affects price range check)
-        h2e = sig.get('hours_to_event', 0)
-        is_premarket = h2e > PREMARKET_CANCEL_HOURS
-
-        # Per-category price range
+        # Per-category price range (taker)
         ticker_upper = ticker.upper()
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
 
-        if is_premarket:
-            # Premarket resting: wider range (1-50c) — we rest at bid+1c, not at ask
-            max_no_c, min_no_c = PREMARKET_MAX_NO_PRICE, 1
-        elif is_ncaa:
+        if is_ncaa:
             max_no_c, min_no_c = 25, 6
         elif is_nba:
-            max_no_c, min_no_c = 30, 15
+            max_no_c, min_no_c = 25, 9
         else:
             max_no_c, min_no_c = int(MENTION_MAX_NO_PRICE * 100), int(MENTION_MIN_NO_PRICE * 100)
 
@@ -2579,130 +2518,6 @@ class KalshiReversionScanner:
             log_event('mention_skip_range', ticker=ticker, no_ask_cents=taker_price,
                       min_no_c=min_no_c, max_no_c=max_no_c)
             return None
-
-        # ── Pre-event resting order path (all categories) ──
-        # Fade retail: rest NO buy at best_bid+1c inside the spread.
-        # Adverse selection doesn't apply pre-event (words haven't been said).
-        # Only when spread > 8c and NO < 50c — wide markets where maker edge exists.
-
-        if is_premarket:
-            # Dead event detection — milestone start_ts can be wrong
-            if best_no_ask <= 5:
-                print(f"    PREMARKET: NO ask {best_no_ask}c <= 5c (market resolved), skipping")
-                return None
-
-            # Get NO bid from orderbook
-            no_bids_raw = orderbook.get('no', [])
-            if not isinstance(no_bids_raw, list):
-                no_bids_raw = []
-            best_no_bid = max(b[0] for b in no_bids_raw) if no_bids_raw else 0
-
-            # Calculate spread: NO ask + YES ask - 100 = overround
-            # Spread = best_no_ask - best_no_bid (simple bid-ask spread on NO side)
-            spread = best_no_ask - best_no_bid if best_no_bid > 0 and best_no_ask > 0 else 99
-
-            is_trump_cat = 'TRUMPMENTION' in ticker_upper or 'MAMDANIMENTION' in ticker_upper or 'NEWSOMMENTION' in ticker_upper
-            if spread < PREMARKET_MIN_SPREAD:
-                if is_trump_cat:
-                    print(f"    PREMARKET: spread {spread}c < {PREMARKET_MIN_SPREAD}c, taker path (trump/mamdani/newsom)")
-                else:
-                    print(f"    PREMARKET: spread {spread}c < {PREMARKET_MIN_SPREAD}c, skipping (maker only)")
-                    return None
-            else:
-                # Price: best NO bid + 1c (penny above to be first in queue)
-                if best_no_bid > 0:
-                    resting_price = best_no_bid + 1
-                else:
-                    resting_price = best_no_ask // 2
-
-                # Must be within premarket range (2-50c)
-                # Floor at 2c to avoid dead/resolved events with wrong start times
-                if resting_price < 2 or resting_price > PREMARKET_MAX_NO_PRICE:
-                    print(f"    PREMARKET: resting price {resting_price}c outside [2-{PREMARKET_MAX_NO_PRICE}c], skipping")
-                    return None
-
-                # Check total resting cap
-                if len(self._resting_premarket_orders) >= PREMARKET_MAX_RESTING:
-                    print(f"    PREMARKET: resting cap ({len(self._resting_premarket_orders)}/{PREMARKET_MAX_RESTING}), skipping")
-                    return None
-
-                # Check not already resting on this ticker
-                for v in self._resting_premarket_orders.values():
-                    if v['ticker'] == ticker:
-                        print(f"    PREMARKET: already resting on {ticker}, skipping")
-                        return None
-
-                # $5 premarket resting bets
-                mention_bet = 5
-
-                # Per-event exposure cap
-                sig_type = sig.get('signal_type', 'mention_buy_no')
-                is_earn_sig = sig_type == 'earnings_buy_no'
-                event = sig.get('event_ticker', '')
-                if event:
-                    event_exp = self.positions.event_exposure(event, signal_type=sig_type)
-                    for v in self._resting_premarket_orders.values():
-                        sig_evt = v.get('signal', {}).get('event_ticker', '')
-                        if sig_evt == event:
-                            event_exp += v.get('bet_dollars', 0)
-                    max_event_cap = EARNINGS_MAX_EVENT_DOLLARS if is_earn_sig else MENTION_MAX_EVENT_DOLLARS
-                    remaining_cap = max_event_cap - event_exp
-                    if remaining_cap <= 0:
-                        print(f"    PREMARKET: event cap reached (${event_exp:.0f}/${max_event_cap}), skipping")
-                        return None
-                    mention_bet = min(mention_bet, remaining_cap)
-
-                contracts = int(mention_bet / (resting_price / 100))
-                if contracts < 1:
-                    contracts = 1
-                bet_dollars = round(contracts * resting_price / 100, 2)
-
-                if 'EARNINGS' in ticker_upper: cat_label = 'earnings'
-                elif 'TRUMPMENTION' in ticker_upper: cat_label = 'trump'
-                elif 'MAMDANIMENTION' in ticker_upper: cat_label = 'mamdani'
-                elif 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper: cat_label = 'nba'
-                elif 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper: cat_label = 'ncaa'
-                else: cat_label = 'other'
-                print(f"    PREMARKET REST: {contracts} NO @ {resting_price}c (bid={best_no_bid}c ask={best_no_ask}c spread={spread}c h2e={h2e:.1f}h {cat_label}) = ${bet_dollars:.2f}")
-
-                if DRY_RUN:
-                    print(f"    DRY RUN: would rest {contracts} NO @ {resting_price}c")
-                    return None
-
-                # Auto-cancel at event start via Kalshi expiration_ts
-                event_start_ts = sig.get('event_start_ts')
-                order = self.client.create_order(
-                    ticker=ticker, side='no', action='buy',
-                    count=contracts, price_cents=resting_price,
-                    expiration_ts=event_start_ts,
-                )
-                if not order:
-                    print(f"    PREMARKET: order failed for {ticker}")
-                    return None
-
-                order_id = order.get('order_id', '')
-                self._resting_premarket_orders[order_id] = {
-                    'ticker': ticker,
-                    'price_cents': resting_price,
-                    'contracts': contracts,
-                    'bet_dollars': bet_dollars,
-                    'placed_ts': time.time(),
-                    'category': cat_label,
-                    'signal': dict(sig),
-                }
-                self.mention_detector.signal_history[ticker] = time.time()
-                self.mention_detector._save()
-
-                print(f"    PREMARKET: resting order {order_id} ({contracts} NO @ {resting_price}c)")
-                log_event('premarket_placed', ticker=ticker, order_id=order_id,
-                          contracts=contracts, price_cents=resting_price, bet_dollars=bet_dollars,
-                          no_bid=best_no_bid, no_ask=best_no_ask, spread=spread,
-                          h2e=h2e, category=cat_label)
-                self._queue_tg(f"MAKER LIMIT PLACED ({cat_label})", ticker,
-                               price_cents=resting_price, contracts=contracts, bet_dollars=bet_dollars,
-                               title=sig.get('title', '')[:60],
-                               extra=f"Bid={best_no_bid}c Ask={best_no_ask}c Spread={spread}c h2e={h2e:.1f}h")
-                return None  # No immediate fill — _check_resting_premarket_orders handles it
 
         # Slippage guard: cap how far above signal price we'll pay.
         # NBA: 4c (edge is +68% ROI even at 4c slip, t=8.09)
