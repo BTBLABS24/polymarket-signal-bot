@@ -144,17 +144,16 @@ DEGRADE_BUY_BELOW = {
 }
 
 # --- Earnings Mention Strategy ---
-# Buy NO on earnings call mention markets during live call.
-# Backtest: YES overpriced on earnings mentions, especially 0-20min into call.
+# Buy NO on earnings call mention markets 0-30min before call.
+# Backtest: +91% ROI at 0-30m pre, 5-30c, profitable every month since Mar 2025.
 EARNINGS_ENABLED = True
-EARNINGS_BET_DOLLARS = 3
-EARNINGS_MIN_NO_PRICE = 0.50     # 50c — only bucket with real edge (t=5.57)
-EARNINGS_MAX_NO_PRICE = 0.70     # 70c
+EARNINGS_BET_DOLLARS = 5
+EARNINGS_MIN_NO_PRICE = 0.05     # 5c
+EARNINGS_MAX_NO_PRICE = 0.30     # 30c
 EARNINGS_MAX_POSITIONS = 20      # independent cap
 EARNINGS_MAX_EVENT_DOLLARS = 26  # per-event cap
-# Entry window: live (milestone start) to 30 min after start
-EARNINGS_MIN_MINUTES_LIVE = 0
-EARNINGS_MAX_MINUTES_LIVE = 30
+# Entry window: 0-30min before earnings call (pre-event taker)
+EARNINGS_WINDOW_HOURS_BEFORE = 0.5  # 30 min before event
 # Hot words to exclude — too common/misleading on earnings calls
 EARNINGS_EXCLUDED_WORDS = {
     'ACQU', 'AI', 'BLOC', 'COMP', 'DELI', 'DIVI', 'HOLI',
@@ -830,9 +829,13 @@ class MentionBuyNoDetector:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
                 if is_earnings:
-                    # Earnings: excluded (no milestones)
-                    debug_counts['skipped_cat'] += 1
-                    continue
+                    # Earnings: 0-30min before event start (taker)
+                    if hours_to_event > EARNINGS_WINDOW_HOURS_BEFORE:
+                        debug_counts['too_early'] += 1
+                        continue
+                    if hours_to_event < 0:
+                        debug_counts['too_far'] += 1
+                        continue
                 elif is_ncaa:
                     # NCAA: live taker 0.5-1.5h after start
                     if hours_to_event > 0 or hours_to_event < -1.5:
@@ -1980,7 +1983,7 @@ class KalshiReversionScanner:
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
-                        return False  # Earnings excluded
+                        return 0 <= h <= EARNINGS_WINDOW_HOURS_BEFORE
                     elif is_ncaa:
                         # NCAA: live taker 0.5-1.5h after start
                         return -1.5 <= h <= -0.5
@@ -2009,8 +2012,13 @@ class KalshiReversionScanner:
                     is_earn = sig.get('is_earnings', False)
 
                     if is_earn:
-                        # Earnings excluded from taker strategy
-                        continue
+                        # Earnings: check cap and execute
+                        earn_count = self.positions.count('earnings_buy_no')
+                        if earn_count >= EARNINGS_MAX_POSITIONS:
+                            print(f"    EARNINGS CAP: {earn_count}/{EARNINGS_MAX_POSITIONS}, skipping")
+                            continue
+                        if self.positions.has_open_ticker(sig['ticker'], signal_type='earnings_buy_no'):
+                            continue
                     else:
                         # Mention caps
                         if not mention_allowed:
@@ -2045,7 +2053,10 @@ class KalshiReversionScanner:
 
                     order_info = None
                     if self.client.can_trade:
-                        order_info = self._execute_mention_entry(sig)
+                        if is_earn:
+                            order_info = self._execute_earnings_entry(sig)
+                        else:
+                            order_info = self._execute_mention_entry(sig)
 
                     if order_info:
                         await self.notifier.send_mention_signal(sig, order_info)
