@@ -1832,7 +1832,7 @@ class KalshiReversionScanner:
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
         print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 9-25c, NCAA live 0.5-1.5h 6-25c, Other 0-1.5h 5-30c)")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
-        print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, live to +{EARNINGS_MAX_MINUTES_LIVE}min")
+        print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, {EARNINGS_WINDOW_HOURS_BEFORE*60:.0f}min pre-event")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
