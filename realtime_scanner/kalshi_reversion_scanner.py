@@ -2531,9 +2531,15 @@ class KalshiReversionScanner:
                       min_no_c=min_no_c, max_no_c=max_no_c)
             return None
 
-        # Slippage guard: cap how far above signal price we'll pay.
-        # All categories: 4c (still +189% ROI at 4c slip across all cats)
-        max_slip = 4
+        # Category detection for sizing and slippage
+        is_other = not any(k in ticker_upper for k in (
+            'TRUMPMENTION', 'MAMDANIMENTION', 'NEWSOMMENTION',
+            'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION',
+            'VANCEMENTION',
+        ))
+
+        # Slippage guard: named categories 4c, other 2c
+        max_slip = 2 if is_other else 4
         max_slip_price = no_price_cents + max_slip
         if taker_price > max_slip_price:
             print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + {max_slip}c, skipping")
@@ -2551,11 +2557,6 @@ class KalshiReversionScanner:
         depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
         # Category-based bet sizing: $10 named categories, $5 other
-        is_other = not any(k in ticker_upper for k in (
-            'TRUMPMENTION', 'MAMDANIMENTION', 'NEWSOMMENTION',
-            'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION',
-            'VANCEMENTION',
-        ))
         mention_bet = MENTION_BET_OTHER if is_other else MENTION_BET_DOLLARS
         # New/unknown series: cap at $2 until we have enough history
         event_ticker_taker = sig.get('event_ticker', '')
