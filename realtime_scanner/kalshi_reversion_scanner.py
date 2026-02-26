@@ -822,6 +822,11 @@ class MentionBuyNoDetector:
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
             ms = milestone_map.get(event_ticker)
             if ms:
+                # Skip if milestone end_date has passed (event is over)
+                end_ts = ms.get('end_ts')
+                if end_ts and end_ts < now_ts:
+                    debug_counts['too_far'] += 1
+                    continue
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
                 if is_earnings:
@@ -2581,6 +2586,11 @@ class KalshiReversionScanner:
         # Only when spread > 8c and NO < 50c — wide markets where maker edge exists.
 
         if is_premarket:
+            # Dead event detection — milestone start_ts can be wrong
+            if best_no_ask <= 5:
+                print(f"    PREMARKET: NO ask {best_no_ask}c <= 5c (market resolved), skipping")
+                return None
+
             # Get NO bid from orderbook
             no_bids_raw = orderbook.get('no', [])
             if not isinstance(no_bids_raw, list):
