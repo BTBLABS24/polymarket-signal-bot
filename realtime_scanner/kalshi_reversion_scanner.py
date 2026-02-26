@@ -395,7 +395,7 @@ class KalshiClient:
 
         # Step 2: query each series for open markets
         all_markets = []
-        LOGGED_KEYS = ('NBA', 'NCAA', 'NCAAB', 'TRUMP', 'MAMDANI', 'NEWSOM', 'EARNINGS')
+        LOGGED_KEYS = ('NBA', 'NCAA', 'NCAAB', 'TRUMP', 'MAMDANI', 'NEWSOM')
         logged_series = [s for s in self._mention_series_cache
                          if any(k in s.upper() for k in LOGGED_KEYS)]
         if not any('NBA' in s.upper() for s in self._mention_series_cache):
