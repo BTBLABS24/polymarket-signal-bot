@@ -145,8 +145,8 @@ DEGRADE_BUY_BELOW = {
 
 # --- Earnings Mention Strategy ---
 # Buy NO on earnings call mention markets 0-30min before call.
-# Backtest: +91% ROI at 0-30m pre, 5-30c, profitable every month since Mar 2025.
-EARNINGS_ENABLED = True
+# Corrected backtest (fix side=no price bug): -2% ROI — not worth it.
+EARNINGS_ENABLED = False
 EARNINGS_BET_DOLLARS = 20
 EARNINGS_MIN_NO_PRICE = 0.05     # 5c
 EARNINGS_MAX_NO_PRICE = 0.30     # 30c
