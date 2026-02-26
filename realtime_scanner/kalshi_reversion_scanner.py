@@ -70,8 +70,8 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 10          # $10 default per signal
-MENTION_BET_OTHER = 5             # $5 for "other" (non-named) categories
+MENTION_BET_DOLLARS = 5            # $5 all categories while validating bot
+MENTION_BET_OTHER = 5              # $5 for "other" (non-named) categories
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.01       # Allow NO down to 1c
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
@@ -80,7 +80,7 @@ MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 99999 # No event cap
-MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
+MENTION_MAX_MARKET_DOLLARS = 5    # Hard cap $ per individual market/ticker
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
