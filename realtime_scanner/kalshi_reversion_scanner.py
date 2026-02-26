@@ -2520,9 +2520,8 @@ class KalshiReversionScanner:
             return None
 
         # Slippage guard: cap how far above signal price we'll pay.
-        # NBA: 4c (edge is +68% ROI even at 4c slip, t=8.09)
-        # Others: 2c
-        max_slip = 4 if is_nba else 2
+        # All categories: 4c (still +189% ROI at 4c slip across all cats)
+        max_slip = 4
         max_slip_price = no_price_cents + max_slip
         if taker_price > max_slip_price:
             print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + {max_slip}c, skipping")
