@@ -781,6 +781,8 @@ class MentionBuyNoDetector:
                         'no_price': 0, 'price_out_range': 0,
                         'cooldown': 0, 'eligible': 0,
                         'no_milestone': 0, 'too_early': 0}
+        # Per-category filter tracking
+        cat_debug = {}  # category -> {filter_name -> count}
 
         # Fetch milestones for event_start timing filter
         milestone_map = client.get_milestones()
@@ -846,12 +848,17 @@ class MentionBuyNoDetector:
             is_newsom = 'NEWSOMMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
+            _cat = 'NCAA' if is_ncaa else 'NBA' if is_nba else 'Trump' if is_trump else 'Mamdani' if is_mamdani else 'Other'
+            if _cat not in cat_debug:
+                cat_debug[_cat] = {'total': 0, 'no_ms': 0, 'timing': 0, 'price': 0, 'cooldown': 0, 'eligible': 0}
+            cat_debug[_cat]['total'] += 1
             ms = milestone_map.get(event_ticker)
             if ms:
                 # Skip if milestone end_date has passed (event is over)
                 end_ts = ms.get('end_ts')
                 if end_ts and end_ts < now_ts:
                     debug_counts['too_far'] += 1
+                    cat_debug[_cat]['timing'] += 1
                     continue
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
@@ -859,61 +866,74 @@ class MentionBuyNoDetector:
                     # Earnings: 0-30min before event start (taker)
                     if hours_to_event > EARNINGS_WINDOW_HOURS_BEFORE:
                         debug_counts['too_early'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                     if hours_to_event < 0:
                         debug_counts['too_far'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                 elif is_ncaa:
                     # NCAA: pre 1-24h + live 0.5-1.5h (skip last hour pre + first 0.5h live)
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                     if hours_to_event < -1.5:
                         debug_counts['too_far'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                     # Skip gap: last 1h pre-event through first 0.5h live
                     if 1 > hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                 elif is_nba:
                     # NBA: live taker 0.5-2h after tipoff
                     if hours_to_event > 0 or hours_to_event < -2:
                         debug_counts['too_far'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                     if hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                 elif is_trump:
                     # Trump: 0-24h before event
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                     if hours_to_event < 0:
                         debug_counts['too_far'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                 elif is_mamdani or is_newsom:
                     # Mamdani/Newsom: 0-1.5h before event
                     if hours_to_event > 1.5:
                         debug_counts['too_early'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                     if hours_to_event < 0:
                         debug_counts['too_far'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                 else:
                     # Other: pre 1h to live 0.5h
                     if hours_to_event > 1:
                         debug_counts['too_early'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
                     if hours_to_event < -0.5:
                         debug_counts['too_far'] += 1
+                        cat_debug[_cat]['timing'] += 1
                         continue
             else:
                 # No milestone found — skip and log.
                 # Milestones are required for timing windows.
-                cat_label = 'NBA' if is_nba else 'NCAA' if is_ncaa else 'Trump' if is_trump else 'Other'
                 if debug_counts.get('no_milestone', 0) < 3:
-                    print(f"    [no-milestone] {ticker} ({cat_label}) — skipping, no milestone for {event_ticker}")
+                    print(f"    [no-milestone] {ticker} ({_cat}) — skipping, no milestone for {event_ticker}")
                 debug_counts['no_milestone'] += 1
+                cat_debug[_cat]['no_ms'] += 1
                 continue
 
             # Get current YES price → derive NO price
@@ -934,6 +954,7 @@ class MentionBuyNoDetector:
                         pass
             if yes_price is None:
                 debug_counts['no_price'] += 1
+                cat_debug[_cat]['price'] += 1
                 continue
 
             no_price = 1 - yes_price
@@ -949,6 +970,7 @@ class MentionBuyNoDetector:
                 max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             if no_price < min_no or no_price > max_no:
                 debug_counts['price_out_range'] += 1
+                cat_debug[_cat]['price'] += 1
                 if is_nba and hours_to_event is not None and hours_to_event > 0.5:
                     print(f"    NBA SKIP price_OOR: {ticker} no={no_price:.2f} range=[{min_no:.2f}-{max_no:.2f}] h2e={hours_to_event:.1f}h")
                 continue
@@ -957,9 +979,11 @@ class MentionBuyNoDetector:
             last_signal = self.signal_history.get(ticker, 0)
             if now_ts - last_signal < 24 * 3600:
                 debug_counts['cooldown'] += 1
+                cat_debug[_cat]['cooldown'] += 1
                 continue
 
             debug_counts['eligible'] += 1
+            cat_debug[_cat]['eligible'] += 1
 
             # NOTE: cooldown is now set AFTER order is placed (in run loop)
             # so markets aren't blocked before passing the entry window check
@@ -1015,6 +1039,14 @@ class MentionBuyNoDetector:
               f"{debug_counts['price_out_range']} price OOR, "
               f"{debug_counts['cooldown']} cooldown, "
               f"{debug_counts['eligible']} eligible")
+        # Per-category breakdown (only categories with markets)
+        for cat_name in ('NCAA', 'NBA', 'Trump', 'Mamdani', 'Other'):
+            cd = cat_debug.get(cat_name)
+            if cd and cd['total'] > 0:
+                print(f"    {cat_name}: {cd['total']} mkts → "
+                      f"{cd['no_ms']} no_ms, {cd['timing']} timing, "
+                      f"{cd['price']} price, {cd['cooldown']} cooldown, "
+                      f"{cd['eligible']} eligible")
 
         return signals
 
