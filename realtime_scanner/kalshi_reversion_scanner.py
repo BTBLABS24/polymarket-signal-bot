@@ -540,11 +540,11 @@ class KalshiClient:
                         if ev_status in ('settled', 'finalized', 'closed'):
                             series_resolved[series] = series_resolved.get(series, 0) + 1
 
-                    # Fallback: parse sub_title date or use close_time for events
+                    # Fallback: parse sub_title date for political/other events
                     # without milestones. Kalshi stores the event date in sub_title
                     # (e.g. "Feb 24, 2026") but sometimes doesn't create a milestone
                     # record. For Trump/political events we assume 9pm ET.
-                    # For sports (NBA/NCAA), use close_time - game duration.
+                    # Sports (NBA/NCAA) MUST have milestones — no fallback.
                     for ev in data.get('events', []):
                         et = ev.get('event_ticker', '')
                         if et in milestone_map:
@@ -553,28 +553,8 @@ class KalshiClient:
                         is_sport = ('NBAMENTION' in et_upper or 'NBAFINALS' in et_upper
                                     or 'NCAAMENTION' in et_upper or 'NCAABMENTION' in et_upper)
 
-                        # Sports fallback: use close_time of first market in event
-                        # Game starts ≈ close_time - game_duration
+                        # Sports: milestone required, no fallback
                         if is_sport:
-                            # Get close_time from event's markets
-                            for mkt in ev.get('markets', []):
-                                ct_str = mkt.get('close_time', '')
-                                if ct_str:
-                                    try:
-                                        ct = datetime.fromisoformat(
-                                            ct_str.replace('Z', '+00:00')
-                                        )
-                                        is_nba_ev = 'NBAMENTION' in et_upper or 'NBAFINALS' in et_upper
-                                        game_h = 3.5 if is_nba_ev else 3.0
-                                        start_ts = ct.timestamp() - game_h * 3600
-                                        milestone_map[et] = {
-                                            'start_ts': start_ts,
-                                            'end_ts': ct.timestamp(),
-                                            'title': ev.get('title', ''),
-                                        }
-                                    except Exception:
-                                        pass
-                                    break
                             continue
 
                         # Political/Other fallback: parse date from sub_title
@@ -912,48 +892,13 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
             else:
-                # No milestone — use close_time as fallback.
-                # NBA/NCAA: estimate start from close_time minus game duration.
-                # NCAA games ~2.5h, NBA ~3h. Use conservative offsets so we
-                # don't think the game started before it actually did.
-                if is_nba or is_ncaa:
-                    if close_time_str:
-                        try:
-                            close_dt = datetime.fromisoformat(
-                                close_time_str.replace('Z', '+00:00')
-                            )
-                            game_duration_h = 3.5 if is_nba else 3.0
-                            estimated_start = close_dt.timestamp() - game_duration_h * 3600
-                            hours_to_event = (estimated_start - now_ts) / 3600
-                        except Exception:
-                            debug_counts['no_milestone'] += 1
-                            continue
-                    else:
-                        debug_counts['no_milestone'] += 1
-                        continue
-                # For non-live categories (Trump, Other): use open_time as proxy.
-                # Mention markets open ~1-2h before their event starts.
-                elif not is_trump:
-                    open_time_str = m.get('open_time', '')
-                    if open_time_str:
-                        try:
-                            open_dt = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                            hours_since_open = (now_ts - open_dt.timestamp()) / 3600
-                            # Only use proxy for recently-opened markets (< 4h)
-                            if hours_since_open < 0 or hours_since_open > 4:
-                                debug_counts['no_milestone'] += 1
-                                continue
-                            estimated_start = open_dt.timestamp() + 1.5 * 3600
-                            hours_to_event = (estimated_start - now_ts) / 3600
-                        except Exception:
-                            debug_counts['no_milestone'] += 1
-                            continue
-                    else:
-                        debug_counts['no_milestone'] += 1
-                        continue
-                else:
-                    debug_counts['no_milestone'] += 1
-                    continue
+                # No milestone found — skip and log.
+                # Milestones are required for timing windows.
+                cat_label = 'NBA' if is_nba else 'NCAA' if is_ncaa else 'Trump' if is_trump else 'Other'
+                if debug_counts.get('no_milestone', 0) < 3:
+                    print(f"    [no-milestone] {ticker} ({cat_label}) — skipping, no milestone for {event_ticker}")
+                debug_counts['no_milestone'] += 1
+                continue
 
             # Get current YES price → derive NO price
             yes_price = None
