@@ -870,11 +870,11 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
                 else:
-                    # Other: 0-1.5h before event
-                    if hours_to_event > 1.5:
+                    # Other: pre 1h to live 0.5h
+                    if hours_to_event > 1:
                         debug_counts['too_early'] += 1
                         continue
-                    if hours_to_event < -10/60:
+                    if hours_to_event < -0.5:
                         debug_counts['too_far'] += 1
                         continue
             else:
@@ -1998,8 +1998,8 @@ class KalshiReversionScanner:
                         # Mamdani/Newsom: 0-1.5h before event
                         return 0 <= h <= 1.5
                     else:
-                        # Other: 0-1.5h before event (10min grace past start)
-                        return -10/60 <= h <= 1.5
+                        # Other: pre 1h to live 0.5h
+                        return -0.5 <= h <= 1
 
                 eligible = [s for s in mention_signals if in_entry_window(s)]
                 n_total = len(mention_signals)
