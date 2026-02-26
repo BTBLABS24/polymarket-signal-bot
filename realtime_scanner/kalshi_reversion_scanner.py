@@ -2592,7 +2592,8 @@ class KalshiReversionScanner:
             spread = best_no_ask - best_no_bid if best_no_bid > 0 and best_no_ask > 0 else 99
 
             if spread < PREMARKET_MIN_SPREAD:
-                print(f"    PREMARKET: spread {spread}c < {PREMARKET_MIN_SPREAD}c, using taker path")
+                print(f"    PREMARKET: spread {spread}c < {PREMARKET_MIN_SPREAD}c, skipping (no taker pre-event)")
+                return None
             else:
                 # Price: best NO bid + 1c (penny above to be first in queue)
                 if best_no_bid > 0:
