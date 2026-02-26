@@ -838,11 +838,15 @@ class MentionBuyNoDetector:
                         debug_counts['too_far'] += 1
                         continue
                 elif is_ncaa:
-                    # NCAA: live taker 0.5-1.5h after start
-                    if hours_to_event > 0 or hours_to_event < -1.5:
+                    # NCAA: pre 0-24h + live 0.5-1.5h
+                    if hours_to_event > 24:
+                        debug_counts['too_early'] += 1
+                        continue
+                    if hours_to_event < -1.5:
                         debug_counts['too_far'] += 1
                         continue
-                    if hours_to_event > -0.5:
+                    # Skip gap between pre and live (0 to -0.5h)
+                    if 0 > hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
                         continue
                 elif is_nba:
@@ -1831,7 +1835,7 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 9-25c, NCAA live 0.5-1.5h 6-25c, Other 0-1.5h 5-30c)")
+        print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 9-25c, NCAA pre 0-24h 10-25c + live 0.5-1.5h 6-25c, Other pre 1h + live 0.5h)")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, {EARNINGS_WINDOW_HOURS_BEFORE*60:.0f}min pre-event")
         print(f"Open positions: {self.positions.count()}")
@@ -1986,8 +1990,8 @@ class KalshiReversionScanner:
                     if s.get('is_earnings'):
                         return 0 <= h <= EARNINGS_WINDOW_HOURS_BEFORE
                     elif is_ncaa:
-                        # NCAA: live taker 0.5-1.5h after start
-                        return -1.5 <= h <= -0.5
+                        # NCAA: pre 0-24h + live 0.5-1.5h (skip 0 to -0.5h gap)
+                        return (-1.5 <= h <= -0.5) or (0 <= h <= 24)
                     elif is_nba:
                         # NBA: live taker 0.5-2h after tipoff
                         return -2 <= h <= -0.5
@@ -2518,7 +2522,9 @@ class KalshiReversionScanner:
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
 
         if is_ncaa:
-            max_no_c, min_no_c = 25, 6
+            h2e = sig.get('hours_to_event')
+            ncaa_pre = h2e is not None and h2e >= 0
+            max_no_c, min_no_c = (25, 10) if ncaa_pre else (25, 6)
         elif is_nba:
             max_no_c, min_no_c = 25, 9
         else:
