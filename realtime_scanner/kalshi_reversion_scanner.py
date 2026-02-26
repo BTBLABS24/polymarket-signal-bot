@@ -2591,9 +2591,13 @@ class KalshiReversionScanner:
             # Spread = best_no_ask - best_no_bid (simple bid-ask spread on NO side)
             spread = best_no_ask - best_no_bid if best_no_bid > 0 and best_no_ask > 0 else 99
 
+            is_trump_cat = 'TRUMPMENTION' in ticker_upper or 'MAMDANIMENTION' in ticker_upper or 'NEWSOMMENTION' in ticker_upper
             if spread < PREMARKET_MIN_SPREAD:
-                print(f"    PREMARKET: spread {spread}c < {PREMARKET_MIN_SPREAD}c, skipping (no taker pre-event)")
-                return None
+                if is_trump_cat:
+                    print(f"    PREMARKET: spread {spread}c < {PREMARKET_MIN_SPREAD}c, taker path (trump/mamdani/newsom)")
+                else:
+                    print(f"    PREMARKET: spread {spread}c < {PREMARKET_MIN_SPREAD}c, skipping (maker only)")
+                    return None
             else:
                 # Price: best NO bid + 1c (penny above to be first in queue)
                 if best_no_bid > 0:
