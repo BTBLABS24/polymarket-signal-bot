@@ -2539,8 +2539,16 @@ class KalshiReversionScanner:
                 depth_contracts += bid_qty
         depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
-        # Flat $5 taker bet for all categories
-        mention_bet = MENTION_BET_DOLLARS
+        # Per-category bet sizing
+        is_trump = 'TRUMPMENTION' in ticker_upper
+        if is_trump:
+            mention_bet = 10
+        elif is_ncaa or is_nba:
+            mention_bet = MENTION_BET_DOLLARS  # $5
+        elif 'MAMDANIMENTION' in ticker_upper or 'NEWSOMMENTION' in ticker_upper:
+            mention_bet = MENTION_BET_DOLLARS  # $5
+        else:
+            mention_bet = 3  # Other/NFL/Governor/etc
         # New/unknown series: cap at $2 until we have enough history
         event_ticker_taker = sig.get('event_ticker', '')
         series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker_taker)
