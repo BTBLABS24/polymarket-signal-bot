@@ -70,7 +70,7 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 5           # $5 per signal (Other category)
+MENTION_BET_DOLLARS = 20          # $20 flat per signal
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.01       # Allow NO down to 1c
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
@@ -78,8 +78,8 @@ MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (event
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
-MENTION_MAX_EVENT_DOLLARS = 50    # Max $ per event (spread across tickers)
-MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
+MENTION_MAX_EVENT_DOLLARS = 99999 # No event cap
+MENTION_MAX_MARKET_DOLLARS = 20   # Hard cap $ per individual market/ticker
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
@@ -147,11 +147,11 @@ DEGRADE_BUY_BELOW = {
 # Buy NO on earnings call mention markets 0-30min before call.
 # Backtest: +91% ROI at 0-30m pre, 5-30c, profitable every month since Mar 2025.
 EARNINGS_ENABLED = True
-EARNINGS_BET_DOLLARS = 5
+EARNINGS_BET_DOLLARS = 20
 EARNINGS_MIN_NO_PRICE = 0.05     # 5c
 EARNINGS_MAX_NO_PRICE = 0.30     # 30c
 EARNINGS_MAX_POSITIONS = 20      # independent cap
-EARNINGS_MAX_EVENT_DOLLARS = 26  # per-event cap
+EARNINGS_MAX_EVENT_DOLLARS = 99999  # no event cap
 # Entry window: 0-30min before earnings call (pre-event taker)
 EARNINGS_WINDOW_HOURS_BEFORE = 0.5  # 30 min before event
 # Hot words to exclude — too common/misleading on earnings calls
@@ -2549,16 +2549,8 @@ class KalshiReversionScanner:
                 depth_contracts += bid_qty
         depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
-        # Per-category bet sizing
-        is_trump = 'TRUMPMENTION' in ticker_upper
-        if is_trump:
-            mention_bet = 10
-        elif is_ncaa or is_nba:
-            mention_bet = MENTION_BET_DOLLARS  # $5
-        elif 'MAMDANIMENTION' in ticker_upper or 'NEWSOMMENTION' in ticker_upper:
-            mention_bet = MENTION_BET_DOLLARS  # $5
-        else:
-            mention_bet = 3  # Other/NFL/Governor/etc
+        # Flat $20 bet sizing
+        mention_bet = MENTION_BET_DOLLARS  # $20
         # New/unknown series: cap at $2 until we have enough history
         event_ticker_taker = sig.get('event_ticker', '')
         series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker_taker)
