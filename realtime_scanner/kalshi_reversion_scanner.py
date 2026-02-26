@@ -395,8 +395,10 @@ class KalshiClient:
 
         # Step 2: query each series for open markets
         all_markets = []
-        nba_series = [s for s in self._mention_series_cache if 'NBA' in s.upper()]
-        if not nba_series:
+        LOGGED_KEYS = ('NBA', 'NCAA', 'NCAAB', 'TRUMP', 'MAMDANI', 'NEWSOM', 'EARNINGS')
+        logged_series = [s for s in self._mention_series_cache
+                         if any(k in s.upper() for k in LOGGED_KEYS)]
+        if not any('NBA' in s.upper() for s in self._mention_series_cache):
             print(f"  WARNING: no NBA series in discovered list ({len(self._mention_series_cache)} series)")
         for series in self._mention_series_cache:
             series_count = 0
@@ -418,8 +420,8 @@ class KalshiClient:
                         time.sleep(2)
                         continue
                     if resp.status_code != 200:
-                        if 'NBA' in series.upper():
-                            print(f"  NBA series {series}: HTTP {resp.status_code}")
+                        if series in logged_series:
+                            print(f"  {series}: HTTP {resp.status_code}")
                         break
                     data = resp.json()
                     markets = data.get('markets', [])
@@ -431,8 +433,8 @@ class KalshiClient:
                         break
             except Exception as e:
                 print(f'  API error (mention series {series}): {e}')
-            if 'NBA' in series.upper():
-                print(f"  NBA series {series}: {series_count} open markets")
+            if series in logged_series:
+                print(f"  {series}: {series_count} open markets")
         return all_markets
 
     def get_milestones(self):
