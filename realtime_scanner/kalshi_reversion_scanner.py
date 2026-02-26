@@ -459,8 +459,11 @@ class KalshiClient:
         milestone_map = dict(getattr(self, '_milestones_cache', {}))
         series_resolved = dict(getattr(self, '_series_resolved_counts', {}))
 
+        series_ms_counts = {}  # series -> milestone count (for logging)
+        sports_no_ms = []      # sport events with no milestone
         for series in series_list:
             try:
+                ms_before = len(milestone_map)
                 # Paginate: some series (KXNBAMENTION) have 150+ events
                 cursor = None
                 while True:
@@ -555,6 +558,9 @@ class KalshiClient:
 
                         # Sports: milestone required, no fallback
                         if is_sport:
+                            ev_status = ev.get('status', '')
+                            if ev_status not in ('settled', 'finalized', 'closed'):
+                                sports_no_ms.append(et)
                             continue
 
                         # Political/Other fallback: parse date from sub_title
@@ -583,6 +589,7 @@ class KalshiClient:
                     if not cursor or not data.get('events', []):
                         break
                     time.sleep(0.3)
+                series_ms_counts[series] = len(milestone_map) - ms_before
                 # Small delay between series to avoid rate limits (295 series)
                 time.sleep(0.1)
             except Exception as e:
@@ -592,6 +599,13 @@ class KalshiClient:
         self._milestones_cache_ts = now
         self._series_resolved_counts = series_resolved
         print(f"  Milestones: {len(milestone_map)} events with start times")
+        # Log sports series milestone counts
+        sport_keys = [s for s in series_ms_counts if any(k in s.upper() for k in ('NBA', 'NCAA', 'NCAAB'))]
+        if sport_keys:
+            parts = [f"{s}={series_ms_counts[s]}" for s in sport_keys]
+            print(f"  Sports milestones: {', '.join(parts)}")
+        if sports_no_ms:
+            print(f"  Sports events WITHOUT milestone ({len(sports_no_ms)}): {sports_no_ms[:5]}")
         return milestone_map
 
     # --- Authenticated endpoints (trading) ---
