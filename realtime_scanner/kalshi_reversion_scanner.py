@@ -2605,9 +2605,10 @@ class KalshiReversionScanner:
                 else:
                     resting_price = best_no_ask // 2
 
-                # Must be within premarket range (5-50c)
-                if resting_price < 1 or resting_price > PREMARKET_MAX_NO_PRICE:
-                    print(f"    PREMARKET: resting price {resting_price}c outside [1-{PREMARKET_MAX_NO_PRICE}c], skipping")
+                # Must be within premarket range (2-50c)
+                # Floor at 2c to avoid dead/resolved events with wrong start times
+                if resting_price < 2 or resting_price > PREMARKET_MAX_NO_PRICE:
+                    print(f"    PREMARKET: resting price {resting_price}c outside [2-{PREMARKET_MAX_NO_PRICE}c], skipping")
                     return None
 
                 # Check total resting cap
