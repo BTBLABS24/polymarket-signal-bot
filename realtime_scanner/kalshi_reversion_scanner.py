@@ -2604,12 +2604,14 @@ class KalshiReversionScanner:
         # Category-based bet sizing: $10 named categories, $5 other
         mention_bet = MENTION_BET_OTHER if is_other else MENTION_BET_DOLLARS
         # New/unknown series: cap at $2 until we have enough history
+        # Skip this cap for curated series in MENTION_SCAN_SERIES
         event_ticker_taker = sig.get('event_ticker', '')
         series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker_taker)
-        resolved = getattr(self.client, '_series_resolved_counts', {}).get(series, 0)
-        if resolved < PREMARKET_NEW_SERIES_MIN:
-            mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
-            print(f"    New series {series} ({resolved} resolved < {PREMARKET_NEW_SERIES_MIN}), capping at ${PREMARKET_NEW_SERIES_BET}")
+        if series not in MENTION_SCAN_SERIES:
+            resolved = getattr(self.client, '_series_resolved_counts', {}).get(series, 0)
+            if resolved < PREMARKET_NEW_SERIES_MIN:
+                mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
+                print(f"    New series {series} ({resolved} resolved < {PREMARKET_NEW_SERIES_MIN}), capping at ${PREMARKET_NEW_SERIES_BET}")
 
         # Per-market hard cap
         mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
