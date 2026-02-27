@@ -118,14 +118,6 @@ MENTION_SCAN_SERIES = [
     'KXVANCEMENTION',
 ]
 
-# --- Contrarian Signal: extend price range when NO drops 30c+ from baseline ---
-# Only for speech/talk categories (not sports). Allows buying NO up to 40c
-# when retail overreaction is detected (NO crashed from baseline).
-CONTRARIAN_DROP_THRESHOLD = 30     # cents drop from first-seen price
-CONTRARIAN_MAX_NO_PRICE = 0.40     # extended max (normally 0.30)
-# Sports categories excluded from contrarian (signal doesn't work for sports)
-CONTRARIAN_EXCLUDED_PREFIXES = {'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION', 'NFLMENTION'}
-
 # --- NBA Word Blacklist ---
 # Words with <15% NO win rate — almost always said, losing bet at any price.
 # Ticker suffix -> matched against last segment of ticker (e.g. KXNBAMENTION-...-ROOK)
@@ -773,8 +765,6 @@ class MentionBuyNoDetector:
 
     def __init__(self):
         self.signal_history = {}  # ticker -> last signal timestamp
-        self._market_baselines = {}   # ticker -> avg NO price (cents) after first 10 observations
-        self._market_price_buf = {}   # ticker -> list of NO prices (cents), max 10
         self._load()
 
     def _load(self):
@@ -1008,35 +998,14 @@ class MentionBuyNoDetector:
             no_price = 1 - yes_price
             no_price_c = int(no_price * 100)
 
-            # --- Contrarian baseline tracking ---
-            # Baseline = avg NO price of first 10 observations; detect 30c+ drops for non-sports
-            is_contrarian = False
-            contrarian_drop = 0
-            is_sport = any(k in ticker_upper for k in CONTRARIAN_EXCLUDED_PREFIXES)
-            if not is_sport:
-                if ticker not in self._market_baselines:
-                    # Still collecting first 10 observations
-                    buf = self._market_price_buf.setdefault(ticker, [])
-                    buf.append(no_price_c)
-                    if len(buf) >= 10:
-                        self._market_baselines[ticker] = sum(buf) / len(buf)
-                        del self._market_price_buf[ticker]
-                else:
-                    baseline_c = self._market_baselines[ticker]
-                    contrarian_drop = baseline_c - no_price_c
-                    if contrarian_drop >= CONTRARIAN_DROP_THRESHOLD:
-                        is_contrarian = True
-
             # Per-category price ranges — must match execution ranges:
             # NCAA pre 1-24h: 10-25c, live 0.5-1.5h: 6-25c → signal uses 6-25c
             # NBA live 0.5-2h: 9-25c
-            # All others: 1-30c (extended to 40c if contrarian)
+            # All others: 1-30c
             if is_ncaa:
                 max_no, min_no = 0.25, 0.06
             elif is_nba:
                 max_no, min_no = 0.25, 0.09
-            elif is_contrarian:
-                max_no, min_no = CONTRARIAN_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             else:
                 max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             if no_price < min_no or no_price > max_no:
@@ -1103,8 +1072,6 @@ class MentionBuyNoDetector:
                 'close_ts': close_ts,
                 'volume_24h': volume_24h,
                 'open_interest': open_interest,
-                'is_contrarian': is_contrarian,
-                'contrarian_drop': contrarian_drop,
             })
 
         # Print debug breakdown
@@ -1119,7 +1086,7 @@ class MentionBuyNoDetector:
               f"{debug_counts['price_out_range']} price OOR, "
               f"{debug_counts['cooldown']} cooldown, "
               f"{debug_counts['eligible']} eligible"
-              f"{' (' + str(sum(1 for s in signals if s.get('is_contrarian'))) + ' contrarian)' if any(s.get('is_contrarian') for s in signals) else ''}")
+)
         # Per-category breakdown (only categories with markets)
         for cat_name in ('NCAA', 'NBA', 'Trump', 'Mamdani', 'Other'):
             cd = cat_debug.get(cat_name)
@@ -2193,8 +2160,7 @@ class KalshiReversionScanner:
                     else:
                         time_str = "?"
                     label = "EARNINGS" if is_earn else "MENTION"
-                    ctr_tag = f" [CONTRARIAN drop={sig.get('contrarian_drop', 0)}c]" if sig.get('is_contrarian') else ""
-                    print(f"  {label}: BUY NO @ {no_c}c '{sig['title'][:50]}' ({time_str}, evt_vol={evt_vol:,}){ctr_tag}")
+                    print(f"  {label}: BUY NO @ {no_c}c '{sig['title'][:50]}' ({time_str}, evt_vol={evt_vol:,})")
 
                     if low_balance:
                         continue
@@ -2291,9 +2257,6 @@ class KalshiReversionScanner:
                 max_slip = 4
                 if category == 'NCAA':
                     min_no_c, max_no_c = 10, 25
-                elif sig.get('is_contrarian'):
-                    min_no_c = int(MENTION_MIN_NO_PRICE * 100)
-                    max_no_c = int(CONTRARIAN_MAX_NO_PRICE * 100)
                 else:
                     min_no_c = int(MENTION_MIN_NO_PRICE * 100)
                     max_no_c = int(MENTION_MAX_NO_PRICE * 100)
@@ -3119,14 +3082,11 @@ class KalshiReversionScanner:
             else:
                 maker_cat = 'Newsom'
 
-        is_contrarian = sig.get('is_contrarian', False)
         if is_ncaa:
             ncaa_live_pre = h2e is not None and h2e >= 0
             max_no_c, min_no_c = (25, 10) if ncaa_live_pre else (25, 6)
         elif is_nba:
             max_no_c, min_no_c = 25, 9
-        elif is_contrarian:
-            max_no_c, min_no_c = int(CONTRARIAN_MAX_NO_PRICE * 100), int(MENTION_MIN_NO_PRICE * 100)
         else:
             max_no_c, min_no_c = int(MENTION_MAX_NO_PRICE * 100), int(MENTION_MIN_NO_PRICE * 100)
 
