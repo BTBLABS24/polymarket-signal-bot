@@ -874,6 +874,7 @@ class MentionBuyNoDetector:
                         continue
                 elif is_ncaa:
                     # NCAA: pre 1-24h + live 0.5-1.5h (skip last hour pre + first 0.5h live)
+                    ncaa_skip_count = cat_debug[_cat].get('_logged', 0)
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
@@ -881,17 +882,28 @@ class MentionBuyNoDetector:
                     if hours_to_event < -1.5:
                         debug_counts['too_far'] += 1
                         cat_debug[_cat]['timing'] += 1
+                        if ncaa_skip_count < 3:
+                            print(f"    NCAA timing skip: {ticker} h2e={hours_to_event:.2f}h ({event_ticker})")
+                            cat_debug[_cat]['_logged'] = ncaa_skip_count + 1
                         continue
                     # Skip gap: last 1h pre-event through first 0.5h live
                     if 1 > hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
+                        if ncaa_skip_count < 3:
+                            print(f"    NCAA gap skip: {ticker} h2e={hours_to_event:.2f}h ({event_ticker})")
+                            cat_debug[_cat]['_logged'] = ncaa_skip_count + 1
                         continue
                 elif is_nba:
                     # NBA: live taker 0.5-2h after tipoff
                     if hours_to_event > 0 or hours_to_event < -2:
                         debug_counts['too_far'] += 1
                         cat_debug[_cat]['timing'] += 1
+                        # Log first few NBA timing skips with h2e
+                        nba_skip_count = cat_debug[_cat].get('_logged', 0)
+                        if nba_skip_count < 3:
+                            print(f"    NBA timing skip: {ticker} h2e={hours_to_event:.2f}h ({event_ticker})")
+                            cat_debug[_cat]['_logged'] = nba_skip_count + 1
                         continue
                     if hours_to_event > -0.5:
                         debug_counts['too_early'] += 1
