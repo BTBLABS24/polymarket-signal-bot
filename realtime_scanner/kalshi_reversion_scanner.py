@@ -2720,13 +2720,9 @@ class KalshiReversionScanner:
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
 
-        # --- PRE-EVENT MAKER PATH ---
-        # For NCAA pre-event: place resting NO bid at NO_bid+1c with expiration at event start.
-        # Avoids paying through the wide pre-event spread.
+        # Pre-event maker eligibility: NCAA pre-event can fall back to resting limit orders
         h2e = sig.get('hours_to_event')
         ncaa_pre = is_ncaa and h2e is not None and h2e > PREMARKET_CANCEL_HOURS
-        if ncaa_pre:
-            return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA')
 
         if is_ncaa:
             ncaa_live_pre = h2e is not None and h2e >= 0
@@ -2738,6 +2734,9 @@ class KalshiReversionScanner:
 
         taker_price = best_no_ask
         if taker_price < min_no_c or taker_price > max_no_c:
+            if ncaa_pre:
+                print(f"    NO ask {taker_price}c outside taker range [{min_no_c}-{max_no_c}c], trying maker")
+                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA')
             print(f"    NO ask {taker_price}c outside range [{min_no_c}-{max_no_c}c], skipping")
             log_event('mention_skip_range', ticker=ticker, no_ask_cents=taker_price,
                       min_no_c=min_no_c, max_no_c=max_no_c)
@@ -2754,6 +2753,9 @@ class KalshiReversionScanner:
         max_slip = 2 if is_other else 4
         max_slip_price = no_price_cents + max_slip
         if taker_price > max_slip_price:
+            if ncaa_pre:
+                print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + {max_slip}c, trying maker")
+                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA')
             print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + {max_slip}c, skipping")
             log_event('mention_skip_slippage', ticker=ticker,
                       no_ask_cents=taker_price, signal_cents=no_price_cents)
