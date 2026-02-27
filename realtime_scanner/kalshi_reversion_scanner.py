@@ -773,7 +773,8 @@ class MentionBuyNoDetector:
 
     def __init__(self):
         self.signal_history = {}  # ticker -> last signal timestamp
-        self._market_baselines = {}  # ticker -> first-seen NO price (cents) for contrarian signal
+        self._market_baselines = {}   # ticker -> avg NO price (cents) after first 10 observations
+        self._market_price_buf = {}   # ticker -> list of NO prices (cents), max 10
         self._load()
 
     def _load(self):
@@ -1008,13 +1009,18 @@ class MentionBuyNoDetector:
             no_price_c = int(no_price * 100)
 
             # --- Contrarian baseline tracking ---
-            # Record first-seen NO price; detect 30c+ drops for non-sports
+            # Baseline = avg NO price of first 10 observations; detect 30c+ drops for non-sports
             is_contrarian = False
             contrarian_drop = 0
             is_sport = any(k in ticker_upper for k in CONTRARIAN_EXCLUDED_PREFIXES)
             if not is_sport:
                 if ticker not in self._market_baselines:
-                    self._market_baselines[ticker] = no_price_c
+                    # Still collecting first 10 observations
+                    buf = self._market_price_buf.setdefault(ticker, [])
+                    buf.append(no_price_c)
+                    if len(buf) >= 10:
+                        self._market_baselines[ticker] = sum(buf) / len(buf)
+                        del self._market_price_buf[ticker]
                 else:
                     baseline_c = self._market_baselines[ticker]
                     contrarian_drop = baseline_c - no_price_c
