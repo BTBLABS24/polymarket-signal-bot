@@ -118,6 +118,11 @@ MENTION_SCAN_SERIES = [
     'KXVANCEMENTION',
 ]
 
+# --- NBA Word Blacklist ---
+# Words with <15% NO win rate — almost always said, losing bet at any price.
+# Ticker suffix -> matched against last segment of ticker (e.g. KXNBAMENTION-...-ROOK)
+NBA_WORD_BLACKLIST = {'ROOK', 'INJU', 'CROW', 'ALL'}  # Rookie 3%, Injury 4%, Crowd 11%, All-Star 13%
+
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
 # Buys NO when market is below statistically-derived fair value based on
 # time-into-game degradation curves. Separate from main mention strategy.
@@ -850,8 +855,16 @@ class MentionBuyNoDetector:
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
             _cat = 'NCAA' if is_ncaa else 'NBA' if is_nba else 'Trump' if is_trump else 'Mamdani' if is_mamdani else 'Other'
             if _cat not in cat_debug:
-                cat_debug[_cat] = {'total': 0, 'no_ms': 0, 'timing': 0, 'price': 0, 'cooldown': 0, 'eligible': 0}
+                cat_debug[_cat] = {'total': 0, 'no_ms': 0, 'timing': 0, 'price': 0, 'cooldown': 0, 'blacklist': 0, 'eligible': 0}
             cat_debug[_cat]['total'] += 1
+
+            # NBA word blacklist — skip words almost always said
+            if is_nba:
+                word_suffix = ticker.split('-')[-1].upper()
+                if word_suffix in NBA_WORD_BLACKLIST:
+                    cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                    continue
+
             ms = milestone_map.get(event_ticker)
             if ms:
                 # Skip if milestone end_date has passed (event is over)
@@ -1062,8 +1075,10 @@ class MentionBuyNoDetector:
         for cat_name in ('NCAA', 'NBA', 'Trump', 'Mamdani', 'Other'):
             cd = cat_debug.get(cat_name)
             if cd and cd['total'] > 0:
+                bl = cd.get('blacklist', 0)
+                bl_str = f"{bl} blacklist, " if bl else ""
                 print(f"    {cat_name}: {cd['total']} mkts → "
-                      f"{cd['no_ms']} no_ms, {cd['timing']} timing, "
+                      f"{cd['no_ms']} no_ms, {bl_str}{cd['timing']} timing, "
                       f"{cd['price']} price, {cd['cooldown']} cooldown, "
                       f"{cd['eligible']} eligible")
 
@@ -2731,6 +2746,14 @@ class KalshiReversionScanner:
         immediate fill — avoids adverse selection from passive bids."""
         ticker = sig['ticker']
         no_price_cents = sig['no_price_cents']
+
+        # NBA word blacklist — skip words that are almost always said (<15% NO win rate)
+        ticker_upper = ticker.upper()
+        if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
+            word_suffix = ticker.split('-')[-1].upper()
+            if word_suffix in NBA_WORD_BLACKLIST:
+                print(f"    Blacklisted NBA word: {word_suffix} ({ticker}), skipping")
+                return None
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
