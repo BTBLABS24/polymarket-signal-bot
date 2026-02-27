@@ -2189,7 +2189,7 @@ class KalshiReversionScanner:
             contracts = info['contracts']
             category = info['category']
 
-            # Check if spread has narrowed — someone moving against us
+            # Fetch orderbook — used for taker retry, spread check, outbid
             ob = self.client.get_orderbook(ticker)
             if ob:
                 no_bids = ob.get('no', [])
@@ -2197,6 +2197,35 @@ class KalshiReversionScanner:
                 best_no_bid = max(b[0] for b in no_bids) if no_bids else 0
                 best_no_ask = (100 - max(b[0] for b in yes_bids)) if yes_bids else 99
                 spread = best_no_ask - best_no_bid if best_no_bid > 0 and best_no_ask > 0 else 99
+
+                # --- TAKER RETRY: if ask is now in range, cancel resting and take ---
+                sig = info.get('signal', {})
+                signal_cents = sig.get('no_price_cents', price_cents)
+                max_slip = 4
+                min_no_c, max_no_c = 10, 25  # NCAA pre-event range
+                if (min_no_c <= best_no_ask <= max_no_c
+                        and best_no_ask <= signal_cents + max_slip):
+                    print(f"    PREMARKET→TAKER: {ticker} ask now {best_no_ask}c (in range), cancelling resting @ {price_cents}c")
+                    self.client.cancel_order(order_id)
+                    to_remove.append(order_id)
+                    # Execute taker via the normal path
+                    sig['signal_type'] = 'mention_buy_no'
+                    taker_info = self._execute_mention_entry(sig)
+                    if taker_info:
+                        self.positions.add(sig, taker_info)
+                        await self.notifier.send_order_event(
+                            f"TAKER FILL (was resting {category})", ticker,
+                            price_cents=taker_info.get('fill_price', best_no_ask) * 100 if isinstance(taker_info.get('fill_price'), float) else best_no_ask,
+                            contracts=taker_info.get('fill_count', 0),
+                            bet_dollars=taker_info.get('bet_dollars', 0),
+                            title=sig.get('title', '')[:60],
+                            extra=f"Was resting @ {price_cents}c, taker filled @ {best_no_ask}c")
+                        log_event('premarket_taker_upgrade', ticker=ticker,
+                                  old_order=order_id, resting_price=price_cents,
+                                  taker_ask=best_no_ask, category=category)
+                    continue
+
+                # Check if spread has narrowed too much
                 if spread < PREMARKET_MIN_SPREAD:
                     print(f"    PREMARKET CANCEL: {ticker} spread narrowed to {spread}c (<{PREMARKET_MIN_SPREAD}c), cancelling")
                     self.client.cancel_order(order_id)
