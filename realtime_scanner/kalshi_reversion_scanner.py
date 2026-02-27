@@ -2202,7 +2202,11 @@ class KalshiReversionScanner:
                 sig = info.get('signal', {})
                 signal_cents = sig.get('no_price_cents', price_cents)
                 max_slip = 4
-                min_no_c, max_no_c = 10, 25  # NCAA pre-event range
+                if category == 'NCAA':
+                    min_no_c, max_no_c = 10, 25
+                else:
+                    min_no_c = int(MENTION_MIN_NO_PRICE * 100)
+                    max_no_c = int(MENTION_MAX_NO_PRICE * 100)
                 if (min_no_c <= best_no_ask <= max_no_c
                         and best_no_ask <= signal_cents + max_slip):
                     print(f"    PREMARKET→TAKER: {ticker} ask now {best_no_ask}c (in range), cancelling resting @ {price_cents}c")
@@ -2609,8 +2613,13 @@ class KalshiReversionScanner:
             # No NO bids — place at half the ask
             resting_price = max(best_no_ask // 2, 1)
 
-        # Validate price is in range (10-25c for NCAA pre-event)
-        min_no_c, max_no_c = 10, 25
+        # Validate price is in category range
+        if category == 'NCAA':
+            min_no_c, max_no_c = 10, 25
+        else:
+            # Trump, Mamdani, Newsom: use default mention range
+            min_no_c = int(MENTION_MIN_NO_PRICE * 100)
+            max_no_c = int(MENTION_MAX_NO_PRICE * 100)
         if resting_price < min_no_c or resting_price > max_no_c:
             print(f"    Maker price {resting_price}c outside range [{min_no_c}-{max_no_c}c] (bid={best_no_bid}c, ask={best_no_ask}c), skipping")
             return None
@@ -2749,9 +2758,22 @@ class KalshiReversionScanner:
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
 
-        # Pre-event maker eligibility: NCAA pre-event can fall back to resting limit orders
+        # Pre-event maker eligibility: pre-event categories can fall back to resting limit orders
         h2e = sig.get('hours_to_event')
-        ncaa_pre = is_ncaa and h2e is not None and h2e > PREMARKET_CANCEL_HOURS
+        is_trump = 'TRUMPMENTION' in ticker_upper
+        is_mamdani = 'MAMDANIMENTION' in ticker_upper
+        is_newsom = 'NEWSOMMENTION' in ticker_upper
+        pre_event = h2e is not None and h2e > PREMARKET_CANCEL_HOURS
+        can_rest_maker = pre_event and (is_ncaa or is_trump or is_mamdani or is_newsom)
+        if can_rest_maker:
+            if is_ncaa:
+                maker_cat = 'NCAA'
+            elif is_trump:
+                maker_cat = 'Trump'
+            elif is_mamdani:
+                maker_cat = 'Mamdani'
+            else:
+                maker_cat = 'Newsom'
 
         if is_ncaa:
             ncaa_live_pre = h2e is not None and h2e >= 0
@@ -2763,9 +2785,9 @@ class KalshiReversionScanner:
 
         taker_price = best_no_ask
         if taker_price < min_no_c or taker_price > max_no_c:
-            if ncaa_pre:
-                print(f"    NO ask {taker_price}c outside taker range [{min_no_c}-{max_no_c}c], trying maker")
-                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA')
+            if can_rest_maker:
+                print(f"    NO ask {taker_price}c outside taker range [{min_no_c}-{max_no_c}c], trying maker [{maker_cat}]")
+                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
             print(f"    NO ask {taker_price}c outside range [{min_no_c}-{max_no_c}c], skipping")
             log_event('mention_skip_range', ticker=ticker, no_ask_cents=taker_price,
                       min_no_c=min_no_c, max_no_c=max_no_c)
@@ -2782,9 +2804,9 @@ class KalshiReversionScanner:
         max_slip = 2 if is_other else 4
         max_slip_price = no_price_cents + max_slip
         if taker_price > max_slip_price:
-            if ncaa_pre:
-                print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + {max_slip}c, trying maker")
-                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA')
+            if can_rest_maker:
+                print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + {max_slip}c, trying maker [{maker_cat}]")
+                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
             print(f"    Slippage: ask {taker_price}c > signal {no_price_cents}c + {max_slip}c, skipping")
             log_event('mention_skip_slippage', ticker=ticker,
                       no_ask_cents=taker_price, signal_cents=no_price_cents)
