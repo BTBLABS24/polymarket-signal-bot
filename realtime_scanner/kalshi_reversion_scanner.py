@@ -970,14 +970,14 @@ class MentionBuyNoDetector:
                 continue
 
             no_price = 1 - yes_price
-            # Per-category price ranges (taker):
-            # NCAA live 0.5-1.5h: 6-25c (backtest: +151% ROI, t=9.13)
-            # NBA live 0.5-2h: 9-25c (backtest: +113% ROI, t=11.79)
-            # All others: 5-30c
+            # Per-category price ranges — must match execution ranges:
+            # NCAA pre 1-24h: 10-25c, live 0.5-1.5h: 6-25c → signal uses 6-25c
+            # NBA live 0.5-2h: 9-25c
+            # All others: 1-30c
             if is_ncaa:
                 max_no, min_no = 0.25, 0.06
             elif is_nba:
-                max_no, min_no = 0.30, 0.15
+                max_no, min_no = 0.25, 0.09
             else:
                 max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             if no_price < min_no or no_price > max_no:
