@@ -983,8 +983,11 @@ class MentionBuyNoDetector:
             if no_price < min_no or no_price > max_no:
                 debug_counts['price_out_range'] += 1
                 cat_debug[_cat]['price'] += 1
-                if is_nba and hours_to_event is not None and hours_to_event > 0.5:
-                    print(f"    NBA SKIP price_OOR: {ticker} no={no_price:.2f} range=[{min_no:.2f}-{max_no:.2f}] h2e={hours_to_event:.1f}h")
+                # Log first 5 price-OOR per category
+                if cat_debug[_cat].get('_price_logged', 0) < 5:
+                    h2e_str = f"{hours_to_event:.2f}h" if hours_to_event is not None else "?"
+                    print(f"    {_cat} price_OOR: {ticker} no={no_price:.2f} [{min_no:.2f}-{max_no:.2f}] h2e={h2e_str}")
+                    cat_debug[_cat]['_price_logged'] = cat_debug[_cat].get('_price_logged', 0) + 1
                 continue
 
             # Cooldown check — 24h per ticker
@@ -992,6 +995,10 @@ class MentionBuyNoDetector:
             if now_ts - last_signal < 24 * 3600:
                 debug_counts['cooldown'] += 1
                 cat_debug[_cat]['cooldown'] += 1
+                if cat_debug[_cat].get('_cd_logged', 0) < 3:
+                    ago_h = (now_ts - last_signal) / 3600
+                    print(f"    {_cat} cooldown: {ticker} (traded {ago_h:.1f}h ago)")
+                    cat_debug[_cat]['_cd_logged'] = cat_debug[_cat].get('_cd_logged', 0) + 1
                 continue
 
             debug_counts['eligible'] += 1
