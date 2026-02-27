@@ -1873,7 +1873,7 @@ class KalshiReversionScanner:
         self._degrade_bucket_placed = {}  # ticker -> set of hh_keys already bet on
         self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
         self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
-        self._resting_premarket_orders = {}  # DEPRECATED — will be cleaned up on first run
+        self._resting_premarket_orders = {}  # order_id -> {ticker, price_cents, contracts, bet_dollars, placed_ts, category, signal}
         self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
 
     def _queue_tg(self, event_type, ticker, **kwargs):
@@ -1952,6 +1952,10 @@ class KalshiReversionScanner:
                 print(f"  Low balance: ${bal/100:.2f} — skipping new orders, waiting for fills/settlements")
                 log_event('low_balance', balance_cents=bal)
                 low_balance = True
+
+        # Check resting pre-event limit orders for fills / expiry
+        if self._resting_premarket_orders:
+            await self._check_resting_premarket_orders()
 
         # Mention BUY NO scan
         mention_count = self.positions.count('mention_buy_no')
@@ -2154,6 +2158,8 @@ class KalshiReversionScanner:
             parts.append(f"degrade={degrade_count}")
         if earnings_count:
             parts.append(f"earnings={earnings_count}")
+        if self._resting_premarket_orders:
+            parts.append(f"resting={len(self._resting_premarket_orders)}")
         print(f"  Open positions: {self.positions.count()} ({', '.join(parts)}, {self.positions.live_count()} live)")
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
@@ -2547,6 +2553,141 @@ class KalshiReversionScanner:
         log_event('degrade_taker_unfilled', ticker=ticker, order_id=order_id)
         return None
 
+    def _execute_premarket_maker(self, sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA'):
+        """Place a resting NO buy limit order for pre-event markets.
+        Price: NO bid + 1c (inside spread). Expiration: event start time.
+        Returns None — fill is detected later by _check_resting_premarket_orders."""
+        ticker = sig['ticker']
+        no_price_cents = sig['no_price_cents']
+        event_start_ts = sig.get('event_start_ts')
+
+        # Skip if we already have a resting order on this ticker
+        for info in self._resting_premarket_orders.values():
+            if info['ticker'] == ticker:
+                print(f"    Already have resting order for {ticker}, skipping")
+                return None
+
+        # Get best NO bid from orderbook
+        no_bids_raw = orderbook.get('no', [])
+        if not isinstance(no_bids_raw, list):
+            no_bids_raw = []
+        best_no_bid = max(b[0] for b in no_bids_raw) if no_bids_raw else 0
+
+        # Place at NO bid + 1c (penny inside the spread)
+        if best_no_bid > 0:
+            resting_price = best_no_bid + 1
+        else:
+            # No NO bids — place at half the ask
+            resting_price = max(best_no_ask // 2, 1)
+
+        # Validate price is in range (10-25c for NCAA pre-event)
+        min_no_c, max_no_c = 10, 25
+        if resting_price < min_no_c or resting_price > max_no_c:
+            print(f"    Maker price {resting_price}c outside range [{min_no_c}-{max_no_c}c] (bid={best_no_bid}c, ask={best_no_ask}c), skipping")
+            return None
+
+        spread = best_no_ask - best_no_bid if best_no_bid > 0 else best_no_ask
+        if spread < PREMARKET_MIN_SPREAD:
+            print(f"    Spread {spread}c too narrow (<{PREMARKET_MIN_SPREAD}c), skipping maker — taker may be better")
+            return None
+
+        # Bet sizing (same logic as taker path)
+        ticker_upper = ticker.upper()
+        is_other = not any(k in ticker_upper for k in (
+            'TRUMPMENTION', 'MAMDANIMENTION', 'NEWSOMMENTION',
+            'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION',
+            'VANCEMENTION',
+        ))
+        mention_bet = MENTION_BET_OTHER if is_other else MENTION_BET_DOLLARS
+
+        # New/unknown series cap
+        event_ticker = sig.get('event_ticker', '')
+        series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
+        if series not in MENTION_SCAN_SERIES:
+            resolved = getattr(self.client, '_series_resolved_counts', {}).get(series, 0)
+            if resolved < PREMARKET_NEW_SERIES_MIN:
+                mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
+
+        mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
+
+        # Per-market exposure check
+        ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
+                         if p.get('ticker') == ticker and p.get('status') == 'open')
+        remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp
+        if remaining_market_cap <= 0:
+            return None
+        mention_bet = min(mention_bet, remaining_market_cap)
+
+        # Per-event exposure cap
+        if event_ticker:
+            event_exp = self.positions.event_exposure(event_ticker, signal_type='mention_buy_no')
+            remaining_cap = MENTION_MAX_EVENT_DOLLARS - event_exp
+            if remaining_cap <= 0:
+                return None
+            mention_bet = min(mention_bet, remaining_cap)
+
+        contracts = int(mention_bet / (resting_price / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * resting_price / 100, 2)
+
+        h2e = sig.get('hours_to_event', 0)
+        print(f"    Maker: {contracts} NO @ {resting_price}c (bid={best_no_bid}c ask={best_no_ask}c spread={spread}c) "
+              f"${bet_dollars:.2f} exp={event_start_ts} h2e={h2e:.1f}h [{category}]")
+
+        if DRY_RUN:
+            order_id = f'DRY-MKR-{uuid.uuid4().hex[:8]}'
+            self._resting_premarket_orders[order_id] = {
+                'ticker': ticker, 'price_cents': resting_price,
+                'contracts': contracts, 'bet_dollars': bet_dollars,
+                'placed_ts': time.time(), 'category': category,
+                'signal': sig,
+            }
+            self.trade_logger.record({
+                'type': 'maker_placed', 'strategy': 'mention_buy_no',
+                'ticker': ticker, 'side': 'no', 'action': 'buy',
+                'contracts': contracts, 'price_cents': resting_price,
+                'bet_dollars': bet_dollars, 'dry_run': True,
+                'expiration_ts': event_start_ts,
+            })
+            self.mention_detector.signal_history[ticker] = time.time()
+            self.mention_detector._save()
+            print(f"    DRY RUN MAKER: resting {contracts} NO @ {resting_price}c (${bet_dollars:.2f})")
+            # Return None — position added when fill detected
+            return None
+
+        order = self.client.create_order(
+            ticker=ticker, side='no', action='buy',
+            count=contracts, price_cents=resting_price,
+            expiration_ts=event_start_ts,
+        )
+        if not order:
+            print(f"    Maker order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        self._resting_premarket_orders[order_id] = {
+            'ticker': ticker, 'price_cents': resting_price,
+            'contracts': contracts, 'bet_dollars': bet_dollars,
+            'placed_ts': time.time(), 'category': category,
+            'signal': sig,
+        }
+        self.mention_detector.signal_history[ticker] = time.time()
+        self.mention_detector._save()
+
+        print(f"    MAKER RESTING: {order_id} {contracts} NO @ {resting_price}c (${bet_dollars:.2f}) expires at event start")
+        log_event('premarket_maker_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=resting_price, bet_dollars=bet_dollars,
+                  category=category, hours_to_event=h2e,
+                  no_bid=best_no_bid, no_ask=best_no_ask, spread=spread,
+                  expiration_ts=event_start_ts)
+        self._queue_tg(f"MAKER RESTING ({category})", ticker,
+                       price_cents=resting_price, contracts=contracts, bet_dollars=bet_dollars,
+                       title=sig.get('title', '')[:60])
+
+        # Return None — fill is detected asynchronously by _check_resting_premarket_orders
+        return None
+
     def _execute_mention_entry(self, sig):
         """Execute a mention BUY NO entry. Taker order at the ask for
         immediate fill — avoids adverse selection from passive bids."""
@@ -2579,10 +2720,17 @@ class KalshiReversionScanner:
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
 
+        # --- PRE-EVENT MAKER PATH ---
+        # For NCAA pre-event: place resting NO bid at NO_bid+1c with expiration at event start.
+        # Avoids paying through the wide pre-event spread.
+        h2e = sig.get('hours_to_event')
+        ncaa_pre = is_ncaa and h2e is not None and h2e > PREMARKET_CANCEL_HOURS
+        if ncaa_pre:
+            return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA')
+
         if is_ncaa:
-            h2e = sig.get('hours_to_event')
-            ncaa_pre = h2e is not None and h2e >= 0
-            max_no_c, min_no_c = (25, 10) if ncaa_pre else (25, 6)
+            ncaa_live_pre = h2e is not None and h2e >= 0
+            max_no_c, min_no_c = (25, 10) if ncaa_live_pre else (25, 6)
         elif is_nba:
             max_no_c, min_no_c = 25, 9
         else:
