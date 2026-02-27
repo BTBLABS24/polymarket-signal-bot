@@ -168,21 +168,25 @@ DEGRADE_BUY_BELOW = {
 }
 
 # --- Earnings Mention Strategy ---
-# Buy NO on earnings call mention markets 0-30min before call.
-# Corrected backtest (fix side=no price bug): -2% ROI — not worth it.
+# Buy NO on earnings call mention markets.
+# Original 0-0.5h window: +9% ROI (thin edge). Wider 0-24h: +25.5% ROI.
+# With word blacklist (0% WR words removed): +23.6% ROI on 1106 markets.
 EARNINGS_ENABLED = False
-EARNINGS_BET_DOLLARS = 20
+EARNINGS_BET_DOLLARS = 5         # $5/bet while validating
 EARNINGS_MIN_NO_PRICE = 0.05     # 5c
 EARNINGS_MAX_NO_PRICE = 0.30     # 30c
 EARNINGS_MAX_POSITIONS = 20      # independent cap
-EARNINGS_MAX_EVENT_DOLLARS = 99999  # no event cap
-# Entry window: 0-30min before earnings call (pre-event taker)
-EARNINGS_WINDOW_HOURS_BEFORE = 0.5  # 30 min before event
+EARNINGS_MAX_EVENT_DOLLARS = 30  # $30 per earnings call
+# Entry window: 0-4h before earnings call
+# 0-4h: +13.5% ROI (896 mkts), 0-24h: +31.9% (1163 mkts, but thin fills 8-24h out)
+EARNINGS_WINDOW_HOURS_BEFORE = 4  # 4h before event
 # Hot words to exclude — too common/misleading on earnings calls
-EARNINGS_EXCLUDED_WORDS = {
-    'ACQU', 'AI', 'BLOC', 'COMP', 'DELI', 'DIVI', 'HOLI',
-    'INFL', 'INTE', 'OPEN', 'REGU', 'RETE', 'TOKE',
+# 0% NO WR words: INTE, TOKE, GUID, RETE, OPEN, DELI, WAYM, LOYA, DIGI, OMNI, EXPN
+EARNINGS_WORD_BLACKLIST = {
+    'INTE', 'TOKE', 'GUID', 'RETE', 'OPEN', 'DELI',
+    'WAYM', 'LOYA', 'DIGI', 'OMNI', 'EXPN',
 }
+EARNINGS_EXCLUDED_WORDS = EARNINGS_WORD_BLACKLIST  # legacy alias
 
 # State files
 STATE_DIR = Path(__file__).parent
@@ -882,6 +886,9 @@ class MentionBuyNoDetector:
                 cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                 continue
             if is_ncaa and word_suffix in NCAAB_WORD_BLACKLIST:
+                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                continue
+            if is_earnings and word_suffix in EARNINGS_WORD_BLACKLIST:
                 cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                 continue
 
@@ -3047,6 +3054,9 @@ class KalshiReversionScanner:
         if ('NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper) and word_suffix in NCAAB_WORD_BLACKLIST:
             print(f"    Blacklisted NCAAB word: {word_suffix} ({ticker}), skipping")
             return None
+        if 'EARNINGS' in ticker_upper and word_suffix in EARNINGS_WORD_BLACKLIST:
+            print(f"    Blacklisted earnings word: {word_suffix} ({ticker}), skipping")
+            return None
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
@@ -3275,6 +3285,12 @@ class KalshiReversionScanner:
         immediate fill — avoids adverse selection from passive bids."""
         ticker = sig['ticker']
         no_price_cents = sig['no_price_cents']
+
+        # Earnings word blacklist
+        word_suffix = ticker.split('-')[-1].upper()
+        if word_suffix in EARNINGS_WORD_BLACKLIST:
+            print(f"    Blacklisted earnings word: {word_suffix} ({ticker}), skipping")
+            return None
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
