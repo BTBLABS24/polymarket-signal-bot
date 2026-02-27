@@ -123,6 +123,19 @@ MENTION_SCAN_SERIES = [
 # Ticker suffix -> matched against last segment of ticker (e.g. KXNBAMENTION-...-ROOK)
 NBA_WORD_BLACKLIST = {'ROOK', 'INJU', 'CROW', 'ALL'}  # Rookie 3%, Injury 4%, Crowd 11%, All-Star 13%
 
+# --- NBA YES Buy Strategy ---
+# Buy YES on words that are almost always said. Entry: pre-game to 30min into game.
+# Max YES price = win_rate * 100 / 1.20 (20% ROI threshold), capped at 50c.
+NBA_YES_BUY_WORDS = {
+    'INJU': 50,   # Injury 96% YES WR, max=80c, target <=50c
+    'ROOK': 50,   # Rookie 97% YES WR, max=81c, target <=50c
+    'ALL':  50,   # All-Star 87% YES WR, max=73c, target <=50c
+    'CROW': 50,   # Crowd 89% YES WR, max=74c, target <=50c
+}
+NBA_YES_BET_DOLLARS = 5          # $5/bet while validating
+NBA_YES_MAX_POSITIONS = 20       # independent cap
+NBA_YES_MAX_EVENT_DOLLARS = 20   # per-event cap
+
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
 # Buys NO when market is below statistically-derived fair value based on
 # time-into-game degradation curves. Separate from main mention strategy.
@@ -1330,12 +1343,21 @@ class KalshiPositionTracker:
                 result = market.get('result', '')
                 fill_price = pos.get('fill_price', pos.get('no_price', 0))
                 fill_count = pos.get('fill_count', 0)
+                is_yes_buy = pos.get('signal_type') == 'mention_buy_yes'
 
-                if result == 'no':
-                    # NO won — we profit
+                if is_yes_buy:
+                    # YES-buy position: wins when result='yes'
+                    if result == 'yes':
+                        pnl = fill_count * (1 - fill_price)
+                    elif result == 'no':
+                        pnl = -(fill_count * fill_price)
+                    else:
+                        pnl = 0
+                elif result == 'no':
+                    # NO-buy position: wins when result='no'
                     pnl = fill_count * (1 - fill_price)
                 elif result == 'yes':
-                    # YES won — we lose our cost
+                    # NO-buy position: loses when result='yes'
                     pnl = -(fill_count * fill_price)
                 else:
                     pnl = 0
@@ -1758,14 +1780,13 @@ class KalshiNotifier:
         await self._send(msg)
 
     async def send_daily_summary(self, closed_positions):
-        """Send daily P&L summary for bot mention trades (NO fill 5-30c)."""
+        """Send daily P&L summary for bot mention trades (NO 5-30c + YES buys)."""
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-        # Filter: mention trades settled today, NO fill price 5-30c
+        # Filter: mention trades settled today
         todays = []
         for pos in closed_positions:
-            if pos.get('signal_type') != 'mention_buy_no':
-                continue
+            sig_type = pos.get('signal_type', '')
             close_ts = pos.get('close_time')
             if not close_ts:
                 continue
@@ -1773,7 +1794,13 @@ class KalshiNotifier:
             if close_date != today:
                 continue
             fill_price = pos.get('fill_price', 0)
-            if fill_price < 0.05 or fill_price > 0.30:
+            if sig_type == 'mention_buy_no':
+                if fill_price < 0.05 or fill_price > 0.30:
+                    continue
+            elif sig_type == 'mention_buy_yes':
+                if fill_price < 0.05 or fill_price > 0.50:
+                    continue
+            else:
                 continue
             todays.append(pos)
 
@@ -1804,10 +1831,12 @@ class KalshiNotifier:
         wr = len(wins) / n * 100 if n > 0 else 0
         roi = total_pnl / total_cost * 100 if total_cost > 0 else 0
 
-        # Cumulative: all-time bot mention trades (NO 5-30c)
+        # Cumulative: all-time bot mention trades (NO 5-30c + YES 5-50c)
         all_bot = [p for p in closed_positions
-                   if p.get('signal_type') == 'mention_buy_no'
-                   and 0.05 <= p.get('fill_price', 0) <= 0.30]
+                   if (p.get('signal_type') == 'mention_buy_no'
+                       and 0.05 <= p.get('fill_price', 0) <= 0.30)
+                   or (p.get('signal_type') == 'mention_buy_yes'
+                       and 0.05 <= p.get('fill_price', 0) <= 0.50)]
         cum_pnl = sum(p.get('settle_pnl', 0) for p in all_bot)
         cum_cost = sum(p.get('fill_count', 0) * p.get('fill_price', 0) for p in all_bot)
         cum_roi = cum_pnl / cum_cost * 100 if cum_cost > 0 else 0
@@ -2150,6 +2179,9 @@ class KalshiReversionScanner:
                 # 3b. Degradation curve strategy (NBA, paused)
                 if DEGRADE_ENABLED:
                     await self._scan_degradation_curve(mention_markets, milestones, now)
+
+                # 3c. YES-buy strategy: buy YES on always-said NBA words
+                await self._scan_yes_buys(mention_markets, milestones, now)
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
@@ -2168,7 +2200,10 @@ class KalshiReversionScanner:
         mention_count = self.positions.count('mention_buy_no')
         degrade_count = self.positions.count('degrade_buy_no')
         earnings_count = self.positions.count('earnings_buy_no')
+        yes_buy_count = self.positions.count('mention_buy_yes')
         parts = [f"mention={mention_count}"]
+        if yes_buy_count:
+            parts.append(f"yes_buy={yes_buy_count}")
         if degrade_count:
             parts.append(f"degrade={degrade_count}")
         if earnings_count:
@@ -2599,6 +2634,252 @@ class KalshiReversionScanner:
             pass
         print(f"    DEGRADE taker not filled for {ticker}, canceled")
         log_event('degrade_taker_unfilled', ticker=ticker, order_id=order_id)
+        return None
+
+    # ------------------------------------------------------------------
+    # YES-buy strategy: buy YES on always-said NBA words (cheap YES)
+    # ------------------------------------------------------------------
+    async def _scan_yes_buys(self, mention_markets, milestones, now):
+        """Scan NBA mention markets for cheap YES on words that are almost always
+        said (Injury, Rookie, All-Star, Crowd).  Runs independently of the
+        main mention (NO) strategy and the degradation strategy."""
+        yes_count = self.positions.count('mention_buy_yes')
+        if yes_count >= NBA_YES_MAX_POSITIONS:
+            return
+
+        nba_markets = [m for m in mention_markets
+                       if m.get('status') in ('open', 'active')
+                       and ('NBAMENTION' in m.get('ticker', '').upper()
+                            or 'NBAFINALS' in m.get('ticker', '').upper())]
+        if not nba_markets:
+            return
+
+        skip_reasons = {'no_word': 0, 'no_milestone': 0, 'too_early': 0,
+                        'too_late': 0, 'ended': 0, 'said': 0, 'no_price': 0,
+                        'too_expensive': 0, 'event_cap': 0, 'already_pos': 0}
+        signals = []
+        for m in nba_markets:
+            ticker = m.get('ticker', '')
+            event_ticker = m.get('event_ticker', '')
+
+            # Extract word suffix
+            parts = ticker.split('-')
+            if len(parts) < 3:
+                continue
+            word = parts[-1].upper()
+            if word not in NBA_YES_BUY_WORDS:
+                skip_reasons['no_word'] += 1
+                continue
+
+            max_yes_c = NBA_YES_BUY_WORDS[word]
+
+            # Check milestone / timing
+            ms = milestones.get(event_ticker)
+            if not ms or not ms.get('start_ts'):
+                skip_reasons['no_milestone'] += 1
+                continue
+            hours_to_event = (ms['start_ts'] - now) / 3600
+            # Entry window: pre-game up to 30min into game
+            if hours_to_event > 24:
+                skip_reasons['too_early'] += 1
+                continue
+            if hours_to_event < -0.5:
+                skip_reasons['too_late'] += 1
+                continue
+            # Don't bet after game ended
+            if ms.get('end_ts') and ms['end_ts'] <= now:
+                skip_reasons['ended'] += 1
+                continue
+
+            # Get YES price estimate from market data
+            yes_price = None
+            yes_bid = m.get('yes_bid')
+            yes_ask = m.get('yes_ask')
+            if yes_bid is not None and yes_ask is not None:
+                try:
+                    yes_price = (int(yes_bid) + int(yes_ask)) / 2 / 100
+                except (ValueError, TypeError):
+                    pass
+            if yes_price is None:
+                last = m.get('last_price')
+                if last is not None:
+                    try:
+                        yes_price = int(last) / 100
+                    except (ValueError, TypeError):
+                        pass
+            if yes_price is None:
+                skip_reasons['no_price'] += 1
+                continue
+
+            yes_price_cents = round(yes_price * 100)
+
+            # Word already said? (YES >= 90c) — no edge left
+            if yes_price >= 0.90:
+                skip_reasons['said'] += 1
+                continue
+
+            # Check price affordable
+            if yes_price_cents > max_yes_c:
+                skip_reasons['too_expensive'] += 1
+                continue
+
+            # Per-event cap (YES strategy only)
+            if event_ticker:
+                event_exp = self.positions.event_exposure(event_ticker, signal_type='mention_buy_yes')
+                if event_exp >= NBA_YES_MAX_EVENT_DOLLARS:
+                    skip_reasons['event_cap'] += 1
+                    continue
+
+            # Skip if already holding this ticker
+            if any(p.get('ticker') == ticker for p in self.positions.positions
+                   if p.get('signal_type') == 'mention_buy_yes'):
+                skip_reasons['already_pos'] += 1
+                continue
+
+            signals.append({
+                'ticker': ticker,
+                'event_ticker': event_ticker,
+                'title': m.get('title', ''),
+                'yes_price': yes_price,
+                'yes_price_cents': yes_price_cents,
+                'max_yes_cents': max_yes_c,
+                'word': word,
+                'hours_to_event': round(hours_to_event, 2),
+                'signal_type': 'mention_buy_yes',
+                'signal_time': datetime.now(timezone.utc).isoformat(),
+            })
+
+        active_skips = {k: v for k, v in skip_reasons.items() if v > 0}
+        if signals or active_skips:
+            print(f"  YES-BUY scan: {len(signals)} signals from {len(nba_markets)} NBA mkts, "
+                  f"{yes_count}/{NBA_YES_MAX_POSITIONS} pos, skips: {active_skips}")
+
+        for sig in signals:
+            if yes_count >= NBA_YES_MAX_POSITIONS:
+                print(f"    YES-BUY CAP: {yes_count}/{NBA_YES_MAX_POSITIONS}, stopping")
+                break
+            print(f"  YES-BUY: {sig['word']} YES ~{sig['yes_price_cents']}c <= {sig['max_yes_cents']}c "
+                  f"h2e={sig['hours_to_event']:.1f}h '{sig['title'][:40]}'")
+
+            order_info = None
+            if self.client.can_trade:
+                order_info = self._execute_yes_entry(sig)
+
+            if order_info:
+                await self.notifier.send_mention_signal(sig, order_info)
+                self.positions.add(sig, order_info)
+                yes_count += 1
+
+    def _execute_yes_entry(self, sig):
+        """Execute a YES buy on an always-said NBA word.  Taker order: buy YES
+        at the ask, capped at max_yes_cents from NBA_YES_BUY_WORDS."""
+        ticker = sig['ticker']
+        max_yes_c = sig['max_yes_cents']
+
+        orderbook = self.client.get_orderbook(ticker)
+        if not orderbook:
+            print(f"    YES-BUY: no orderbook for {ticker}, skipping")
+            return None
+
+        # Best YES ask = lowest offer to sell YES
+        # In Kalshi, YES ask = 100 - best NO bid
+        no_bids_raw = orderbook.get('no', [])
+        if not isinstance(no_bids_raw, list):
+            no_bids_raw = []
+        best_yes_ask = None
+        if no_bids_raw:
+            best_yes_ask = 100 - max(b[0] for b in no_bids_raw)
+
+        if best_yes_ask is None or best_yes_ask < 1:
+            print(f"    YES-BUY: no YES ask for {ticker} (no NO bids), skipping")
+            return None
+
+        if best_yes_ask > max_yes_c:
+            print(f"    YES-BUY: ask {best_yes_ask}c > max {max_yes_c}c, skipping")
+            return None
+
+        taker_price = best_yes_ask
+        contracts = int(NBA_YES_BET_DOLLARS / (taker_price / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * taker_price / 100, 2)
+
+        print(f"    YES-BUY taker: {contracts} YES @ {taker_price}c = ${bet_dollars:.2f}")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-YES-{uuid.uuid4().hex[:8]}',
+                'fill_price': taker_price / 100,
+                'fill_count': contracts,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'mention_buy_yes',
+                'ticker': ticker, 'side': 'yes', 'action': 'buy',
+                'contracts': contracts, 'price_cents': taker_price,
+                'bet_dollars': bet_dollars, 'dry_run': True,
+            })
+            print(f"    YES-BUY DRY RUN: {contracts} YES @ {taker_price}c (${bet_dollars:.2f})")
+            return order_info
+
+        order = self.client.create_order(
+            ticker=ticker, side='yes', action='buy',
+            count=contracts, price_cents=taker_price,
+        )
+        if not order:
+            print(f"    YES-BUY: order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    YES-BUY placed: {order_id} ({contracts} YES @ {taker_price}c, ${bet_dollars:.2f})")
+        log_event('yes_buy_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=taker_price, bet_dollars=bet_dollars,
+                  word=sig.get('word'), hours_to_event=sig.get('hours_to_event'))
+
+        # Taker — should fill instantly
+        time.sleep(2)
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', taker_price)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'mention_buy_yes',
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'yes', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': taker_price,
+                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                })
+                print(f"    YES-BUY FILLED: {filled}/{contracts} YES @ avg {avg_fill}c (${actual_dollars:.2f})")
+                log_event('yes_buy_filled', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
+                self._queue_tg("YES-BUY FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                               title=sig.get('title', '')[:60])
+                return info
+
+        # Not filled — cancel
+        try:
+            self.client.cancel_order(order_id)
+        except Exception:
+            pass
+        print(f"    YES-BUY taker not filled for {ticker}, canceled")
+        log_event('yes_buy_unfilled', ticker=ticker, order_id=order_id)
         return None
 
     def _execute_premarket_maker(self, sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA'):
