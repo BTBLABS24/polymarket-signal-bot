@@ -123,6 +123,11 @@ MENTION_SCAN_SERIES = [
 # Ticker suffix -> matched against last segment of ticker (e.g. KXNBAMENTION-...-ROOK)
 NBA_WORD_BLACKLIST = {'ROOK', 'INJU', 'CROW', 'ALL'}  # Rookie 3%, Injury 4%, Crowd 11%, All-Star 13%
 
+# --- NCAAB Word Blacklist ---
+# Words with <20% NO win rate — almost always said, losing bet at any price.
+# Freshman 0% NO WR (33 trades), Safety 3% (32 trades), Transfer 17% (76 trades)
+NCAAB_WORD_BLACKLIST = {'FRES', 'SAFE', 'TRAN'}
+
 # --- NBA YES Buy Strategy ---
 # Buy YES on words that are almost always said. Entry: pre-game to 30min into game.
 # Max YES price = win_rate * 100 / 1.20 (20% ROI threshold), capped at 50c.
@@ -871,12 +876,14 @@ class MentionBuyNoDetector:
                 cat_debug[_cat] = {'total': 0, 'no_ms': 0, 'timing': 0, 'price': 0, 'cooldown': 0, 'blacklist': 0, 'eligible': 0}
             cat_debug[_cat]['total'] += 1
 
-            # NBA word blacklist — skip words almost always said
-            if is_nba:
-                word_suffix = ticker.split('-')[-1].upper()
-                if word_suffix in NBA_WORD_BLACKLIST:
-                    cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
-                    continue
+            # Word blacklist — skip words almost always said
+            word_suffix = ticker.split('-')[-1].upper()
+            if is_nba and word_suffix in NBA_WORD_BLACKLIST:
+                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                continue
+            if is_ncaa and word_suffix in NCAAB_WORD_BLACKLIST:
+                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                continue
 
             ms = milestone_map.get(event_ticker)
             if ms:
@@ -3031,13 +3038,15 @@ class KalshiReversionScanner:
         ticker = sig['ticker']
         no_price_cents = sig['no_price_cents']
 
-        # NBA word blacklist — skip words that are almost always said (<15% NO win rate)
+        # Word blacklist — skip words that are almost always said (<20% NO win rate)
         ticker_upper = ticker.upper()
-        if 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper:
-            word_suffix = ticker.split('-')[-1].upper()
-            if word_suffix in NBA_WORD_BLACKLIST:
-                print(f"    Blacklisted NBA word: {word_suffix} ({ticker}), skipping")
-                return None
+        word_suffix = ticker.split('-')[-1].upper()
+        if ('NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper) and word_suffix in NBA_WORD_BLACKLIST:
+            print(f"    Blacklisted NBA word: {word_suffix} ({ticker}), skipping")
+            return None
+        if ('NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper) and word_suffix in NCAAB_WORD_BLACKLIST:
+            print(f"    Blacklisted NCAAB word: {word_suffix} ({ticker}), skipping")
+            return None
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
