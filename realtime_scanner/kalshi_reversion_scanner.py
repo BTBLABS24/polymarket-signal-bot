@@ -1014,12 +1014,12 @@ class MentionBuyNoDetector:
 
             # Per-category price ranges — must match execution ranges:
             # NCAA pre 1-24h: 10-25c, live 0.5-1.5h: 6-25c → signal uses 6-25c
-            # NBA live 0.5-2h: 9-25c
+            # NBA live 0.5-2h: 5-30c (widened from 9-25c, backtest +62% ROI)
             # All others: 1-30c
             if is_ncaa:
                 max_no, min_no = 0.25, 0.06
             elif is_nba:
-                max_no, min_no = 0.25, 0.09
+                max_no, min_no = 0.30, 0.05
             else:
                 max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             if no_price < min_no or no_price > max_no:
@@ -1954,7 +1954,7 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 9-25c, NCAA pre 1-24h 10-25c + live 0.5-1.5h 6-25c, Other pre 1h + live 0.5h)")
+        print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 5-30c, NCAA pre 1-24h 10-25c + live 0.5-1.5h 6-25c, Other pre 1h + live 0.5h)")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, {EARNINGS_WINDOW_HOURS_BEFORE*60:.0f}min pre-event")
         print(f"Open positions: {self.positions.count()}")
