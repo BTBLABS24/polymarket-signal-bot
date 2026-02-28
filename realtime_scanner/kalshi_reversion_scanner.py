@@ -2027,7 +2027,7 @@ class KalshiReversionScanner:
         print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 5-30c, NCAA pre 1-24h 10-25c + live 0.5-1.5h 6-25c, Other pre 1h + live 0.5h)")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, {EARNINGS_WINDOW_HOURS_BEFORE*60:.0f}min pre-event")
-        print(f"Strategy 4: Stale orders — {'ON' if STALE_ENABLED else 'OFF'}, ${STALE_BET_DOLLARS}/bet, gap>={STALE_MIN_GAP_CENTS}c, NO>={STALE_MIN_NO_CENTS}c, {STALE_MIN_HOURS_INTO_GAME}h+ into game")
+        print(f"Strategy 4: Stale snipe (all mention markets) — {'ON' if STALE_ENABLED else 'OFF'}, ${STALE_BET_DOLLARS}/bet, gap>={STALE_MIN_GAP_CENTS}c, NO>={STALE_MIN_NO_CENTS}c, {STALE_MIN_HOURS_INTO_GAME}h+ into event")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -3030,7 +3030,7 @@ class KalshiReversionScanner:
         return None
 
     async def _scan_stale_orders(self, mention_markets, milestones, now):
-        """Scan NBA/NCAAB markets 1h+ into game for forgotten limit orders.
+        """Scan all mention markets 1h+ into event for forgotten limit orders.
         A stale order = cheapest NO ask is >=15c below the next cheapest.
         Buy at exactly the stale price (limit order, zero slippage)."""
         if not STALE_ENABLED:
@@ -3040,17 +3040,21 @@ class KalshiReversionScanner:
         if stale_count >= STALE_MAX_POSITIONS:
             return
 
-        # Filter to NBA/NCAAB markets that are live and 1h+ into game
+        # Filter to mention markets that are live and 1h+ into event
         candidates = []
         for m in mention_markets:
             ticker = m.get('ticker', '')
             ticker_upper = ticker.upper()
-            is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
-            is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
-            if not (is_nba or is_ncaa):
+
+            # Must be a mention market (has MENTION or FINALS in ticker)
+            if 'MENTION' not in ticker_upper and 'FINALS' not in ticker_upper:
                 continue
 
-            # Word blacklist check
+            # Detect category for blacklists and labeling
+            is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
+            is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+
+            # Word blacklist check (NBA/NCAAB only)
             word = ticker.split('-')[-1].upper()
             if is_nba and (word in NBA_WORD_BLACKLIST or word in NBA_ARENA_BLACKLIST):
                 continue
@@ -3065,9 +3069,27 @@ class KalshiReversionScanner:
             hours_into = (now - ms['start_ts']) / 3600.0
             if hours_into < STALE_MIN_HOURS_INTO_GAME:
                 continue
-            # Don't scan after game ended
+            # Don't scan after event ended
             if ms.get('end_ts') and ms['end_ts'] <= now:
                 continue
+
+            # Determine category label
+            if is_nba:
+                cat_label = 'NBA'
+            elif is_ncaa:
+                cat_label = 'NCAA'
+            elif 'TRUMPMENTION' in ticker_upper:
+                cat_label = 'Trump'
+            elif 'EARNINGSMENTION' in ticker_upper:
+                cat_label = 'Earnings'
+            elif 'NFLMENTION' in ticker_upper:
+                cat_label = 'NFL'
+            elif 'WOMENTION' in ticker_upper:
+                cat_label = 'Olympics'
+            elif 'FIGHTMENTION' in ticker_upper:
+                cat_label = 'Fight'
+            else:
+                cat_label = 'Other'
 
             candidates.append({
                 'ticker': ticker,
@@ -3075,7 +3097,7 @@ class KalshiReversionScanner:
                 'word': word,
                 'hours_into': hours_into,
                 'title': m.get('title', m.get('subtitle', '')),
-                'is_nba': is_nba,
+                'cat': cat_label,
             })
 
         if not candidates:
@@ -3148,7 +3170,7 @@ class KalshiReversionScanner:
             if contracts < 1:
                 continue
 
-            cat = 'NBA' if c['is_nba'] else 'NCAA'
+            cat = c['cat']
             print(f"  STALE [{cat}]: {c['word']} NO @ {cheapest_no}c (next={next_no}c, gap={gap}c, qty={cheapest_qty}) "
                   f"{contracts}x = ${bet_dollars:.2f} ({c['hours_into']:.1f}h in)")
 
