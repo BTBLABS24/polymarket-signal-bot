@@ -208,6 +208,18 @@ EARNINGS_WORD_BLACKLIST = {
 }
 EARNINGS_EXCLUDED_WORDS = EARNINGS_WORD_BLACKLIST  # legacy alias
 
+# --- Stale Order Strategy (NBA + NCAAB) ---
+# After 1h into game, scan orderbooks for forgotten limit orders.
+# If cheapest NO ask is >=15c below the next cheapest, someone forgot to cancel.
+# Backtest: 68% WR, +318% ROI (30 days, gap>=15c, NO>=5c).
+STALE_ENABLED = True
+STALE_BET_DOLLARS = 10            # $10/bet max
+STALE_MIN_GAP_CENTS = 15          # min gap between cheapest and next NO ask
+STALE_MIN_NO_CENTS = 5            # avoid 0-4c trap (words almost always said)
+STALE_MIN_HOURS_INTO_GAME = 1.0   # only scan 1h+ after event start
+STALE_MAX_POSITIONS = 30          # independent cap
+STALE_MAX_MARKET_DOLLARS = 10     # hard cap per market
+
 # State files
 STATE_DIR = Path(__file__).parent
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
@@ -2012,6 +2024,7 @@ class KalshiReversionScanner:
         print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 5-30c, NCAA pre 1-24h 10-25c + live 0.5-1.5h 6-25c, Other pre 1h + live 0.5h)")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, {EARNINGS_WINDOW_HOURS_BEFORE*60:.0f}min pre-event")
+        print(f"Strategy 4: Stale orders — {'ON' if STALE_ENABLED else 'OFF'}, ${STALE_BET_DOLLARS}/bet, gap>={STALE_MIN_GAP_CENTS}c, NO>={STALE_MIN_NO_CENTS}c, {STALE_MIN_HOURS_INTO_GAME}h+ into game")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -2254,6 +2267,10 @@ class KalshiReversionScanner:
 
                 # 3c. YES-buy strategy: buy YES on always-said NBA words
                 await self._scan_yes_buys(mention_markets, milestones, now)
+
+                # 3d. Stale order strategy: buy forgotten limit orders 1h+ into game
+                if not low_balance:
+                    await self._scan_stale_orders(mention_markets, milestones, now)
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
@@ -3002,6 +3019,236 @@ class KalshiReversionScanner:
         print(f"    YES-BUY taker not filled for {ticker}, canceled")
         log_event('yes_buy_unfilled', ticker=ticker, order_id=order_id)
         return None
+
+    async def _scan_stale_orders(self, mention_markets, milestones, now):
+        """Scan NBA/NCAAB markets 1h+ into game for forgotten limit orders.
+        A stale order = cheapest NO ask is >=15c below the next cheapest.
+        Buy at exactly the stale price (limit order, zero slippage)."""
+        if not STALE_ENABLED:
+            return
+
+        stale_count = self.positions.count('stale_buy_no')
+        if stale_count >= STALE_MAX_POSITIONS:
+            return
+
+        # Filter to NBA/NCAAB markets that are live and 1h+ into game
+        candidates = []
+        for m in mention_markets:
+            ticker = m.get('ticker', '')
+            ticker_upper = ticker.upper()
+            is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
+            is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+            if not (is_nba or is_ncaa):
+                continue
+
+            # Word blacklist check
+            word = ticker.split('-')[-1].upper()
+            if is_nba and (word in NBA_WORD_BLACKLIST or word in NBA_ARENA_BLACKLIST):
+                continue
+            if is_ncaa and (word in NCAAB_WORD_BLACKLIST or word in NCAAB_ARENA_BLACKLIST):
+                continue
+
+            event_ticker = m.get('event_ticker', '')
+            ms = milestones.get(event_ticker)
+            if not ms or not ms.get('start_ts'):
+                continue
+
+            hours_into = (now - ms['start_ts']) / 3600.0
+            if hours_into < STALE_MIN_HOURS_INTO_GAME:
+                continue
+            # Don't scan after game ended
+            if ms.get('end_ts') and ms['end_ts'] <= now:
+                continue
+
+            candidates.append({
+                'ticker': ticker,
+                'event_ticker': event_ticker,
+                'word': word,
+                'hours_into': hours_into,
+                'title': m.get('title', m.get('subtitle', '')),
+                'is_nba': is_nba,
+            })
+
+        if not candidates:
+            return
+
+        n_filled = 0
+        for c in candidates:
+            if stale_count >= STALE_MAX_POSITIONS:
+                break
+
+            ticker = c['ticker']
+
+            # Skip if we already have any position on this ticker
+            if self.positions.has_open_ticker(ticker, signal_type='stale_buy_no'):
+                continue
+            if self.positions.has_open_ticker(ticker, signal_type='mention_buy_no'):
+                continue
+
+            # Per-market cap
+            ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
+                             if p.get('ticker') == ticker and p.get('status') == 'open')
+            if ticker_exp >= STALE_MAX_MARKET_DOLLARS:
+                continue
+
+            # Fetch orderbook
+            ob = self.client.get_orderbook(ticker)
+            if not ob:
+                continue
+
+            # Build sorted NO ask levels from YES bids.
+            # YES bids: [[price, qty], ...] → NO ask = 100 - yes_bid_price
+            yes_bids = ob.get('yes', [])
+            if not isinstance(yes_bids, list) or len(yes_bids) < 2:
+                continue
+
+            # Aggregate quantity per YES bid level, then convert to NO asks
+            yes_levels = {}  # yes_price -> total_qty
+            for price, qty in yes_bids:
+                yes_levels[price] = yes_levels.get(price, 0) + qty
+
+            # Sort YES bids descending → NO asks ascending
+            sorted_yes = sorted(yes_levels.items(), key=lambda x: x[0], reverse=True)
+            # Convert to NO ask levels: (no_price, qty)
+            no_asks = [(100 - yp, yq) for yp, yq in sorted_yes]
+            # no_asks is now sorted ascending by NO price
+
+            if len(no_asks) < 2:
+                continue
+
+            cheapest_no, cheapest_qty = no_asks[0]
+            next_no = no_asks[1][0]
+            gap = next_no - cheapest_no
+
+            if gap < STALE_MIN_GAP_CENTS:
+                continue
+            if cheapest_no < STALE_MIN_NO_CENTS:
+                continue
+
+            # Stale order found! Buy at exactly this price (no slippage).
+            # Cap to available quantity and $10
+            max_contracts = min(cheapest_qty, int(STALE_BET_DOLLARS / (cheapest_no / 100)))
+            if max_contracts < 1:
+                max_contracts = 1
+            # Only buy what's at the stale level
+            contracts = min(max_contracts, cheapest_qty)
+            bet_dollars = round(contracts * cheapest_no / 100, 2)
+            if bet_dollars > STALE_BET_DOLLARS:
+                contracts = int(STALE_BET_DOLLARS / (cheapest_no / 100))
+                bet_dollars = round(contracts * cheapest_no / 100, 2)
+            if contracts < 1:
+                continue
+
+            cat = 'NBA' if c['is_nba'] else 'NCAA'
+            print(f"  STALE [{cat}]: {c['word']} NO @ {cheapest_no}c (next={next_no}c, gap={gap}c, qty={cheapest_qty}) "
+                  f"{contracts}x = ${bet_dollars:.2f} ({c['hours_into']:.1f}h in)")
+
+            if DRY_RUN:
+                order_info = {
+                    'order_id': f'DRY-STALE-{uuid.uuid4().hex[:8]}',
+                    'fill_price': cheapest_no / 100,
+                    'fill_count': contracts,
+                    'bet_dollars': bet_dollars,
+                    'dry_run': True,
+                }
+                sig = {
+                    'signal_type': 'stale_buy_no',
+                    'ticker': ticker,
+                    'event_ticker': c['event_ticker'],
+                    'title': c['title'],
+                    'no_price_cents': cheapest_no,
+                    'hours_to_event': -c['hours_into'],
+                    'is_live': True,
+                    'stale_gap': gap,
+                    'stale_next_no': next_no,
+                }
+                self.positions.add(sig, order_info)
+                stale_count += 1
+                n_filled += 1
+                continue
+
+            # Place limit order at exactly the stale price (no slippage)
+            order = self.client.create_order(
+                ticker=ticker, side='no', action='buy',
+                count=contracts, price_cents=cheapest_no,
+            )
+            if not order:
+                print(f"    STALE order failed for {ticker}")
+                continue
+
+            order_id = order.get('order_id', '')
+            log_event('stale_order_placed', ticker=ticker, order_id=order_id,
+                      contracts=contracts, price_cents=cheapest_no, gap=gap,
+                      next_no=next_no, bet_dollars=bet_dollars,
+                      hours_into=c['hours_into'], category=cat)
+
+            # Taker at exact price — should fill instantly if order still there
+            time.sleep(2)
+            status = self.client.get_order(order_id)
+            if status:
+                filled = status.get('quantity_filled', 0)
+                remaining = status.get('remaining_count', 0)
+                # Cancel any unfilled remainder immediately — no resting
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+
+                if filled > 0:
+                    avg_fill = status.get('average_fill_price', cheapest_no)
+                    actual_dollars = round(filled * avg_fill / 100, 2)
+                    sig = {
+                        'signal_type': 'stale_buy_no',
+                        'ticker': ticker,
+                        'event_ticker': c['event_ticker'],
+                        'title': c['title'],
+                        'no_price_cents': cheapest_no,
+                        'hours_to_event': -c['hours_into'],
+                        'is_live': True,
+                        'stale_gap': gap,
+                        'stale_next_no': next_no,
+                    }
+                    info = {
+                        'order_id': order_id,
+                        'fill_price': avg_fill / 100,
+                        'fill_count': filled,
+                        'bet_dollars': actual_dollars,
+                        'dry_run': False,
+                    }
+                    self.positions.add(sig, info)
+                    stale_count += 1
+                    n_filled += 1
+
+                    self.trade_logger.record({
+                        'type': 'entry', 'strategy': 'stale_buy_no',
+                        'ticker': ticker, 'order_id': order_id,
+                        'side': 'no', 'action': 'buy',
+                        'contracts_filled': filled, 'price_cents': cheapest_no,
+                        'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                        'gap': gap, 'next_no': next_no,
+                    })
+                    print(f"    STALE FILLED: {filled}/{contracts} NO @ {avg_fill}c (${actual_dollars:.2f}) gap={gap}c")
+                    log_event('stale_filled', ticker=ticker, order_id=order_id,
+                              filled=filled, avg_fill_cents=avg_fill,
+                              bet_dollars=actual_dollars, gap=gap)
+                    await self.notifier.send_order_event(
+                        f"STALE ORDER [{cat}]", ticker,
+                        price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                        title=c['title'][:60],
+                        extra=f"Gap={gap}c (stale={cheapest_no}c, next={next_no}c), {c['hours_into']:.1f}h into game")
+                else:
+                    print(f"    STALE not filled (order gone?): {ticker}")
+                    log_event('stale_unfilled', ticker=ticker, order_id=order_id)
+            else:
+                # Cancel just in case
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception:
+                    pass
+
+        if n_filled > 0:
+            print(f"  Stale orders filled: {n_filled}")
 
     def _execute_premarket_maker(self, sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA'):
         """Place a resting NO buy limit order for pre-event markets.
