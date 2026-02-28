@@ -3544,6 +3544,12 @@ class KalshiReversionScanner:
                 prefix = ticker_upper.split('MENTION')[0].replace('KX', '')
                 maker_cat = prefix if prefix else 'Other'
 
+        # NBA pre-game: maker only, no taker (taker only during live 0.5-2h)
+        nba_pre_game = is_nba and h2e is not None and h2e > 0
+        if nba_pre_game and can_rest_maker:
+            print(f"    NBA pre-game ({h2e:.1f}h to tipoff), maker only [{maker_cat}]")
+            return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
+
         if is_ncaa:
             ncaa_live_pre = h2e is not None and h2e >= 0
             max_no_c, min_no_c = (25, 10) if ncaa_live_pre else (25, 6)
