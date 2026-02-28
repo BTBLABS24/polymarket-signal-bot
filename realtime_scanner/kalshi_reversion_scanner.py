@@ -71,6 +71,7 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
 MENTION_BET_DOLLARS = 5            # $5 all categories while validating bot
+MENTION_BET_NCAA = 10              # $10 for NCAAB/NCAA — highest-conviction category
 MENTION_BET_OTHER = 5              # $5 for "other" (non-named) categories
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.01       # Allow NO down to 1c
@@ -1842,7 +1843,7 @@ class KalshiNotifier:
         msg = (
             f"Kalshi Auto-Trading Bot Started\n\n"
             f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE TRADING'}\n"
-            f"Strategies: Mention BUY NO (${MENTION_BET_DOLLARS}/named, ${MENTION_BET_OTHER}/other), Degradation ({'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet'})\n"
+            f"Strategies: Mention BUY NO (${MENTION_BET_DOLLARS}/named, ${MENTION_BET_NCAA}/NCAA, ${MENTION_BET_OTHER}/other), Degradation ({'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet'})\n"
             f"Max mention positions: {MENTION_MAX_POSITIONS}\n"
             f"{bal_line}"
             f"Open positions: {n_open}\n"
@@ -3052,7 +3053,13 @@ class KalshiReversionScanner:
             'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION',
             'VANCEMENTION',
         ))
-        mention_bet = MENTION_BET_OTHER if is_other else MENTION_BET_DOLLARS
+        is_ncaa_maker = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+        if is_other:
+            mention_bet = MENTION_BET_OTHER
+        elif is_ncaa_maker:
+            mention_bet = MENTION_BET_NCAA
+        else:
+            mention_bet = MENTION_BET_DOLLARS
 
         # New/unknown series cap
         event_ticker = sig.get('event_ticker', '')
@@ -3256,8 +3263,14 @@ class KalshiReversionScanner:
                 depth_contracts += bid_qty
         depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
 
-        # Category-based bet sizing: $10 named categories, $5 other
-        mention_bet = MENTION_BET_OTHER if is_other else MENTION_BET_DOLLARS
+        # Category-based bet sizing
+        is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+        if is_other:
+            mention_bet = MENTION_BET_OTHER
+        elif is_ncaa:
+            mention_bet = MENTION_BET_NCAA
+        else:
+            mention_bet = MENTION_BET_DOLLARS
         # New/unknown series: cap at $2 until we have enough history
         # Skip this cap for curated series in MENTION_SCAN_SERIES
         event_ticker_taker = sig.get('event_ticker', '')
