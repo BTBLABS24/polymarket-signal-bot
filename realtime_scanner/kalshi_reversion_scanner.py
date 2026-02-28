@@ -973,20 +973,22 @@ class MentionBuyNoDetector:
                             cat_debug[_cat]['_logged'] = ncaa_skip_count + 1
                         continue
                 elif is_nba:
-                    # NBA: live taker 0.5-2h after tipoff
-                    if hours_to_event > 0 or hours_to_event < -2:
-                        debug_counts['too_far'] += 1
+                    # NBA: pre-event maker up to 24h + live taker 0.5-2h after tipoff
+                    if hours_to_event > 24:
+                        debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
-                        # Log first few NBA timing skips with h2e
                         nba_skip_count = cat_debug[_cat].get('_logged', 0)
                         if nba_skip_count < 3:
                             print(f"    NBA timing skip: {ticker} h2e={hours_to_event:.2f}h ({event_ticker})")
                             cat_debug[_cat]['_logged'] = nba_skip_count + 1
                         continue
-                    if hours_to_event > -0.5:
-                        debug_counts['too_early'] += 1
+                    if hours_to_event < -2:
+                        debug_counts['too_far'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
+                    # Gap: last 0h pre-event through first 0.5h live — no taker, but
+                    # maker orders placed earlier keep running
+                    # (price filter handles maker vs taker routing downstream)
                 elif is_trump:
                     # Trump: 0-24h before event
                     if hours_to_event > 24:
@@ -998,8 +1000,8 @@ class MentionBuyNoDetector:
                         cat_debug[_cat]['timing'] += 1
                         continue
                 elif is_mamdani or is_newsom:
-                    # Mamdani/Newsom: 0-1.5h before event
-                    if hours_to_event > 1.5:
+                    # Mamdani/Newsom: taker 0-1.5h, maker up to 24h pre
+                    if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
@@ -1008,8 +1010,8 @@ class MentionBuyNoDetector:
                         cat_debug[_cat]['timing'] += 1
                         continue
                 else:
-                    # Other: pre 1h to live 0.5h
-                    if hours_to_event > 1:
+                    # Other: taker pre 1h to live 0.5h, maker up to 24h pre
+                    if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
@@ -1068,7 +1070,7 @@ class MentionBuyNoDetector:
                 maker_eligible = (
                     hours_to_event is not None
                     and hours_to_event > PREMARKET_CANCEL_HOURS
-                    and (is_ncaa or is_trump or is_mamdani or is_newsom)
+                    and ('MENTION' in ticker.upper() or 'FINALS' in ticker.upper())
                 )
                 no_bid_price = None
                 if maker_eligible and yes_ask is not None:
