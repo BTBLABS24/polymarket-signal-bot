@@ -2207,28 +2207,20 @@ class KalshiReversionScanner:
                     if h is None:
                         return False
                     ticker_up = s.get('ticker', '').upper()
-                    is_trump = 'TRUMPMENTION' in ticker_up
-                    is_mamdani = 'MAMDANIMENTION' in ticker_up
-                    is_newsom = 'NEWSOMMENTION' in ticker_up
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
                         return 0 <= h <= EARNINGS_WINDOW_HOURS_BEFORE
                     elif is_ncaa:
-                        # NCAA: pre 1-24h + live 0.5-1.5h (skip last 1h pre + first 0.5h live)
+                        # NCAA: pre 1-24h + live 0.5-1.5h
                         return (-1.5 <= h <= -0.5) or (1 <= h <= 24)
                     elif is_nba:
-                        # NBA: live taker 0.5-2h after tipoff
-                        return -2 <= h <= -0.5
-                    elif is_trump:
-                        # Trump: 0-24h before event
-                        return 0 <= h <= 24
-                    elif is_mamdani or is_newsom:
-                        # Mamdani/Newsom: 0-1.5h before event
-                        return 0 <= h <= 1.5
+                        # NBA: pre-event maker up to 24h + live taker 0.5-2h
+                        return -2 <= h <= 24
                     else:
-                        # Other: pre 1h to live 0.5h
-                        return -0.5 <= h <= 1
+                        # All others (Trump, Mamdani, Newsom, SNL, etc):
+                        # pre-event maker up to 24h + live taker 0.5h
+                        return -0.5 <= h <= 24
 
                 eligible = [s for s in mention_signals if in_entry_window(s)]
                 n_total = len(mention_signals)
