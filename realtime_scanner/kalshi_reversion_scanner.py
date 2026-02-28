@@ -1023,14 +1023,43 @@ class MentionBuyNoDetector:
             else:
                 max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
             if no_price < min_no or no_price > max_no:
-                debug_counts['price_out_range'] += 1
-                cat_debug[_cat]['price'] += 1
-                # Log first 5 price-OOR per category
-                if cat_debug[_cat].get('_price_logged', 0) < 5:
-                    h2e_str = f"{hours_to_event:.2f}h" if hours_to_event is not None else "?"
-                    print(f"    {_cat} price_OOR: {ticker} no={no_price:.2f} [{min_no:.2f}-{max_no:.2f}] h2e={h2e_str}")
-                    cat_debug[_cat]['_price_logged'] = cat_debug[_cat].get('_price_logged', 0) + 1
-                continue
+                # Mid-price is out of range — but for pre-event maker-eligible
+                # markets, check if NO bid + 1c is in range (resting order target).
+                # Wide spreads (e.g. NO bid 20c, ask 46c, mid 33c) would otherwise
+                # be rejected even though 21c is a valid resting order price.
+                maker_eligible = (
+                    hours_to_event is not None
+                    and hours_to_event > PREMARKET_CANCEL_HOURS
+                    and (is_ncaa or is_trump or is_mamdani or is_newsom)
+                )
+                no_bid_price = None
+                if maker_eligible and yes_ask is not None:
+                    try:
+                        no_bid_price = 1 - int(yes_ask) / 100  # NO bid = 1 - YES ask
+                    except (ValueError, TypeError):
+                        pass
+                if maker_eligible and no_bid_price is not None:
+                    maker_price = no_bid_price + 0.01  # bid + 1c
+                    if min_no <= maker_price <= max_no:
+                        # Let through for maker fallback — override no_price
+                        # so downstream sees the maker-relevant price
+                        pass
+                    else:
+                        debug_counts['price_out_range'] += 1
+                        cat_debug[_cat]['price'] += 1
+                        if cat_debug[_cat].get('_price_logged', 0) < 5:
+                            h2e_str = f"{hours_to_event:.2f}h" if hours_to_event is not None else "?"
+                            print(f"    {_cat} price_OOR: {ticker} no_mid={no_price:.2f} no_bid={no_bid_price:.2f} [{min_no:.2f}-{max_no:.2f}] h2e={h2e_str}")
+                            cat_debug[_cat]['_price_logged'] = cat_debug[_cat].get('_price_logged', 0) + 1
+                        continue
+                else:
+                    debug_counts['price_out_range'] += 1
+                    cat_debug[_cat]['price'] += 1
+                    if cat_debug[_cat].get('_price_logged', 0) < 5:
+                        h2e_str = f"{hours_to_event:.2f}h" if hours_to_event is not None else "?"
+                        print(f"    {_cat} price_OOR: {ticker} no={no_price:.2f} [{min_no:.2f}-{max_no:.2f}] h2e={h2e_str}")
+                        cat_debug[_cat]['_price_logged'] = cat_debug[_cat].get('_price_logged', 0) + 1
+                    continue
 
             # Cooldown check — 24h per ticker
             last_signal = self.signal_history.get(ticker, 0)
@@ -3105,7 +3134,7 @@ class KalshiReversionScanner:
             ncaa_live_pre = h2e is not None and h2e >= 0
             max_no_c, min_no_c = (25, 10) if ncaa_live_pre else (25, 6)
         elif is_nba:
-            max_no_c, min_no_c = 25, 9
+            max_no_c, min_no_c = 30, 5
         else:
             max_no_c, min_no_c = int(MENTION_MAX_NO_PRICE * 100), int(MENTION_MIN_NO_PRICE * 100)
 
