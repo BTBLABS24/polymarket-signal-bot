@@ -136,7 +136,7 @@ NBA_ARENA_BLACKLIST = {
 # --- NCAAB Word Blacklist ---
 # Words with <20% NO win rate — almost always said, losing bet at any price.
 # Freshman 0% NO WR (33 trades), Safety 3% (32 trades), Transfer 17% (76 trades)
-NCAAB_WORD_BLACKLIST = {'FRES', 'SAFE', 'TRAN'}
+NCAAB_WORD_BLACKLIST = {'FRES', 'SAFE', 'TRAN', 'OVER'}
 
 # --- NCAAB Arena/Venue Blacklist ---
 # Arena names for college basketball. Announcers almost always name the venue.

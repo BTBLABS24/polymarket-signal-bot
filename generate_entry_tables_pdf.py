@@ -198,7 +198,7 @@ def compute_table(category, time_buckets, bucket_labels, min_n=30, min_roi=20):
         'KIA', 'AMER', 'CHAS', 'CRYP', 'ROCK', 'FROS', 'FEDE', 'LITT', 'BALL',
         'CAPI', 'GOLD', 'FISE', 'SCOT', 'DELT', 'STAT', 'GAIN', 'KASE',
     }
-    NCAA_BL = {'FRES', 'SAFE', 'TRAN'}
+    NCAA_BL = {'FRES', 'SAFE', 'TRAN', 'OVER'}
     NCAAB_ARENA = {
         'MCKA', 'STEP', 'PINN', 'BRES', 'MACK', 'GALE', 'RUPP', 'HILT', 'KOHL',
         'ALLEN', 'COLE', 'SAND', 'CAPI', 'MEMO', 'UNIT', 'MSG', 'STAT', 'STEG',
