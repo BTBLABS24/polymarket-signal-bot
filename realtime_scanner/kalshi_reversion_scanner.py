@@ -1816,28 +1816,31 @@ class KalshiNotifier:
     def __init__(self):
         self.bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
-    async def send_mention_signal(self, sig, order_info=None):
+    async def send_mention_signal(self, sig, order_info=None, trade_label=None):
         no_cents = sig.get('no_price_cents', 0)
         hours = sig.get('hours_before_close', 0)
 
         url = f"\nhttps://kalshi.com/markets/{sig['ticker']}"
 
         if order_info:
+            side = order_info.get('side', 'no').upper()
+            price_c = int(order_info['fill_price'] * 100)
             if order_info.get('dry_run'):
                 trade_line = (
-                    f"\n[DRY RUN] Would buy {order_info['fill_count']} NO "
-                    f"@ {int(order_info['fill_price']*100)}c (${order_info['bet_dollars']:.2f})"
+                    f"\n[DRY RUN] Would buy {order_info['fill_count']} {side} "
+                    f"@ {price_c}c (${order_info['bet_dollars']:.2f})"
                 )
             else:
                 trade_line = (
-                    f"\nORDER FILLED: {order_info['fill_count']} NO "
-                    f"@ {int(order_info['fill_price']*100)}c (${order_info['bet_dollars']:.2f})"
+                    f"\nORDER FILLED: {order_info['fill_count']} {side} "
+                    f"@ {price_c}c (${order_info['bet_dollars']:.2f})"
                 )
         else:
             trade_line = "\n(Signal only -- no order placed)"
 
+        label = trade_label or "MENTION BUY NO"
         msg = (
-            f"KALSHI MENTION BUY NO\n\n"
+            f"KALSHI {label}\n\n"
             f"{sig['title']}\n"
             f"Ticker: {sig['ticker']}\n\n"
             f"ACTION: BUY NO at {no_cents}c\n\n"
@@ -2255,7 +2258,13 @@ class KalshiReversionScanner:
                             order_info = self._execute_mention_entry(sig)
 
                     if order_info:
-                        await self.notifier.send_mention_signal(sig, order_info)
+                        if is_earn:
+                            tg_label = "EARNINGS TAKER"
+                        elif h2e is not None and h2e < 0:
+                            tg_label = "LIVE TAKER"
+                        else:
+                            tg_label = "PRE-EVENT TAKER"
+                        await self.notifier.send_mention_signal(sig, order_info, trade_label=tg_label)
                         self.positions.add(sig, order_info)
                         if not is_earn:
                             mention_count += 1
@@ -2391,7 +2400,7 @@ class KalshiReversionScanner:
                     if taker_info:
                         self.positions.add(sig, taker_info)
                         await self.notifier.send_order_event(
-                            f"TAKER FILL (was resting {category})", ticker,
+                            f"RESTING->TAKER [{category}]", ticker,
                             price_cents=taker_info.get('fill_price', best_no_ask) * 100 if isinstance(taker_info.get('fill_price'), float) else best_no_ask,
                             contracts=taker_info.get('fill_count', 0),
                             bet_dollars=taker_info.get('bet_dollars', 0),
@@ -2430,7 +2439,7 @@ class KalshiReversionScanner:
                                 print(f"    PREMARKET OUTBID: {ticker} best_bid={best_no_bid}c (${best_bid_dollars:.2f}) > our {price_cents}c (spread={spread}c), rebidding @ {new_price}c")
                                 self._rebid_resting_order(order_id, info, new_price, spread, to_remove)
                                 await self.notifier.send_order_event(
-                                    f"MAKER REBID ({category})", ticker,
+                                    f"RESTING REBID [{category}]", ticker,
                                     price_cents=new_price,
                                     contracts=int(info['bet_dollars'] / (new_price / 100)) or 1,
                                     bet_dollars=info['bet_dollars'],
@@ -2492,7 +2501,7 @@ class KalshiReversionScanner:
                 sig['signal_type'] = 'mention_buy_no'
                 self.positions.add(sig, order_info)
                 await self.notifier.send_order_event(
-                    f"MAKER FILLED ({category})", ticker,
+                    f"RESTING FILLED [{category}]", ticker,
                     price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
                     title=sig.get('title', '')[:60],
                     extra=f"Rested @ {price_cents}c, filled @ {avg_fill}c")
@@ -2652,7 +2661,7 @@ class KalshiReversionScanner:
                 order_info = self._execute_degradation_entry(sig)
 
             if order_info:
-                await self.notifier.send_mention_signal(sig, order_info)
+                await self.notifier.send_mention_signal(sig, order_info, trade_label="DEGRADE TAKER")
                 self.positions.add(sig, order_info)
                 degrade_count += 1
                 # Record this bucket so we don't re-bet same half-hour
@@ -2904,7 +2913,7 @@ class KalshiReversionScanner:
                 order_info = self._execute_yes_entry(sig)
 
             if order_info:
-                await self.notifier.send_mention_signal(sig, order_info)
+                await self.notifier.send_mention_signal(sig, order_info, trade_label="YES BUY TAKER")
                 self.positions.add(sig, order_info)
                 yes_count += 1
 
@@ -3233,7 +3242,7 @@ class KalshiReversionScanner:
                               filled=filled, avg_fill_cents=avg_fill,
                               bet_dollars=actual_dollars, gap=gap)
                     await self.notifier.send_order_event(
-                        f"STALE ORDER [{cat}]", ticker,
+                        f"STALE SNIPE [{cat}]", ticker,
                         price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
                         title=c['title'][:60],
                         extra=f"Gap={gap}c (stale={cheapest_no}c, next={next_no}c), {c['hours_into']:.1f}h into game")
@@ -3389,7 +3398,7 @@ class KalshiReversionScanner:
                   category=category, hours_to_event=h2e,
                   no_bid=best_no_bid, no_ask=best_no_ask, spread=spread,
                   expiration_ts=event_start_ts)
-        self._queue_tg(f"MAKER RESTING ({category})", ticker,
+        self._queue_tg(f"RESTING ORDER PLACED [{category}]", ticker,
                        price_cents=resting_price, contracts=contracts, bet_dollars=bet_dollars,
                        title=sig.get('title', '')[:60])
 
