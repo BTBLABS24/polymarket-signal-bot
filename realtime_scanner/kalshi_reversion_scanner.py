@@ -3478,22 +3478,30 @@ class KalshiReversionScanner:
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
 
-        # Pre-event maker eligibility: pre-event categories can fall back to resting limit orders
+        # Pre-event maker eligibility: all mention categories can fall back to resting limit orders
         h2e = sig.get('hours_to_event')
         is_trump = 'TRUMPMENTION' in ticker_upper
         is_mamdani = 'MAMDANIMENTION' in ticker_upper
         is_newsom = 'NEWSOMMENTION' in ticker_upper
         pre_event = h2e is not None and h2e > PREMARKET_CANCEL_HOURS
-        can_rest_maker = pre_event and (is_ncaa or is_trump or is_mamdani or is_newsom)
+        can_rest_maker = pre_event and (is_ncaa or is_nba or is_trump or is_mamdani or is_newsom)
+        if not can_rest_maker and pre_event and 'MENTION' in ticker_upper:
+            can_rest_maker = True  # all other mention markets too
         if can_rest_maker:
             if is_ncaa:
                 maker_cat = 'NCAA'
+            elif is_nba:
+                maker_cat = 'NBA'
             elif is_trump:
                 maker_cat = 'Trump'
             elif is_mamdani:
                 maker_cat = 'Mamdani'
-            else:
+            elif is_newsom:
                 maker_cat = 'Newsom'
+            else:
+                # Derive category from ticker
+                prefix = ticker_upper.split('MENTION')[0].replace('KX', '')
+                maker_cat = prefix if prefix else 'Other'
 
         if is_ncaa:
             ncaa_live_pre = h2e is not None and h2e >= 0
