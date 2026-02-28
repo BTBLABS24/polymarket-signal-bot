@@ -157,7 +157,7 @@ NBA_YES_BUY_WORDS = {
     'ALL':  50,   # All-Star 87% YES WR, max=73c, target <=50c
     'CROW': 50,   # Crowd 89% YES WR, max=74c, target <=50c
 }
-NBA_YES_BET_DOLLARS = 5          # $5/bet while validating
+NBA_YES_BET_DOLLARS = 1          # $1/bet — validating logic is correct
 NBA_YES_MAX_POSITIONS = 20       # independent cap
 NBA_YES_MAX_EVENT_DOLLARS = 20   # per-event cap
 
