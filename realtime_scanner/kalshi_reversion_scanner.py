@@ -2399,19 +2399,26 @@ class KalshiReversionScanner:
 
                 if spread >= 10 and len(bid_levels) >= 1:
                     # Case 1: Someone outbid us — best bid is ABOVE our price
+                    # Only rebid if the competing bid has >$1.50 total size (ignore dust bids)
                     if best_no_bid > price_cents:
-                        new_price = best_no_bid + 1
-                        if new_price < best_no_ask and new_price <= PREMARKET_MAX_NO_PRICE:
-                            print(f"    PREMARKET OUTBID: {ticker} best_bid={best_no_bid}c > our {price_cents}c (spread={spread}c), rebidding @ {new_price}c")
-                            self._rebid_resting_order(order_id, info, new_price, spread, to_remove)
-                            await self.notifier.send_order_event(
-                                f"MAKER REBID ({category})", ticker,
-                                price_cents=new_price,
-                                contracts=int(info['bet_dollars'] / (new_price / 100)) or 1,
-                                bet_dollars=info['bet_dollars'],
-                                title=info.get('signal', {}).get('title', '')[:60],
-                                extra=f"Was {price_cents}c, outbid → rebid {new_price}c (spread={spread}c)")
-                            continue
+                        # Sum contracts at the best bid level to get dollar size
+                        best_bid_contracts = sum(b[1] for b in no_bids if b[0] == best_no_bid)
+                        best_bid_dollars = best_bid_contracts * best_no_bid / 100.0
+                        if best_bid_dollars <= 1.50:
+                            print(f"    PREMARKET SKIP OUTBID: {ticker} best_bid={best_no_bid}c (${best_bid_dollars:.2f}) too small, ignoring")
+                        else:
+                            new_price = best_no_bid + 1
+                            if new_price < best_no_ask and new_price <= PREMARKET_MAX_NO_PRICE:
+                                print(f"    PREMARKET OUTBID: {ticker} best_bid={best_no_bid}c (${best_bid_dollars:.2f}) > our {price_cents}c (spread={spread}c), rebidding @ {new_price}c")
+                                self._rebid_resting_order(order_id, info, new_price, spread, to_remove)
+                                await self.notifier.send_order_event(
+                                    f"MAKER REBID ({category})", ticker,
+                                    price_cents=new_price,
+                                    contracts=int(info['bet_dollars'] / (new_price / 100)) or 1,
+                                    bet_dollars=info['bet_dollars'],
+                                    title=info.get('signal', {}).get('title', '')[:60],
+                                    extra=f"Was {price_cents}c, outbid → rebid {new_price}c (spread={spread}c)")
+                                continue
 
                     # Case 2: We ARE the top bid — check if there's a gap below us
                     # If next-highest non-our-price bid is well below us, lower to save money
