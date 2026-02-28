@@ -123,10 +123,29 @@ MENTION_SCAN_SERIES = [
 # Ticker suffix -> matched against last segment of ticker (e.g. KXNBAMENTION-...-ROOK)
 NBA_WORD_BLACKLIST = {'ROOK', 'INJU', 'CROW', 'ALL'}  # Rookie 3%, Injury 4%, Crowd 11%, All-Star 13%
 
+# --- NBA Arena/Venue Blacklist ---
+# Arena names, sponsors, venue words. Announcers almost always name the arena.
+# Aggregate ~30% NO WR — unprofitable noise.
+NBA_ARENA_BLACKLIST = {
+    'MSG', 'TD', 'XFIN', 'SPEC', 'MODA', 'TARG', 'PAYC', 'INTU', 'TOYO',
+    'KIA', 'AMER', 'CHAS', 'CRYP', 'ROCK', 'FROS', 'FEDE', 'LITT', 'BALL',
+    'CAPI', 'GOLD', 'FISE', 'SCOT', 'DELT', 'STAT', 'GAIN', 'KASE',
+}
+
 # --- NCAAB Word Blacklist ---
 # Words with <20% NO win rate — almost always said, losing bet at any price.
 # Freshman 0% NO WR (33 trades), Safety 3% (32 trades), Transfer 17% (76 trades)
 NCAAB_WORD_BLACKLIST = {'FRES', 'SAFE', 'TRAN'}
+
+# --- NCAAB Arena/Venue Blacklist ---
+# Arena names for college basketball. Announcers almost always name the venue.
+# Aggregate ~24% NO WR — unprofitable.
+NCAAB_ARENA_BLACKLIST = {
+    'MCKA', 'STEP', 'PINN', 'BRES', 'MACK', 'GALE', 'RUPP', 'HILT', 'KOHL',
+    'ALLEN', 'COLE', 'SAND', 'CAPI', 'MEMO', 'UNIT', 'MSG', 'STAT', 'STEG',
+    'NEVI', 'CRIS', 'MARR', 'WELS', 'LENO', 'CARV', 'MIZZ', 'DESE', 'CAME',
+    'BUD', 'FERT', 'MILL',
+}
 
 # --- NBA YES Buy Strategy ---
 # Buy YES on words that are almost always said. Entry: pre-game to 30min into game.
@@ -885,7 +904,13 @@ class MentionBuyNoDetector:
             if is_nba and word_suffix in NBA_WORD_BLACKLIST:
                 cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                 continue
+            if is_nba and word_suffix in NBA_ARENA_BLACKLIST:
+                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                continue
             if is_ncaa and word_suffix in NCAAB_WORD_BLACKLIST:
+                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                continue
+            if is_ncaa and word_suffix in NCAAB_ARENA_BLACKLIST:
                 cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                 continue
             if is_earnings and word_suffix in EARNINGS_WORD_BLACKLIST:
@@ -3122,8 +3147,14 @@ class KalshiReversionScanner:
         if ('NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper) and word_suffix in NBA_WORD_BLACKLIST:
             print(f"    Blacklisted NBA word: {word_suffix} ({ticker}), skipping")
             return None
+        if ('NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper) and word_suffix in NBA_ARENA_BLACKLIST:
+            print(f"    Blacklisted NBA arena: {word_suffix} ({ticker}), skipping")
+            return None
         if ('NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper) and word_suffix in NCAAB_WORD_BLACKLIST:
             print(f"    Blacklisted NCAAB word: {word_suffix} ({ticker}), skipping")
+            return None
+        if ('NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper) and word_suffix in NCAAB_ARENA_BLACKLIST:
+            print(f"    Blacklisted NCAAB arena: {word_suffix} ({ticker}), skipping")
             return None
         if 'EARNINGS' in ticker_upper and word_suffix in EARNINGS_WORD_BLACKLIST:
             print(f"    Blacklisted earnings word: {word_suffix} ({ticker}), skipping")
