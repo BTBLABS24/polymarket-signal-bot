@@ -2273,6 +2273,40 @@ class KalshiReversionScanner:
                 print(f"  Daily summary error: {e}")
 
 
+    def _rebid_resting_order(self, order_id, info, new_price, spread, to_remove):
+        """Cancel existing resting order and place a new one at new_price.
+        Used by outbid detection and gap optimization."""
+        ticker = info['ticker']
+        old_price = info['price_cents']
+        self.client.cancel_order(order_id)
+        new_contracts = int(info['bet_dollars'] / (new_price / 100))
+        if new_contracts < 1:
+            new_contracts = 1
+        new_bet = round(new_contracts * new_price / 100, 2)
+        new_order = self.client.create_order(
+            ticker=ticker, side='no', action='buy',
+            count=new_contracts, price_cents=new_price,
+            expiration_ts=info.get('signal', {}).get('event_start_ts'),
+        )
+        if new_order:
+            new_oid = new_order.get('order_id', '')
+            self._resting_premarket_orders[new_oid] = {
+                'ticker': ticker,
+                'price_cents': new_price,
+                'contracts': new_contracts,
+                'bet_dollars': new_bet,
+                'placed_ts': time.time(),
+                'category': info['category'],
+                'signal': info.get('signal', {}),
+            }
+            print(f"    PREMARKET REBID: {new_oid} {new_contracts} NO @ {new_price}c (was {old_price}c)")
+            log_event('premarket_rebid', ticker=ticker, old_order=order_id,
+                      new_order=new_oid, old_price=old_price, new_price=new_price,
+                      spread=spread)
+        else:
+            print(f"    PREMARKET REBID FAILED: {ticker} cancel succeeded but new order failed")
+        to_remove.append(order_id)
+
     async def _check_resting_premarket_orders(self):
         """Check pre-event resting orders for fills and adverse spread movement.
         Kalshi auto-cancels at event start via expiration_ts."""
@@ -2334,46 +2368,54 @@ class KalshiReversionScanner:
                     to_remove.append(order_id)
                     continue
 
-                # Outbid detection: if someone bid above us AND spread still >= 10c, rebid at their price + 1c
-                if spread >= 10 and best_no_bid >= price_cents:
-                    new_price = best_no_bid + 1
-                    if new_price < best_no_ask and new_price <= PREMARKET_MAX_NO_PRICE:
-                        print(f"    PREMARKET OUTBID: {ticker} best_bid={best_no_bid}c >= our {price_cents}c (spread={spread}c), rebidding @ {new_price}c")
-                        self.client.cancel_order(order_id)
-                        # Recalculate contracts for new price
-                        new_contracts = int(info['bet_dollars'] / (new_price / 100))
-                        if new_contracts < 1:
-                            new_contracts = 1
-                        new_bet = round(new_contracts * new_price / 100, 2)
-                        new_order = self.client.create_order(
-                            ticker=ticker, side='no', action='buy',
-                            count=new_contracts, price_cents=new_price,
-                            expiration_ts=info.get('signal', {}).get('event_start_ts'),
-                        )
-                        if new_order:
-                            new_oid = new_order.get('order_id', '')
-                            self._resting_premarket_orders[new_oid] = {
-                                'ticker': ticker,
-                                'price_cents': new_price,
-                                'contracts': new_contracts,
-                                'bet_dollars': new_bet,
-                                'placed_ts': time.time(),
-                                'category': category,
-                                'signal': info.get('signal', {}),
-                            }
-                            print(f"    PREMARKET REBID: {new_oid} {new_contracts} NO @ {new_price}c (was {price_cents}c)")
-                            log_event('premarket_rebid', ticker=ticker, old_order=order_id,
-                                      new_order=new_oid, old_price=price_cents, new_price=new_price,
-                                      spread=spread, best_bid=best_no_bid)
+                # Bid management: analyze full NO bid book to decide whether to rebid
+                # Sort all NO bid levels descending
+                bid_levels = sorted(set(b[0] for b in no_bids), reverse=True) if no_bids else []
+
+                if spread >= 10 and len(bid_levels) >= 1:
+                    # Case 1: Someone outbid us — best bid is ABOVE our price
+                    if best_no_bid > price_cents:
+                        new_price = best_no_bid + 1
+                        if new_price < best_no_ask and new_price <= PREMARKET_MAX_NO_PRICE:
+                            print(f"    PREMARKET OUTBID: {ticker} best_bid={best_no_bid}c > our {price_cents}c (spread={spread}c), rebidding @ {new_price}c")
+                            self._rebid_resting_order(order_id, info, new_price, spread, to_remove)
                             await self.notifier.send_order_event(
                                 f"MAKER REBID ({category})", ticker,
-                                price_cents=new_price, contracts=new_contracts, bet_dollars=new_bet,
+                                price_cents=new_price,
+                                contracts=int(info['bet_dollars'] / (new_price / 100)) or 1,
+                                bet_dollars=info['bet_dollars'],
                                 title=info.get('signal', {}).get('title', '')[:60],
                                 extra=f"Was {price_cents}c, outbid → rebid {new_price}c (spread={spread}c)")
-                        else:
-                            print(f"    PREMARKET REBID FAILED: {ticker} cancel succeeded but new order failed")
-                        to_remove.append(order_id)
-                        continue
+                            continue
+
+                    # Case 2: We ARE the top bid — check if there's a gap below us
+                    # If next-highest non-our-price bid is well below us, lower to save money
+                    elif best_no_bid == price_cents and len(bid_levels) >= 2:
+                        # Find highest bid that isn't our price
+                        next_best = None
+                        for bl in bid_levels:
+                            if bl < price_cents:
+                                next_best = bl
+                                break
+                        if next_best is not None and price_cents - next_best > 1:
+                            # Gap below us — lower to next_best + 1c
+                            new_price = next_best + 1
+                            if new_price >= min_no_c:
+                                print(f"    PREMARKET GAP: {ticker} we're top @ {price_cents}c, next={next_best}c, lowering to {new_price}c")
+                                self._rebid_resting_order(order_id, info, new_price, spread, to_remove)
+                                log_event('premarket_gap_lower', ticker=ticker, old_price=price_cents,
+                                          new_price=new_price, next_best=next_best, spread=spread)
+                                continue
+                    elif best_no_bid == price_cents and len(bid_levels) == 1:
+                        # We're the only bid — check if we can lower
+                        # Place at min_no_c to save money (will rebid if someone else enters)
+                        if price_cents > min_no_c + 1:
+                            new_price = min_no_c
+                            print(f"    PREMARKET ALONE: {ticker} only bid @ {price_cents}c, lowering to {new_price}c")
+                            self._rebid_resting_order(order_id, info, new_price, spread, to_remove)
+                            log_event('premarket_alone_lower', ticker=ticker, old_price=price_cents,
+                                      new_price=new_price, spread=spread)
+                            continue
 
             # Check fill status
             status = self.client.get_order(order_id)
