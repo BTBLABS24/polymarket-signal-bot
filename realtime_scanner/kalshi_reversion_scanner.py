@@ -2005,6 +2005,8 @@ class KalshiReversionScanner:
         self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
         self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
         self._resting_premarket_orders = {}  # order_id -> {ticker, price_cents, contracts, bet_dollars, placed_ts, category, signal}
+        self._resting_file = Path(__file__).parent / 'resting_orders.json'
+        self._load_resting_orders()
         self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
 
     def _queue_tg(self, event_type, ticker, **kwargs):
@@ -2016,6 +2018,33 @@ class KalshiReversionScanner:
         while self._pending_tg:
             event_type, ticker, kwargs = self._pending_tg.pop(0)
             await self.notifier.send_order_event(event_type, ticker, **kwargs)
+
+    def _load_resting_orders(self):
+        """Load resting orders from disk (survives redeploys)."""
+        if self._resting_file.exists():
+            try:
+                data = json.loads(self._resting_file.read_text())
+                self._resting_premarket_orders = data
+                if data:
+                    print(f"  Restored {len(data)} resting orders from disk")
+            except Exception as e:
+                print(f"  WARNING: Failed to load resting orders: {e}")
+
+    def _save_resting_orders(self):
+        """Persist resting orders to disk."""
+        try:
+            # Strip non-serializable signal data before saving
+            saveable = {}
+            for oid, info in self._resting_premarket_orders.items():
+                entry = dict(info)
+                sig = entry.get('signal', {})
+                # Keep only serializable signal fields
+                entry['signal'] = {k: v for k, v in sig.items()
+                                   if isinstance(v, (str, int, float, bool, type(None)))}
+                saveable[oid] = entry
+            self._resting_file.write_text(json.dumps(saveable, indent=2))
+        except Exception as e:
+            print(f"  WARNING: Failed to save resting orders: {e}")
 
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
@@ -2355,6 +2384,7 @@ class KalshiReversionScanner:
             log_event('premarket_rebid', ticker=ticker, old_order=order_id,
                       new_order=new_oid, old_price=old_price, new_price=new_price,
                       spread=spread)
+            self._save_resting_orders()
         else:
             print(f"    PREMARKET REBID FAILED: {ticker} cancel succeeded but new order failed")
         to_remove.append(order_id)
@@ -2488,27 +2518,40 @@ class KalshiReversionScanner:
             if filled > 0:
                 avg_fill = status.get('average_fill_price', price_cents)
                 actual_dollars = round(filled * avg_fill / 100, 2)
-                print(f"    PREMARKET FILLED: {ticker} {filled}/{contracts} NO @ {avg_fill}c (${actual_dollars:.2f})")
+                remaining = status.get('remaining_count', contracts - filled)
+                fully_filled = (remaining == 0)
 
-                order_info = {
-                    'ticker': ticker, 'order_id': order_id,
-                    'side': 'no', 'action': 'buy',
-                    'contracts_filled': filled, 'price_cents': price_cents,
-                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
-                    'fill_price': avg_fill / 100, 'fill_count': filled,
-                }
-                sig = info.get('signal', {})
-                sig['signal_type'] = 'mention_buy_no'
-                self.positions.add(sig, order_info)
-                await self.notifier.send_order_event(
-                    f"RESTING FILLED [{category}]", ticker,
-                    price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
-                    title=sig.get('title', '')[:60],
-                    extra=f"Rested @ {price_cents}c, filled @ {avg_fill}c")
-                log_event('premarket_filled', ticker=ticker, order_id=order_id,
-                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
-                          category=category)
-                to_remove.append(order_id)
+                # Only record position for NEW fills (avoid double-counting)
+                prev_filled = info.get('_recorded_fills', 0)
+                new_fills = filled - prev_filled
+
+                if new_fills > 0:
+                    new_dollars = round(new_fills * avg_fill / 100, 2)
+                    print(f"    PREMARKET FILLED: {ticker} {filled}/{contracts} NO @ {avg_fill}c (${actual_dollars:.2f}){'' if fully_filled else f' — {remaining} still resting'}")
+
+                    order_info = {
+                        'ticker': ticker, 'order_id': order_id,
+                        'side': 'no', 'action': 'buy',
+                        'contracts_filled': new_fills, 'price_cents': price_cents,
+                        'avg_fill_price': avg_fill, 'bet_dollars': new_dollars,
+                        'fill_price': avg_fill / 100, 'fill_count': new_fills,
+                    }
+                    sig = info.get('signal', {})
+                    sig['signal_type'] = 'mention_buy_no'
+                    self.positions.add(sig, order_info)
+                    await self.notifier.send_order_event(
+                        f"RESTING FILLED [{category}]", ticker,
+                        price_cents=avg_fill, contracts=new_fills, bet_dollars=new_dollars,
+                        title=sig.get('title', '')[:60],
+                        extra=f"Rested @ {price_cents}c, filled {filled}/{contracts}{'' if fully_filled else f' ({remaining} still resting)'}")
+                    log_event('premarket_filled', ticker=ticker, order_id=order_id,
+                              filled=new_fills, total_filled=filled, avg_fill_cents=avg_fill,
+                              bet_dollars=new_dollars, remaining=remaining, category=category)
+                    info['_recorded_fills'] = filled
+
+                if fully_filled:
+                    to_remove.append(order_id)
+                # else: keep tracking — still has resting contracts, can rebid
 
             elif order_status in ('canceled', 'cancelled', 'expired'):
                 print(f"    PREMARKET EXPIRED: {ticker} order {order_status}")
@@ -2516,6 +2559,9 @@ class KalshiReversionScanner:
 
         for oid in to_remove:
             self._resting_premarket_orders.pop(oid, None)
+
+        if to_remove:
+            self._save_resting_orders()
 
         if self._resting_premarket_orders:
             tickers = [v['ticker'].split('-')[-1] for v in self._resting_premarket_orders.values()]
@@ -3413,6 +3459,7 @@ class KalshiReversionScanner:
         }
         self.mention_detector.signal_history[ticker] = time.time()
         self.mention_detector._save()
+        self._save_resting_orders()
 
         print(f"    MAKER RESTING: {order_id} {contracts} NO @ {resting_price}c (${bet_dollars:.2f}) expires at event start")
         log_event('premarket_maker_placed', ticker=ticker, order_id=order_id,
