@@ -70,9 +70,9 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 5            # $5 all categories while validating bot
-MENTION_BET_NCAA = 10              # $10 for NCAAB/NCAA — highest-conviction category
-MENTION_BET_OTHER = 5              # $5 for "other" (non-named) categories
+MENTION_BET_DOLLARS = 10           # $10 all named categories
+MENTION_BET_NCAA = 10              # $10 for NCAAB/NCAA
+MENTION_BET_OTHER = 10             # $10 for "other" categories
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.05       # Only buy NO >= 5c (matches backtest)
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
