@@ -57,7 +57,7 @@ KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 SCAN_INTERVAL_SECONDS = 300  # 5 min
 # Trading config
 DRY_RUN = False
-MAX_BET_DOLLARS = 3           # Max per signal
+MAX_BET_DOLLARS = 10          # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
 ORDER_WAIT_SECONDS = 5        # Wait for fill after placing order
@@ -74,14 +74,14 @@ MENTION_BET_DOLLARS = 5            # $5 all categories while validating bot
 MENTION_BET_NCAA = 10              # $10 for NCAAB/NCAA — highest-conviction category
 MENTION_BET_OTHER = 5              # $5 for "other" (non-named) categories
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
-MENTION_MIN_NO_PRICE = 0.01       # Allow NO down to 1c
+MENTION_MIN_NO_PRICE = 0.05       # Only buy NO >= 5c (matches backtest)
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (events live with 24h close)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 99999 # No event cap
-MENTION_MAX_MARKET_DOLLARS = 5    # Hard cap $ per individual market/ticker
+MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
