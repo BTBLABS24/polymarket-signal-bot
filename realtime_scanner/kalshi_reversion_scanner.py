@@ -3733,11 +3733,41 @@ class KalshiReversionScanner:
                                title=sig.get('title', '')[:60])
                 return info
 
-        # Not filled even as taker — cancel and give up
+        # Not filled even as taker — cancel
         try:
             self.client.cancel_order(order_id)
         except Exception:
             pass
+
+        # Pre-event: fall back to maker resting order instead of giving up
+        h2e = sig.get('hours_to_event')
+        pre_event_fb = h2e is not None and h2e > PREMARKET_CANCEL_HOURS
+        ticker_upper_fb = ticker.upper()
+        has_mention = 'MENTION' in ticker_upper_fb or 'FINALS' in ticker_upper_fb
+        if pre_event_fb and has_mention:
+            # Re-derive maker category
+            if 'NCAAMENTION' in ticker_upper_fb or 'NCAABMENTION' in ticker_upper_fb:
+                fb_cat = 'NCAA'
+            elif 'NBAMENTION' in ticker_upper_fb or 'NBAFINALS' in ticker_upper_fb:
+                fb_cat = 'NBA'
+            elif 'TRUMPMENTION' in ticker_upper_fb:
+                fb_cat = 'Trump'
+            elif 'EARNINGSMENTION' in ticker_upper_fb:
+                fb_cat = 'Earnings'
+            else:
+                prefix = ticker_upper_fb.split('MENTION')[0].replace('KX', '')
+                fb_cat = prefix if prefix else 'Other'
+            print(f"    Taker not filled for {ticker}, falling back to maker [{fb_cat}]")
+            log_event('mention_taker_unfilled', ticker=ticker, order_id=order_id, fallback='maker')
+            # Re-fetch orderbook for maker
+            ob = self.client.get_orderbook(ticker)
+            if ob:
+                yb = ob.get('yes', [])
+                if isinstance(yb, list) and yb:
+                    fb_no_ask = 100 - max(b[0] for b in yb)
+                    return self._execute_premarket_maker(sig, ob, yb, fb_no_ask, category=fb_cat)
+            return None
+
         print(f"    Taker not filled for {ticker}, canceled")
         log_event('mention_taker_unfilled', ticker=ticker, order_id=order_id)
         return None
