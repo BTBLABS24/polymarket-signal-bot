@@ -70,9 +70,9 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 10           # $10 all named categories
-MENTION_BET_NCAA = 10              # $10 for NCAAB/NCAA
-MENTION_BET_OTHER = 10             # $10 for "other" categories
+MENTION_BET_DOLLARS = 3            # $3 all named categories (capped until backtest validates)
+MENTION_BET_NCAA = 3               # $3 for NCAAB/NCAA
+MENTION_BET_OTHER = 3              # $3 for "other" categories
 MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
 MENTION_MIN_NO_PRICE = 0.05       # Only buy NO >= 5c (matches backtest)
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
@@ -81,7 +81,7 @@ MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 99999 # No event cap
-MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker
+MENTION_MAX_MARKET_DOLLARS = 3    # Hard cap $ per individual market/ticker (capped until backtest validates)
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
@@ -210,7 +210,7 @@ DEGRADE_BUY_BELOW = {
 # Original 0-0.5h window: +9% ROI (thin edge). Wider 0-24h: +25.5% ROI.
 # With word blacklist (0% WR words removed): +23.6% ROI on 1106 markets.
 EARNINGS_ENABLED = True
-EARNINGS_BET_DOLLARS = 5         # $5/bet while validating
+EARNINGS_BET_DOLLARS = 3         # $3/bet (capped until backtest validates)
 EARNINGS_MIN_NO_PRICE = 0.05     # 5c
 EARNINGS_MAX_NO_PRICE = 0.30     # 30c
 EARNINGS_MAX_POSITIONS = 20      # independent cap
