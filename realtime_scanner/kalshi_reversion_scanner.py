@@ -454,7 +454,7 @@ class KalshiClient:
 
         # Step 2: query each series for open markets
         all_markets = []
-        LOGGED_KEYS = ('NBA', 'NCAA', 'NCAAB', 'TRUMP', 'MAMDANI', 'NEWSOM')
+        LOGGED_KEYS = ('NBA', 'NCAA', 'NCAAB', 'TRUMP', 'MAMDANI', 'NEWSOM', 'EARNINGS')
         logged_series = [s for s in self._mention_series_cache
                          if any(k in s.upper() for k in LOGGED_KEYS)]
         if not any('NBA' in s.upper() for s in self._mention_series_cache):
@@ -661,7 +661,7 @@ class KalshiClient:
         self._series_resolved_counts = series_resolved
         print(f"  Milestones: {len(milestone_map)} events with start times")
         # Log sports series milestone counts
-        sport_keys = [s for s in series_ms_counts if any(k in s.upper() for k in ('NBA', 'NCAA', 'NCAAB'))]
+        sport_keys = [s for s in series_ms_counts if any(k in s.upper() for k in ('NBA', 'NCAA', 'NCAAB', 'EARNINGS'))]
         if sport_keys:
             parts = [f"{s}={series_ms_counts[s]}" for s in sport_keys]
             print(f"  Sports milestones: {', '.join(parts)}")
@@ -881,7 +881,7 @@ class MentionBuyNoDetector:
                     pass
 
             hours_to_close = (close_ts - now_ts) / 3600
-            if hours_to_close > MENTION_MAX_CLOSE_HOURS:
+            if hours_to_close > MENTION_MAX_CLOSE_HOURS and not is_earnings:
                 debug_counts['too_far'] += 1
                 continue
 
@@ -907,7 +907,7 @@ class MentionBuyNoDetector:
             is_newsom = 'NEWSOMMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
-            _cat = 'NCAA' if is_ncaa else 'NBA' if is_nba else 'Trump' if is_trump else 'Mamdani' if is_mamdani else 'Other'
+            _cat = 'Earnings' if is_earnings else 'NCAA' if is_ncaa else 'NBA' if is_nba else 'Trump' if is_trump else 'Mamdani' if is_mamdani else 'Other'
             if _cat not in cat_debug:
                 cat_debug[_cat] = {'total': 0, 'no_ms': 0, 'timing': 0, 'price': 0, 'cooldown': 0, 'blacklist': 0, 'eligible': 0}
             cat_debug[_cat]['total'] += 1
