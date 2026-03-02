@@ -97,6 +97,26 @@ PRERECORDED_SERIES = {
     'KXMRBEASTMENTION',       # MrBeast (pre-recorded YouTube)
     'KXGOLDENMENTION',        # Golden Bachelor (pre-recorded reality)
 }
+# Categories with <10% actual WR from live fills — net losers, skip entirely
+CATEGORY_KILL_LIST = {
+    'KXVANCEMENTION',         # VANCE: -73% ROI actual
+    'KXGOVERNORMENTION',      # GOVERNOR: -100% ROI actual
+    'KXSPANBERGERMENTION',    # SPANBERGER: -100% ROI actual
+    'KXBERNIEMENTION',        # BERNIE: -100% ROI actual
+    'KXNEWSNATIONMENTION',    # NEWSNATION: losing
+    'KXSNLMENTION',           # SNL: losing
+    'KXECBMENTION',           # ECB: losing
+    'KXBESSENTMTPMENTION',    # BESSENTMTP: losing
+}
+# --- Taker Adverse Selection Gating ---
+# Pre-event taker is -39% ROI from actual fills. Live taker is +13%.
+# Gate taker by category:
+#   Sports (NBA/NCAA): h2e-based (tipoff times reliable)
+#   Trump: volume-gated OR live (shows start ~20min before milestone)
+#   Mamdani: maker-only pre-event (even live taker marginal)
+#   Earnings: h2e-live OR volume-surging
+#   Newsom: h2e-based (reliable timing)
+TAKER_MIN_EVENT_VELOCITY = 5.0    # trades/min — volume surge threshold for taker gating
 # Active series allowlist — only these get signals. Set to None to allow all.
 ACTIVE_SERIES = None              # All categories active
 # Series to scan (NBA for degradation, others for mention strategy)
@@ -106,17 +126,15 @@ MENTION_SCAN_SERIES = [
     'KXNFLMENTION', 'KXNCAAMENTION', 'KXNCAABMENTION',
     'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION', 'KXMLBMENTION',
     'KXFIGHTMENTION', 'KXSBMENTION',
-    # Politics/Gov — Trump +68%, Governor +55%, Press +72%
+    # Politics/Gov — Trump +68%, Newsom +85%, Press +72%
     'KXTRUMPMENTION', 'KXTRUMPMENTIONB',
     'KXMAMDANIMENTION', 'KXNEWSOMMENTION', 'KXHOCHULMENTION',
     'KXSECPRESSMENTION', 'KXLEAVITTMENTION',
-    'KXGOVERNORMENTION',
-    # Media — Maddow +175%, Talk shows, SNL
+    # Media — Maddow +175%, Talk shows
     'KXMADDOWMENTION',
-    'KXSNLMENTION', 'KXROGANMENTION', 'KXCOOPERMENTION',
+    'KXROGANMENTION', 'KXCOOPERMENTION',
     'KXCOLBERTMENTION', 'KXKIMMELMENTION',
-    # Other mention series (catch new ones)
-    'KXVANCEMENTION',
+    # Note: KXGOVERNORMENTION, KXSNLMENTION, KXVANCEMENTION removed (in CATEGORY_KILL_LIST)
 ]
 
 # --- NBA Word Blacklist ---
@@ -898,6 +916,10 @@ class MentionBuyNoDetector:
             if series in PRERECORDED_SERIES:
                 debug_counts['prerecorded'] = debug_counts.get('prerecorded', 0) + 1
                 continue
+            # Kill categories with <10% actual WR — net losers
+            if series in CATEGORY_KILL_LIST:
+                debug_counts['killed_category'] = debug_counts.get('killed_category', 0) + 1
+                continue
             # Active series allowlist — skip anything not in the list
             if ACTIVE_SERIES is not None and series not in ACTIVE_SERIES:
                 debug_counts['paused_series'] = debug_counts.get('paused_series', 0) + 1
@@ -941,12 +963,12 @@ class MentionBuyNoDetector:
                 event_start_ts = ms.get('start_ts', 0)
                 hours_to_event = (event_start_ts - now_ts) / 3600
                 if is_earnings:
-                    # Earnings: 0-30min before event start (taker)
+                    # Earnings: maker pre 0-24h + live taker when surging/h2e<=0
                     if hours_to_event > EARNINGS_WINDOW_HOURS_BEFORE:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
-                    if hours_to_event < 0:
+                    if hours_to_event < -1:
                         debug_counts['too_far'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
@@ -990,22 +1012,23 @@ class MentionBuyNoDetector:
                     # maker orders placed earlier keep running
                     # (price filter handles maker vs taker routing downstream)
                 elif is_trump:
-                    # Trump: 0-24h before event
+                    # Trump: maker pre 0-24h + live taker when volume surging
+                    # Shows start ~20min before milestone, so allow h2e down to -2h
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
-                    if hours_to_event < 0:
+                    if hours_to_event < -2:
                         debug_counts['too_far'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
                 elif is_mamdani or is_newsom:
-                    # Mamdani/Newsom: taker 0-1.5h, maker up to 24h pre
+                    # Mamdani/Newsom: maker pre 0-24h + live window to -2h
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
-                    if hours_to_event < 0:
+                    if hours_to_event < -2:
                         debug_counts['too_far'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
@@ -2077,7 +2100,8 @@ class KalshiReversionScanner:
             seeded = 0
             for pos in existing:
                 t = pos.get('ticker', '')
-                if 'MENTION' in t.upper() and t not in self.mention_detector.signal_history:
+                qty = pos.get('total_traded', 0) or pos.get('position', 0) or 0
+                if 'MENTION' in t.upper() and t not in self.mention_detector.signal_history and qty > 0:
                     self.mention_detector.signal_history[t] = time.time()
                     seeded += 1
             if seeded:
@@ -2210,7 +2234,8 @@ class KalshiReversionScanner:
                     is_ncaa = 'NCAAMENTION' in ticker_up or 'NCAABMENTION' in ticker_up
                     is_nba = 'NBAMENTION' in ticker_up or 'NBAFINALS' in ticker_up
                     if s.get('is_earnings'):
-                        return 0 <= h <= EARNINGS_WINDOW_HOURS_BEFORE
+                        # Earnings: maker pre + live taker up to 1h after start
+                        return -1 <= h <= EARNINGS_WINDOW_HOURS_BEFORE
                     elif is_ncaa:
                         # NCAA: pre 1-24h + live 0.5-1.5h
                         return (-1.5 <= h <= -0.5) or (1 <= h <= 24)
@@ -2218,9 +2243,9 @@ class KalshiReversionScanner:
                         # NBA: pre-event maker up to 24h + live taker 0.5-2h
                         return -2 <= h <= 24
                     else:
-                        # All others (Trump, Mamdani, Newsom, SNL, etc):
-                        # pre-event maker up to 24h + live taker 0.5h
-                        return -0.5 <= h <= 24
+                        # Trump, Mamdani, Newsom, etc:
+                        # pre-event maker up to 24h + live window to 2h after milestone
+                        return -2 <= h <= 24
 
                 eligible = [s for s in mention_signals if in_entry_window(s)]
                 n_total = len(mention_signals)
@@ -2278,10 +2303,13 @@ class KalshiReversionScanner:
                         order_info = self._execute_mention_entry(sig)
 
                     if order_info:
+                        evt_vel = sig.get('event_velocity', 0)
                         if is_earn:
                             tg_label = "EARNINGS TAKER"
                         elif h2e is not None and h2e < 0:
                             tg_label = "LIVE TAKER"
+                        elif evt_vel >= TAKER_MIN_EVENT_VELOCITY:
+                            tg_label = "SURGE TAKER"
                         else:
                             tg_label = "PRE-EVENT TAKER"
                         await self.notifier.send_mention_signal(sig, order_info, trade_label=tg_label)
@@ -3553,6 +3581,45 @@ class KalshiReversionScanner:
             else:
                 print(f"    NBA pre-game ({h2e:.1f}h to tipoff) but too close for maker, skipping (no taker pre-game)")
                 return None
+
+        # --- Taker adverse selection gating ---
+        # Pre-event taker is -39% ROI from actual fills. Route to maker unless live.
+        event_velocity = sig.get('event_velocity', 0)
+        is_live_h2e = h2e is not None and h2e <= 0
+        is_volume_surging = event_velocity >= TAKER_MIN_EVENT_VELOCITY
+
+        is_earnings_cat = 'EARNINGSMENTION' in ticker_upper
+
+        # Trump: taker only when live (h2e<=0) OR volume surging (show started early)
+        if is_trump and not is_live_h2e and not is_volume_surging:
+            if can_rest_maker:
+                print(f"    Trump pre-event ({h2e:.1f}h, vel={event_velocity:.1f}), maker only [{maker_cat}]")
+                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
+            else:
+                print(f"    Trump pre-event, no taker (vel={event_velocity:.1f} < {TAKER_MIN_EVENT_VELOCITY}), skipping")
+                return None
+
+        # Mamdani: maker only for all pre-event (even volume-gated taker is marginal)
+        if is_mamdani and not is_live_h2e:
+            if can_rest_maker:
+                print(f"    Mamdani pre-event ({h2e:.1f}h), maker only [{maker_cat}]")
+                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
+            else:
+                print(f"    Mamdani pre-event, no taker allowed, skipping")
+                return None
+
+        # Earnings: taker only when live (h2e<=0) OR volume surging
+        if is_earnings_cat and not is_live_h2e and not is_volume_surging:
+            if can_rest_maker:
+                print(f"    Earnings pre-event ({h2e:.1f}h, vel={event_velocity:.1f}), maker only [{maker_cat}]")
+                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
+            else:
+                print(f"    Earnings pre-event, no taker (vel={event_velocity:.1f} < {TAKER_MIN_EVENT_VELOCITY}), skipping")
+                return None
+
+        # Log when taker is allowed due to volume surge
+        if is_volume_surging and not is_live_h2e:
+            print(f"    Volume surge detected (vel={event_velocity:.1f}), allowing taker pre-milestone")
 
         if is_ncaa:
             ncaa_live_pre = h2e is not None and h2e >= 0
