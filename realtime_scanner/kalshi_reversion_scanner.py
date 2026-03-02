@@ -3686,8 +3686,6 @@ class KalshiReversionScanner:
             return None
 
         order_id = order.get('order_id', '')
-        self.mention_detector.signal_history[ticker] = time.time()
-        self.mention_detector._save()
 
         print(f"    Taker order placed: {order_id} ({contracts} NO @ limit {order_price}c, ${bet_dollars:.2f})")
         log_event('mention_taker_placed', ticker=ticker, order_id=order_id,
@@ -3731,6 +3729,9 @@ class KalshiReversionScanner:
                 self._queue_tg("TAKER FILLED", ticker,
                                price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
                                title=sig.get('title', '')[:60])
+                # Set cooldown only after successful fill
+                self.mention_detector.signal_history[ticker] = time.time()
+                self.mention_detector._save()
                 return info
 
         # Not filled even as taker — cancel
