@@ -191,7 +191,7 @@ DEGRADE_BUY_BELOW = {
 # Buy NO on earnings call mention markets.
 # Original 0-0.5h window: +9% ROI (thin edge). Wider 0-24h: +25.5% ROI.
 # With word blacklist (0% WR words removed): +23.6% ROI on 1106 markets.
-EARNINGS_ENABLED = False
+EARNINGS_ENABLED = True
 EARNINGS_BET_DOLLARS = 5         # $5/bet while validating
 EARNINGS_MIN_NO_PRICE = 0.05     # 5c
 EARNINGS_MAX_NO_PRICE = 0.30     # 30c
@@ -2275,10 +2275,7 @@ class KalshiReversionScanner:
 
                     order_info = None
                     if self.client.can_trade:
-                        if is_earn:
-                            order_info = self._execute_earnings_entry(sig)
-                        else:
-                            order_info = self._execute_mention_entry(sig)
+                        order_info = self._execute_mention_entry(sig)
 
                     if order_info:
                         if is_earn:
@@ -3366,13 +3363,16 @@ class KalshiReversionScanner:
 
         # Bet sizing (same logic as taker path)
         ticker_upper = ticker.upper()
+        is_earnings_maker = 'EARNINGSMENTION' in ticker_upper
         is_other = not any(k in ticker_upper for k in (
             'TRUMPMENTION', 'MAMDANIMENTION', 'NEWSOMMENTION',
             'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION',
-            'VANCEMENTION',
+            'VANCEMENTION', 'EARNINGSMENTION',
         ))
         is_ncaa_maker = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
-        if is_other:
+        if is_earnings_maker:
+            mention_bet = EARNINGS_BET_DOLLARS
+        elif is_other:
             mention_bet = MENTION_BET_OTHER
         elif is_ncaa_maker:
             mention_bet = MENTION_BET_NCAA
@@ -3573,10 +3573,11 @@ class KalshiReversionScanner:
             return None
 
         # Category detection for sizing and slippage
+        is_earnings_taker = 'EARNINGSMENTION' in ticker_upper
         is_other = not any(k in ticker_upper for k in (
             'TRUMPMENTION', 'MAMDANIMENTION', 'NEWSOMMENTION',
             'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION',
-            'VANCEMENTION',
+            'VANCEMENTION', 'EARNINGSMENTION',
         ))
 
         # Slippage guard: named categories 4c, other 2c
@@ -3602,7 +3603,9 @@ class KalshiReversionScanner:
 
         # Category-based bet sizing
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
-        if is_other:
+        if is_earnings_taker:
+            mention_bet = EARNINGS_BET_DOLLARS
+        elif is_other:
             mention_bet = MENTION_BET_OTHER
         elif is_ncaa:
             mention_bet = MENTION_BET_NCAA
