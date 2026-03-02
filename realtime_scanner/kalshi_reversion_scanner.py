@@ -238,7 +238,7 @@ STALE_MIN_HOURS_INTO_GAME = 1.0   # only scan 1h+ after event start
 STALE_MAX_POSITIONS = 30          # independent cap
 STALE_MAX_MARKET_DOLLARS = 10     # hard cap per market
 
-# NCAA theta re-entry — buy again at T+20min if NO still cheap
+# NCAA theta re-entry — buy at T+20min if NO price hasn't moved from event start
 THETA_REENTRY_ENABLED = True
 THETA_REENTRY_BET = 3               # $3 per re-entry bet
 THETA_REENTRY_MIN_GAME_MIN = 20     # min minutes into game before re-entry
@@ -246,7 +246,8 @@ THETA_REENTRY_MAX_GAME_MIN = 80     # max minutes (don't re-enter too late)
 THETA_REENTRY_MIN_NO_CENTS = 10     # min NO price for re-entry
 THETA_REENTRY_MAX_NO_CENTS = 26     # max NO price for re-entry (backtest: 10-26c)
 THETA_REENTRY_MAX_SLIPPAGE = 4      # max slippage cents
-THETA_REENTRY_MAX_MARKET_DOLLARS = 6 # combined cap (initial $3 + re-entry $3)
+THETA_REENTRY_MAX_DEVIATION = 5     # max cents NO can deviate from start price
+THETA_REENTRY_MAX_MARKET_DOLLARS = 3 # per-market cap for theta entries
 THETA_REENTRY_MAX_POSITIONS = 20    # independent cap
 
 # State files
@@ -2044,6 +2045,7 @@ class KalshiReversionScanner:
         self._resting_file = Path(__file__).parent / 'resting_orders.json'
         self._load_resting_orders()
         self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
+        self._theta_start_prices = {}  # ticker -> NO price (cents) at event start
 
     def _queue_tg(self, event_type, ticker, **kwargs):
         """Queue a telegram notification from sync code. Flushed in async main loop."""
@@ -3113,8 +3115,8 @@ class KalshiReversionScanner:
         return None
 
     async def _scan_theta_reentry(self, mention_markets, milestones, now):
-        """NCAA theta re-entry: if an NCAA game is 20+ min in and NO is still
-        10-26c, buy again. Backtest: +93.7% ROI at T+20 with slippage."""
+        """NCAA theta: snapshot NO prices near game start, then buy at T+20min
+        if NO price hasn't deviated from start. Backtest: +93.7% ROI."""
         if not THETA_REENTRY_ENABLED:
             return
 
@@ -3122,47 +3124,92 @@ class KalshiReversionScanner:
         if theta_count >= THETA_REENTRY_MAX_POSITIONS:
             return
 
-        candidates = []
+        # Phase 1: Snapshot NO prices for NCAA markets near game start (0-10 min in)
+        # so we have a baseline to compare against at T+20
         for m in mention_markets:
             ticker = m.get('ticker', '')
             ticker_upper = ticker.upper()
-
-            # NCAA only
             if 'NCAAMENTION' not in ticker_upper and 'NCAABMENTION' not in ticker_upper:
                 continue
+            if ticker in self._theta_start_prices:
+                continue  # already cached
 
-            # Word blacklist
             word = ticker.split('-')[-1].upper()
             if word in NCAAB_WORD_BLACKLIST or word in NCAAB_ARENA_BLACKLIST:
                 continue
 
             event_ticker = m.get('event_ticker', '')
-            ms = milestones.get(event_ticker)
-            if not ms or not ms.get('start_ts'):
+            ms_data = milestones.get(event_ticker)
+            if not ms_data or not ms_data.get('start_ts'):
                 continue
 
-            minutes_into = (now - ms['start_ts']) / 60.0
+            minutes_into = (now - ms_data['start_ts']) / 60.0
+            if minutes_into < 0 or minutes_into > 10:
+                continue  # only snapshot in first 10 min of game
+
+            # Get current NO price from market data (no orderbook fetch needed)
+            no_price = m.get('no_price')
+            if no_price is None:
+                yes_price = m.get('yes_price')
+                if yes_price is not None:
+                    no_price = 1.0 - yes_price
+            if no_price is not None:
+                no_cents = int(round(no_price * 100))
+                if 3 <= no_cents <= 50:  # sane range
+                    self._theta_start_prices[ticker] = no_cents
+                    print(f"    Theta snapshot: {ticker.split('-')[-1]} @ {no_cents}c (T+{minutes_into:.0f}min)")
+
+        # Clean up stale entries (events that ended 2+ hours ago)
+        stale_tickers = []
+        for ticker in self._theta_start_prices:
+            parts = ticker.rsplit('-', 1)
+            et = parts[0] if len(parts) > 1 else ''
+            ms_data = milestones.get(et)
+            if ms_data and ms_data.get('end_ts') and ms_data['end_ts'] < now - 7200:
+                stale_tickers.append(ticker)
+        for t in stale_tickers:
+            del self._theta_start_prices[t]
+
+        # Phase 2: Find candidates — NCAA markets 20-80 min in where NO hasn't deviated
+        candidates = []
+        for m in mention_markets:
+            ticker = m.get('ticker', '')
+            ticker_upper = ticker.upper()
+
+            if 'NCAAMENTION' not in ticker_upper and 'NCAABMENTION' not in ticker_upper:
+                continue
+
+            word = ticker.split('-')[-1].upper()
+            if word in NCAAB_WORD_BLACKLIST or word in NCAAB_ARENA_BLACKLIST:
+                continue
+
+            event_ticker = m.get('event_ticker', '')
+            ms_data = milestones.get(event_ticker)
+            if not ms_data or not ms_data.get('start_ts'):
+                continue
+
+            minutes_into = (now - ms_data['start_ts']) / 60.0
             if minutes_into < THETA_REENTRY_MIN_GAME_MIN:
                 continue
             if minutes_into > THETA_REENTRY_MAX_GAME_MIN:
                 continue
 
-            # Don't scan after event ended
-            if ms.get('end_ts') and ms['end_ts'] <= now:
+            if ms_data.get('end_ts') and ms_data['end_ts'] <= now:
                 continue
 
-            # Only re-enter if we already have a mention position on this ticker
-            if not self.positions.has_open_ticker(ticker, signal_type='mention_buy_no'):
+            # Must have a start price snapshot
+            start_price = self._theta_start_prices.get(ticker)
+            if start_price is None:
                 continue
 
-            # Skip if we already have a theta re-entry on this ticker
+            # Skip if we already have a theta position on this ticker
             if self.positions.has_open_ticker(ticker, signal_type='ncaa_theta_reentry'):
                 continue
 
-            # Per-market combined exposure check
+            # Per-market theta exposure check
             ticker_exp = 0
             for p in self.positions.positions:
-                if p.get('ticker') == ticker and p.get('status') == 'open':
+                if p.get('ticker') == ticker and p.get('status') == 'open' and p.get('signal_type') == 'ncaa_theta_reentry':
                     ticker_exp += p.get('bet_dollars', 0)
             if ticker_exp >= THETA_REENTRY_MAX_MARKET_DOLLARS:
                 continue
@@ -3172,6 +3219,7 @@ class KalshiReversionScanner:
                 'event_ticker': event_ticker,
                 'word': word,
                 'minutes_into': minutes_into,
+                'start_price': start_price,
                 'title': m.get('title', m.get('subtitle', '')),
             })
 
@@ -3184,23 +3232,22 @@ class KalshiReversionScanner:
                 break
 
             ticker = c['ticker']
+            start_price = c['start_price']
 
             # Fetch orderbook for current NO price
             try:
                 orderbook = self.client.get_orderbook(ticker)
             except Exception as e:
-                print(f"    Theta re-entry: orderbook error for {ticker}: {e}")
+                print(f"    Theta: orderbook error for {ticker}: {e}")
                 continue
 
             if not orderbook:
                 continue
 
-            # Get best NO ask from YES bids
             yes_bids = orderbook.get('yes', {}).get('bids', [])
             if not yes_bids:
                 continue
 
-            # Parse YES bids to find best NO ask
             yes_bids_raw = []
             for b in yes_bids:
                 price = b.get('price', 0)
@@ -3211,11 +3258,17 @@ class KalshiReversionScanner:
             if not yes_bids_raw:
                 continue
 
-            yes_bids_raw.sort(key=lambda x: -x[0])  # highest first
+            yes_bids_raw.sort(key=lambda x: -x[0])
             best_yes_bid = yes_bids_raw[0][0]
             no_ask_cents = 100 - best_yes_bid
 
+            # Price range check
             if no_ask_cents < THETA_REENTRY_MIN_NO_CENTS or no_ask_cents > THETA_REENTRY_MAX_NO_CENTS:
+                continue
+
+            # Deviation check: NO price must be within ±MAX_DEVIATION of start price
+            deviation = abs(no_ask_cents - start_price)
+            if deviation > THETA_REENTRY_MAX_DEVIATION:
                 continue
 
             # Slippage guard
@@ -3234,7 +3287,7 @@ class KalshiReversionScanner:
             bet = THETA_REENTRY_BET
             ticker_exp = 0
             for p in self.positions.positions:
-                if p.get('ticker') == ticker and p.get('status') == 'open':
+                if p.get('ticker') == ticker and p.get('status') == 'open' and p.get('signal_type') == 'ncaa_theta_reentry':
                     ticker_exp += p.get('bet_dollars', 0)
             remaining = THETA_REENTRY_MAX_MARKET_DOLLARS - ticker_exp
             if remaining <= 0:
@@ -3251,7 +3304,7 @@ class KalshiReversionScanner:
 
             order_price = max_slip_price
 
-            print(f"  THETA RE-ENTRY: {c['word']} @ {taker_price}c (limit {order_price}c) "
+            print(f"  THETA: {c['word']} @ {taker_price}c (start={start_price}c, dev={deviation}c) "
                   f"T+{c['minutes_into']:.0f}min, ${bet_dollars:.2f}")
 
             if DRY_RUN:
@@ -3262,7 +3315,6 @@ class KalshiReversionScanner:
                     'bet_dollars': bet_dollars,
                     'dry_run': True,
                 }
-                # Build a signal dict for positions.add()
                 sig = {
                     'ticker': ticker,
                     'event_ticker': c['event_ticker'],
@@ -3270,7 +3322,7 @@ class KalshiReversionScanner:
                     'signal_type': 'ncaa_theta_reentry',
                     'fade_action': 'buy', 'fade_side': 'no',
                     'entry_price': taker_price / 100,
-                    'pre_signal_price': taker_price / 100,
+                    'pre_signal_price': start_price / 100,
                     'price_move': 0, 'n_small_trades': 0, 'retail_contracts': 0,
                     'signal_time': now,
                     'no_price': taker_price / 100,
@@ -3279,6 +3331,7 @@ class KalshiReversionScanner:
                     'type': 'entry', 'strategy': 'ncaa_theta_reentry',
                     'ticker': ticker, 'side': 'no', 'action': 'buy',
                     'contracts': contracts, 'price_cents': taker_price,
+                    'start_price_cents': start_price,
                     'bet_dollars': bet_dollars, 'dry_run': True,
                 })
                 self.positions.add(sig, order_info)
@@ -3292,14 +3345,14 @@ class KalshiReversionScanner:
                 count=contracts, price_cents=order_price,
             )
             if not order:
-                print(f"    Theta re-entry order failed for {ticker}")
+                print(f"    Theta order failed for {ticker}")
                 continue
 
             order_id = order.get('order_id', '')
             print(f"    Theta taker order: {order_id} ({contracts} NO @ limit {order_price}c)")
             log_event('theta_reentry_placed', ticker=ticker, order_id=order_id,
                       contracts=contracts, price_cents=order_price, bet_dollars=bet_dollars,
-                      minutes_into=c['minutes_into'])
+                      start_price_cents=start_price, minutes_into=c['minutes_into'])
 
             time.sleep(2)
             status = self.client.get_order(order_id)
@@ -3328,7 +3381,7 @@ class KalshiReversionScanner:
                         'signal_type': 'ncaa_theta_reentry',
                         'fade_action': 'buy', 'fade_side': 'no',
                         'entry_price': avg_fill / 100,
-                        'pre_signal_price': taker_price / 100,
+                        'pre_signal_price': start_price / 100,
                         'price_move': 0, 'n_small_trades': 0, 'retail_contracts': 0,
                         'signal_time': now,
                         'no_price': avg_fill / 100,
@@ -3338,6 +3391,7 @@ class KalshiReversionScanner:
                         'ticker': ticker, 'order_id': order_id,
                         'side': 'no', 'action': 'buy',
                         'contracts_filled': filled, 'price_cents': taker_price,
+                        'start_price_cents': start_price,
                         'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
                     })
                     self.positions.add(sig, info)
@@ -3346,8 +3400,8 @@ class KalshiReversionScanner:
                     print(f"    THETA FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
                     log_event('theta_reentry_filled', ticker=ticker, order_id=order_id,
                               filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
-                              minutes_into=c['minutes_into'])
-                    self._queue_tg("THETA RE-ENTRY", ticker,
+                              start_price_cents=start_price, minutes_into=c['minutes_into'])
+                    self._queue_tg("THETA BUY", ticker,
                                    price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
                                    title=c['title'][:60])
                     continue
@@ -3357,11 +3411,11 @@ class KalshiReversionScanner:
                 self.client.cancel_order(order_id)
             except Exception:
                 pass
-            print(f"    Theta re-entry not filled for {ticker}, canceled")
+            print(f"    Theta not filled for {ticker}, canceled")
             log_event('theta_reentry_unfilled', ticker=ticker, order_id=order_id)
 
         if n_filled:
-            print(f"  Theta re-entry: {n_filled} new fills from {len(candidates)} candidates")
+            print(f"  Theta: {n_filled} new fills from {len(candidates)} candidates")
 
     async def _scan_stale_orders(self, mention_markets, milestones, now):
         """Scan all mention markets 1h+ into event for forgotten limit orders.
