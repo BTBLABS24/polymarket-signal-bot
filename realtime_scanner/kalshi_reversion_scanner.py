@@ -238,6 +238,17 @@ STALE_MIN_HOURS_INTO_GAME = 1.0   # only scan 1h+ after event start
 STALE_MAX_POSITIONS = 30          # independent cap
 STALE_MAX_MARKET_DOLLARS = 10     # hard cap per market
 
+# NCAA theta re-entry — buy again at T+20min if NO still cheap
+THETA_REENTRY_ENABLED = True
+THETA_REENTRY_BET = 3               # $3 per re-entry bet
+THETA_REENTRY_MIN_GAME_MIN = 20     # min minutes into game before re-entry
+THETA_REENTRY_MAX_GAME_MIN = 80     # max minutes (don't re-enter too late)
+THETA_REENTRY_MIN_NO_CENTS = 10     # min NO price for re-entry
+THETA_REENTRY_MAX_NO_CENTS = 26     # max NO price for re-entry (backtest: 10-26c)
+THETA_REENTRY_MAX_SLIPPAGE = 4      # max slippage cents
+THETA_REENTRY_MAX_MARKET_DOLLARS = 6 # combined cap (initial $3 + re-entry $3)
+THETA_REENTRY_MAX_POSITIONS = 20    # independent cap
+
 # State files
 STATE_DIR = Path(__file__).parent
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
@@ -1404,7 +1415,7 @@ class KalshiPositionTracker:
             'status': 'open',
             'signal_type': signal_type,
         }
-        if signal_type == 'mention_buy_no':
+        if signal_type in ('mention_buy_no', 'ncaa_theta_reentry'):
             pos['no_price'] = signal.get('no_price', 0)
             pos['hold_until_settle'] = True
         if order_info:
@@ -1883,7 +1894,7 @@ class KalshiNotifier:
         msg = (
             f"Kalshi Auto-Trading Bot Started\n\n"
             f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE TRADING'}\n"
-            f"Strategies: Mention BUY NO (${MENTION_BET_DOLLARS}/named, ${MENTION_BET_NCAA}/NCAA, ${MENTION_BET_OTHER}/other), Degradation ({'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet'})\n"
+            f"Strategies: Mention BUY NO (${MENTION_BET_DOLLARS}/named, ${MENTION_BET_NCAA}/NCAA, ${MENTION_BET_OTHER}/other), Theta re-entry ({'ON' if THETA_REENTRY_ENABLED else 'OFF'}, ${THETA_REENTRY_BET}/bet at T+{THETA_REENTRY_MIN_GAME_MIN}min), Degradation ({'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet'})\n"
             f"Max mention positions: {MENTION_MAX_POSITIONS}\n"
             f"{bal_line}"
             f"Open positions: {n_open}\n"
@@ -2322,10 +2333,14 @@ class KalshiReversionScanner:
                 if DEGRADE_ENABLED:
                     await self._scan_degradation_curve(mention_markets, milestones, now)
 
-                # 3c. YES-buy strategy: buy YES on always-said NBA words
+                # 3c. NCAA theta re-entry: buy NO again at T+20min if still cheap
+                if not low_balance:
+                    await self._scan_theta_reentry(mention_markets, milestones, now)
+
+                # 3d. YES-buy strategy: buy YES on always-said NBA words
                 await self._scan_yes_buys(mention_markets, milestones, now)
 
-                # 3d. Stale order strategy: buy forgotten limit orders 1h+ into game
+                # 3e. Stale order strategy: buy forgotten limit orders 1h+ into game
                 if not low_balance:
                     await self._scan_stale_orders(mention_markets, milestones, now)
         else:
@@ -2347,6 +2362,7 @@ class KalshiReversionScanner:
         degrade_count = self.positions.count('degrade_buy_no')
         earnings_count = self.positions.count('earnings_buy_no')
         yes_buy_count = self.positions.count('mention_buy_yes')
+        theta_count = self.positions.count('ncaa_theta_reentry')
         parts = [f"mention={mention_count}"]
         if yes_buy_count:
             parts.append(f"yes_buy={yes_buy_count}")
@@ -2354,6 +2370,8 @@ class KalshiReversionScanner:
             parts.append(f"degrade={degrade_count}")
         if earnings_count:
             parts.append(f"earnings={earnings_count}")
+        if theta_count:
+            parts.append(f"theta={theta_count}")
         if self._resting_premarket_orders:
             parts.append(f"resting={len(self._resting_premarket_orders)}")
         print(f"  Open positions: {self.positions.count()} ({', '.join(parts)}, {self.positions.live_count()} live)")
@@ -3093,6 +3111,257 @@ class KalshiReversionScanner:
         print(f"    YES-BUY taker not filled for {ticker}, canceled")
         log_event('yes_buy_unfilled', ticker=ticker, order_id=order_id)
         return None
+
+    async def _scan_theta_reentry(self, mention_markets, milestones, now):
+        """NCAA theta re-entry: if an NCAA game is 20+ min in and NO is still
+        10-26c, buy again. Backtest: +93.7% ROI at T+20 with slippage."""
+        if not THETA_REENTRY_ENABLED:
+            return
+
+        theta_count = self.positions.count('ncaa_theta_reentry')
+        if theta_count >= THETA_REENTRY_MAX_POSITIONS:
+            return
+
+        candidates = []
+        for m in mention_markets:
+            ticker = m.get('ticker', '')
+            ticker_upper = ticker.upper()
+
+            # NCAA only
+            if 'NCAAMENTION' not in ticker_upper and 'NCAABMENTION' not in ticker_upper:
+                continue
+
+            # Word blacklist
+            word = ticker.split('-')[-1].upper()
+            if word in NCAAB_WORD_BLACKLIST or word in NCAAB_ARENA_BLACKLIST:
+                continue
+
+            event_ticker = m.get('event_ticker', '')
+            ms = milestones.get(event_ticker)
+            if not ms or not ms.get('start_ts'):
+                continue
+
+            minutes_into = (now - ms['start_ts']) / 60.0
+            if minutes_into < THETA_REENTRY_MIN_GAME_MIN:
+                continue
+            if minutes_into > THETA_REENTRY_MAX_GAME_MIN:
+                continue
+
+            # Don't scan after event ended
+            if ms.get('end_ts') and ms['end_ts'] <= now:
+                continue
+
+            # Only re-enter if we already have a mention position on this ticker
+            if not self.positions.has_open_ticker(ticker, signal_type='mention_buy_no'):
+                continue
+
+            # Skip if we already have a theta re-entry on this ticker
+            if self.positions.has_open_ticker(ticker, signal_type='ncaa_theta_reentry'):
+                continue
+
+            # Per-market combined exposure check
+            ticker_exp = 0
+            for p in self.positions.positions:
+                if p.get('ticker') == ticker and p.get('status') == 'open':
+                    ticker_exp += p.get('bet_dollars', 0)
+            if ticker_exp >= THETA_REENTRY_MAX_MARKET_DOLLARS:
+                continue
+
+            candidates.append({
+                'ticker': ticker,
+                'event_ticker': event_ticker,
+                'word': word,
+                'minutes_into': minutes_into,
+                'title': m.get('title', m.get('subtitle', '')),
+            })
+
+        if not candidates:
+            return
+
+        n_filled = 0
+        for c in candidates:
+            if theta_count >= THETA_REENTRY_MAX_POSITIONS:
+                break
+
+            ticker = c['ticker']
+
+            # Fetch orderbook for current NO price
+            try:
+                orderbook = self.client.get_orderbook(ticker)
+            except Exception as e:
+                print(f"    Theta re-entry: orderbook error for {ticker}: {e}")
+                continue
+
+            if not orderbook:
+                continue
+
+            # Get best NO ask from YES bids
+            yes_bids = orderbook.get('yes', {}).get('bids', [])
+            if not yes_bids:
+                continue
+
+            # Parse YES bids to find best NO ask
+            yes_bids_raw = []
+            for b in yes_bids:
+                price = b.get('price', 0)
+                qty = b.get('quantity', 0)
+                if price > 0 and qty > 0:
+                    yes_bids_raw.append((price, qty))
+
+            if not yes_bids_raw:
+                continue
+
+            yes_bids_raw.sort(key=lambda x: -x[0])  # highest first
+            best_yes_bid = yes_bids_raw[0][0]
+            no_ask_cents = 100 - best_yes_bid
+
+            if no_ask_cents < THETA_REENTRY_MIN_NO_CENTS or no_ask_cents > THETA_REENTRY_MAX_NO_CENTS:
+                continue
+
+            # Slippage guard
+            max_slip_price = no_ask_cents + THETA_REENTRY_MAX_SLIPPAGE
+            taker_price = no_ask_cents
+
+            # Depth within slippage window
+            min_yes_bid = 100 - max_slip_price
+            depth_contracts = 0
+            for bid_price, bid_qty in yes_bids_raw:
+                if bid_price >= min_yes_bid:
+                    depth_contracts += bid_qty
+            depth_dollars = round(depth_contracts * taker_price / 100, 2) if depth_contracts > 0 else 0
+
+            # Bet sizing
+            bet = THETA_REENTRY_BET
+            ticker_exp = 0
+            for p in self.positions.positions:
+                if p.get('ticker') == ticker and p.get('status') == 'open':
+                    ticker_exp += p.get('bet_dollars', 0)
+            remaining = THETA_REENTRY_MAX_MARKET_DOLLARS - ticker_exp
+            if remaining <= 0:
+                continue
+            bet = min(bet, remaining)
+
+            if depth_dollars > 0 and bet > depth_dollars:
+                bet = depth_dollars
+
+            contracts = int(bet / (taker_price / 100))
+            if contracts < 1:
+                contracts = 1
+            bet_dollars = round(contracts * taker_price / 100, 2)
+
+            order_price = max_slip_price
+
+            print(f"  THETA RE-ENTRY: {c['word']} @ {taker_price}c (limit {order_price}c) "
+                  f"T+{c['minutes_into']:.0f}min, ${bet_dollars:.2f}")
+
+            if DRY_RUN:
+                order_info = {
+                    'order_id': f'DRY-THETA-{uuid.uuid4().hex[:8]}',
+                    'fill_price': taker_price / 100,
+                    'fill_count': contracts,
+                    'bet_dollars': bet_dollars,
+                    'dry_run': True,
+                }
+                # Build a signal dict for positions.add()
+                sig = {
+                    'ticker': ticker,
+                    'event_ticker': c['event_ticker'],
+                    'title': c['title'],
+                    'signal_type': 'ncaa_theta_reentry',
+                    'fade_action': 'buy', 'fade_side': 'no',
+                    'entry_price': taker_price / 100,
+                    'pre_signal_price': taker_price / 100,
+                    'price_move': 0, 'n_small_trades': 0, 'retail_contracts': 0,
+                    'signal_time': now,
+                    'no_price': taker_price / 100,
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'ncaa_theta_reentry',
+                    'ticker': ticker, 'side': 'no', 'action': 'buy',
+                    'contracts': contracts, 'price_cents': taker_price,
+                    'bet_dollars': bet_dollars, 'dry_run': True,
+                })
+                self.positions.add(sig, order_info)
+                theta_count += 1
+                n_filled += 1
+                print(f"    DRY RUN: {contracts} NO @ {taker_price}c (${bet_dollars:.2f})")
+                continue
+
+            order = self.client.create_order(
+                ticker=ticker, side='no', action='buy',
+                count=contracts, price_cents=order_price,
+            )
+            if not order:
+                print(f"    Theta re-entry order failed for {ticker}")
+                continue
+
+            order_id = order.get('order_id', '')
+            print(f"    Theta taker order: {order_id} ({contracts} NO @ limit {order_price}c)")
+            log_event('theta_reentry_placed', ticker=ticker, order_id=order_id,
+                      contracts=contracts, price_cents=order_price, bet_dollars=bet_dollars,
+                      minutes_into=c['minutes_into'])
+
+            time.sleep(2)
+            status = self.client.get_order(order_id)
+            if status:
+                filled = status.get('quantity_filled', 0)
+                if filled > 0:
+                    remaining_ords = status.get('remaining_count', 0)
+                    if remaining_ords > 0:
+                        try:
+                            self.client.cancel_order(order_id)
+                        except Exception:
+                            pass
+                    avg_fill = status.get('average_fill_price', taker_price)
+                    actual_dollars = round(filled * avg_fill / 100, 2)
+                    info = {
+                        'order_id': order_id,
+                        'fill_price': avg_fill / 100,
+                        'fill_count': filled,
+                        'bet_dollars': actual_dollars,
+                        'dry_run': False,
+                    }
+                    sig = {
+                        'ticker': ticker,
+                        'event_ticker': c['event_ticker'],
+                        'title': c['title'],
+                        'signal_type': 'ncaa_theta_reentry',
+                        'fade_action': 'buy', 'fade_side': 'no',
+                        'entry_price': avg_fill / 100,
+                        'pre_signal_price': taker_price / 100,
+                        'price_move': 0, 'n_small_trades': 0, 'retail_contracts': 0,
+                        'signal_time': now,
+                        'no_price': avg_fill / 100,
+                    }
+                    self.trade_logger.record({
+                        'type': 'entry', 'strategy': 'ncaa_theta_reentry',
+                        'ticker': ticker, 'order_id': order_id,
+                        'side': 'no', 'action': 'buy',
+                        'contracts_filled': filled, 'price_cents': taker_price,
+                        'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                    })
+                    self.positions.add(sig, info)
+                    theta_count += 1
+                    n_filled += 1
+                    print(f"    THETA FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
+                    log_event('theta_reentry_filled', ticker=ticker, order_id=order_id,
+                              filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
+                              minutes_into=c['minutes_into'])
+                    self._queue_tg("THETA RE-ENTRY", ticker,
+                                   price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                                   title=c['title'][:60])
+                    continue
+
+            # Not filled — cancel
+            try:
+                self.client.cancel_order(order_id)
+            except Exception:
+                pass
+            print(f"    Theta re-entry not filled for {ticker}, canceled")
+            log_event('theta_reentry_unfilled', ticker=ticker, order_id=order_id)
+
+        if n_filled:
+            print(f"  Theta re-entry: {n_filled} new fills from {len(candidates)} candidates")
 
     async def _scan_stale_orders(self, mention_markets, milestones, now):
         """Scan all mention markets 1h+ into event for forgotten limit orders.
