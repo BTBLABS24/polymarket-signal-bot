@@ -197,9 +197,9 @@ EARNINGS_MIN_NO_PRICE = 0.05     # 5c
 EARNINGS_MAX_NO_PRICE = 0.30     # 30c
 EARNINGS_MAX_POSITIONS = 20      # independent cap
 EARNINGS_MAX_EVENT_DOLLARS = 30  # $30 per earnings call
-# Entry window: 0-4h before earnings call
-# 0-4h: +13.5% ROI (896 mkts), 0-24h: +31.9% (1163 mkts, but thin fills 8-24h out)
-EARNINGS_WINDOW_HOURS_BEFORE = 4  # 4h before event
+# Entry window: any time pre-event (maker rests until event start)
+# 0-4h: +13.5% ROI (896 mkts), 0-24h: +31.9% (1163 mkts)
+EARNINGS_WINDOW_HOURS_BEFORE = 720  # effectively unlimited — maker rests pre-event
 # Hot words to exclude — too common/misleading on earnings calls
 # 0% NO WR words: INTE, TOKE, GUID, RETE, OPEN, DELI, WAYM, LOYA, DIGI, OMNI, EXPN
 EARNINGS_WORD_BLACKLIST = {
