@@ -73,8 +73,29 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 MENTION_BET_DOLLARS = 3            # $3 all named categories (capped until backtest validates)
 MENTION_BET_NCAA = 3               # $3 for NCAAB/NCAA
 MENTION_BET_OTHER = 3              # $3 for "other" categories
-MENTION_MAX_NO_PRICE = 0.30       # Only buy NO <= 30c (YES >= 70c) — cheap NO sweet spot
-MENTION_MIN_NO_PRICE = 0.05       # Only buy NO >= 5c (matches backtest)
+MENTION_MAX_NO_PRICE = 0.70       # Global fallback max (per-category overrides below)
+MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides below)
+# Per-category NO price ranges — backtest-optimized (60 days, taker +4c slippage).
+# Cheap NOs (5-30c) are losers for most categories: the word usually gets said.
+# Edge is in medium NOs (30-70c): market overestimates word frequency.
+# Only NCAA and Newsom are profitable at the cheap end.
+CATEGORY_NO_RANGE = {
+    # (min_cents, max_cents) — taker range. Maker can be wider (up to PREMARKET_MAX_NO_PRICE).
+    'NCAA':     (5, 30),    # +40.5% ROI, $0.18/d — cheap NOs work (theta decay)
+    'Newsom':   (5, 30),    # +95.9% ROI, $0.17/d — strong at cheap end
+    'LASTWORD': (5, 30),    # +101.7% ROI, $0.18/d — NEW: add to scan series
+    'FOXNEWS':  (5, 30),    # +46.1% ROI, $0.07/d — NEW: add to scan series
+    'HOCHUL':   (10, 50),   # +41.1% ROI, $0.13/d — wider range helps
+    'Trump':    (15, 50),   # +12.1% ROI, $0.33/d — cheap is -1.7%, medium is +12%
+    'Mamdani':  (30, 70),   # +18.8% ROI, $0.50/d — cheap is -24%, medium is +19%
+    'NFL':      (30, 70),   # +13.1% ROI, $0.24/d — cheap is -9%, medium is +13%
+    'SECPRESS': (30, 70),   # +32.2% ROI, $0.25/d — cheap is -43%, medium is +32%
+    'NBA':      (50, 90),   # +3.7% ROI, $0.21/d — cheap is -12%, high is marginal+
+    'Fight':    (5, 30),    # +28.2% ROI, $0.01/d — small sample, keep conservative
+    'Earnings': (10, 30),   # +16.0% ROI, $0.10/d — only the cheap-mid slice works
+    'MADDOW':   (5, 30),    # +197% ROI, tiny sample — keep if it shows up
+    'COLBERT':  (5, 30),    # small sample, keep conservative
+}
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (events live with 24h close)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
@@ -107,6 +128,10 @@ CATEGORY_KILL_LIST = {
     'KXSNLMENTION',           # SNL: losing
     'KXECBMENTION',           # ECB: losing
     'KXBESSENTMTPMENTION',    # BESSENTMTP: losing
+    'KXKIMMELMENTION',        # KIMMEL: -59% ROI backtest (11 trades)
+    'KXLEAVITTMENTION',       # LEAVITT: -100% ROI backtest (1 trade)
+    'KXROGANMENTION',         # ROGAN: no backtest data, cut for variance
+    'KXCOOPERMENTION',        # COOPER: no backtest data, cut for variance
 }
 # --- Taker Adverse Selection Gating ---
 # Pre-event taker is -39% ROI from actual fills. Live taker is +13%.
@@ -121,20 +146,25 @@ TAKER_MIN_EVENT_VELOCITY = 5.0    # trades/min — volume surge threshold for ta
 ACTIVE_SERIES = None              # All categories active
 # Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
-    # Sports — NBA (degradation curve), NFL +80%, NCAA +60%, Fight +34%
-    'KXNBAMENTION',
-    'KXNFLMENTION', 'KXNCAAMENTION', 'KXNCAABMENTION',
+    # Sports — per-category NO ranges (see CATEGORY_NO_RANGE)
+    'KXNBAMENTION',                                    # NBA 50-90c
+    'KXNFLMENTION',                                    # NFL 30-70c
+    'KXNCAAMENTION', 'KXNCAABMENTION',                 # NCAA 5-30c
     'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION', 'KXMLBMENTION',
-    'KXFIGHTMENTION', 'KXSBMENTION',
-    # Politics/Gov — Trump +68%, Newsom +85%, Press +72%
-    'KXTRUMPMENTION', 'KXTRUMPMENTIONB',
-    'KXMAMDANIMENTION', 'KXNEWSOMMENTION', 'KXHOCHULMENTION',
-    'KXSECPRESSMENTION', 'KXLEAVITTMENTION',
-    # Media — Maddow +175%, Talk shows
-    'KXMADDOWMENTION',
-    'KXROGANMENTION', 'KXCOOPERMENTION',
-    'KXCOLBERTMENTION', 'KXKIMMELMENTION',
-    # Note: KXGOVERNORMENTION, KXSNLMENTION, KXVANCEMENTION removed (in CATEGORY_KILL_LIST)
+    'KXFIGHTMENTION', 'KXSBMENTION',                   # Fight 5-30c
+    # Politics/Gov — per-category NO ranges
+    'KXTRUMPMENTION', 'KXTRUMPMENTIONB',               # Trump 15-50c
+    'KXMAMDANIMENTION',                                 # Mamdani 30-70c
+    'KXNEWSOMMENTION',                                  # Newsom 5-30c
+    'KXHOCHULMENTION',                                  # Hochul 10-50c
+    'KXSECPRESSMENTION',                                # SecPress 30-70c
+    # Media — proven winners + small-sample keeps
+    'KXMADDOWMENTION',                                  # Maddow 5-30c (tiny sample, +197%)
+    'KXCOLBERTMENTION',                                 # Colbert 5-30c (tiny sample)
+    'KXLASTWORDMENTION',                                # LASTWORD 5-30c — NEW (+101% ROI)
+    'KXFOXNEWSMENTION',                                 # FOXNEWS 5-30c — NEW (+46% ROI)
+    # Removed: KXLEAVITTMENTION, KXKIMMELMENTION (net losers → CATEGORY_KILL_LIST)
+    # Removed: KXROGANMENTION, KXCOOPERMENTION (no backtest data, cut for variance)
 ]
 
 # --- NBA Word Blacklist ---
@@ -275,6 +305,32 @@ def log_event(event_type, **kwargs):
             f.write(json.dumps(entry) + '\n')
     except Exception:
         pass  # never crash the bot for logging
+
+
+def get_mention_category(ticker):
+    """Derive mention category from ticker string. Used for per-category price ranges."""
+    t = ticker.upper()
+    if 'TRUMPMENTION' in t or 'TRUMPSAY' in t: return 'Trump'
+    if 'MAMDANIMENTION' in t: return 'Mamdani'
+    if 'NCAAMENTION' in t or 'NCAABMENTION' in t: return 'NCAA'
+    if 'NBAMENTION' in t or 'NBAFINALS' in t: return 'NBA'
+    if 'EARNINGSMENTION' in t: return 'Earnings'
+    if 'NEWSOMMENTION' in t: return 'Newsom'
+    if 'FIGHTMENTION' in t: return 'Fight'
+    if 'NFLMENTION' in t: return 'NFL'
+    if 'MENTION' in t:
+        prefix = t.split('MENTION')[0].replace('KX', '')
+        return prefix if prefix else 'Other'
+    return 'Other'
+
+
+def get_no_range(ticker):
+    """Get (min_cents, max_cents) NO price range for this ticker's category.
+    Returns per-category range from CATEGORY_NO_RANGE, or global fallback."""
+    cat = get_mention_category(ticker)
+    if cat in CATEGORY_NO_RANGE:
+        return CATEGORY_NO_RANGE[cat]
+    return (int(MENTION_MIN_NO_PRICE * 100), int(MENTION_MAX_NO_PRICE * 100))
 
 
 # =====================================================================
@@ -941,7 +997,7 @@ class MentionBuyNoDetector:
             is_newsom = 'NEWSOMMENTION' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
-            _cat = 'Earnings' if is_earnings else 'NCAA' if is_ncaa else 'NBA' if is_nba else 'Trump' if is_trump else 'Mamdani' if is_mamdani else 'Other'
+            _cat = get_mention_category(ticker)
             if _cat not in cat_debug:
                 cat_debug[_cat] = {'total': 0, 'no_ms': 0, 'timing': 0, 'price': 0, 'cooldown': 0, 'blacklist': 0, 'eligible': 0}
             cat_debug[_cat]['total'] += 1
@@ -1087,16 +1143,9 @@ class MentionBuyNoDetector:
             no_price = 1 - yes_price
             no_price_c = int(no_price * 100)
 
-            # Per-category price ranges — must match execution ranges:
-            # NCAA pre 1-24h: 10-25c, live 0.5-1.5h: 6-25c → signal uses 6-25c
-            # NBA live 0.5-2h: 5-30c (widened from 9-25c, backtest +62% ROI)
-            # All others: 1-30c
-            if is_ncaa:
-                max_no, min_no = 0.25, 0.06
-            elif is_nba:
-                max_no, min_no = 0.30, 0.05
-            else:
-                max_no, min_no = MENTION_MAX_NO_PRICE, MENTION_MIN_NO_PRICE
+            # Per-category price ranges from CATEGORY_NO_RANGE (backtest-optimized)
+            _min_c, _max_c = get_no_range(ticker)
+            min_no, max_no = _min_c / 100, _max_c / 100
             if no_price < min_no or no_price > max_no:
                 # Mid-price is out of range — but for pre-event maker-eligible
                 # markets, check if NO bid + 1c is in range (resting order target).
@@ -2091,7 +2140,8 @@ class KalshiReversionScanner:
         print("=" * 60)
         print(f"Telegram: {'OK' if TELEGRAM_BOT_TOKEN else 'MISSING'}")
         print(f"Auth: {'OK' if self.client.can_trade else 'MISSING (signal-only mode)'}")
-        print(f"Strategy 1: Mention BUY NO taker (Trump 0-24h, NBA live 0.5-2h 5-30c, NCAA pre 1-24h 10-25c + live 0.5-1.5h 6-25c, Other pre 1h + live 0.5h)")
+        range_summary = ', '.join(f"{cat} {lo}-{hi}c" for cat, (lo, hi) in sorted(CATEGORY_NO_RANGE.items(), key=lambda x: -x[1][1])[:6])
+        print(f"Strategy 1: Mention BUY NO — per-category ranges: {range_summary}, ...")
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, {EARNINGS_WINDOW_HOURS_BEFORE*60:.0f}min pre-event")
         print(f"Strategy 4: Stale snipe (all mention markets) — {'ON' if STALE_ENABLED else 'OFF'}, ${STALE_BET_DOLLARS}/bet, gap>={STALE_MIN_GAP_CENTS}c, NO>={STALE_MIN_NO_CENTS}c, {STALE_MIN_HOURS_INTO_GAME}h+ into event")
@@ -2453,11 +2503,7 @@ class KalshiReversionScanner:
                 sig = info.get('signal', {})
                 signal_cents = sig.get('no_price_cents', price_cents)
                 max_slip = 4
-                if category == 'NCAA':
-                    min_no_c, max_no_c = 10, 25
-                else:
-                    min_no_c = int(MENTION_MIN_NO_PRICE * 100)
-                    max_no_c = int(MENTION_MAX_NO_PRICE * 100)
+                min_no_c, max_no_c = get_no_range(ticker)
                 if (min_no_c <= best_no_ask <= max_no_c
                         and best_no_ask <= signal_cents + max_slip):
                     print(f"    PREMARKET→TAKER: {ticker} ask now {best_no_ask}c (in range), cancelling resting @ {price_cents}c")
@@ -3696,13 +3742,8 @@ class KalshiReversionScanner:
             # No NO bids — place at half the ask
             resting_price = max(best_no_ask // 2, 1)
 
-        # Validate price is in category range
-        if category == 'NCAA':
-            min_no_c, max_no_c = 10, 25
-        else:
-            # Trump, Mamdani, Newsom: use default mention range
-            min_no_c = int(MENTION_MIN_NO_PRICE * 100)
-            max_no_c = int(MENTION_MAX_NO_PRICE * 100)
+        # Validate price is in category range (per-category from CATEGORY_NO_RANGE)
+        min_no_c, max_no_c = get_no_range(ticker)
         if resting_price < min_no_c or resting_price > max_no_c:
             print(f"    Maker price {resting_price}c outside range [{min_no_c}-{max_no_c}c] (bid={best_no_bid}c, ask={best_no_ask}c), skipping")
             return None
@@ -3944,13 +3985,7 @@ class KalshiReversionScanner:
         if is_volume_surging and not is_live_h2e:
             print(f"    Volume surge detected (vel={event_velocity:.1f}), allowing taker pre-milestone")
 
-        if is_ncaa:
-            ncaa_live_pre = h2e is not None and h2e >= 0
-            max_no_c, min_no_c = (25, 10) if ncaa_live_pre else (25, 6)
-        elif is_nba:
-            max_no_c, min_no_c = 30, 5
-        else:
-            max_no_c, min_no_c = int(MENTION_MAX_NO_PRICE * 100), int(MENTION_MIN_NO_PRICE * 100)
+        min_no_c, max_no_c = get_no_range(ticker)
 
         taker_price = best_no_ask
         if taker_price < min_no_c or taker_price > max_no_c:
