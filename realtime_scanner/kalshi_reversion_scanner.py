@@ -92,7 +92,7 @@ CATEGORY_NO_RANGE = {
     'SECPRESS': (30, 70),   # +32.2% ROI, $0.25/d — cheap is -43%, medium is +32%
     'NBA':      (50, 90),   # +3.7% ROI, $0.21/d — cheap is -12%, high is marginal+
     'Fight':    (5, 30),    # +28.2% ROI, $0.01/d — small sample, keep conservative
-    'Earnings': (10, 30),   # +16.0% ROI, $0.10/d — only the cheap-mid slice works
+    'Earnings': (15, 50),   # +20.4% ROI, $0.31/d — cheap 5-15c are -62% losers
     'MADDOW':   (5, 30),    # +197% ROI, tiny sample — keep if it shows up
     'COLBERT':  (5, 30),    # small sample, keep conservative
 }
@@ -241,8 +241,8 @@ DEGRADE_BUY_BELOW = {
 # With word blacklist (0% WR words removed): +23.6% ROI on 1106 markets.
 EARNINGS_ENABLED = True
 EARNINGS_BET_DOLLARS = 3         # $3/bet (capped until backtest validates)
-EARNINGS_MIN_NO_PRICE = 0.05     # 5c
-EARNINGS_MAX_NO_PRICE = 0.30     # 30c
+EARNINGS_MIN_NO_PRICE = 0.15     # 15c (was 5c — cheap NOs are -62% ROI losers)
+EARNINGS_MAX_NO_PRICE = 0.50     # 50c (was 30c — 15-50c is +20.4% ROI, $0.31/d)
 EARNINGS_MAX_POSITIONS = 20      # independent cap
 EARNINGS_MAX_EVENT_DOLLARS = 30  # $30 per earnings call
 # Entry window: any time pre-event (maker rests until event start)
