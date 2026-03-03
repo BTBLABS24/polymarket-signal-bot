@@ -90,7 +90,7 @@ CATEGORY_NO_RANGE = {
     'Mamdani':  (30, 70),   # +18.8% ROI, $0.50/d — cheap is -24%, medium is +19%
     'NFL':      (30, 70),   # +13.1% ROI, $0.24/d — cheap is -9%, medium is +13%
     'SECPRESS': (30, 70),   # +32.2% ROI, $0.25/d — cheap is -43%, medium is +32%
-    'NBA':      (50, 90),   # +3.7% ROI, $0.21/d — cheap is -12%, high is marginal+
+    # NBA: KILLED — +3.7% ROI at best range (50-90c), not worth the variance
     'Fight':    (5, 30),    # +28.2% ROI, $0.01/d — small sample, keep conservative
     'Earnings': (15, 50),   # +20.4% ROI, $0.31/d — cheap 5-15c are -62% losers
     'MADDOW':   (5, 30),    # +197% ROI, tiny sample — keep if it shows up
@@ -132,6 +132,7 @@ CATEGORY_KILL_LIST = {
     'KXLEAVITTMENTION',       # LEAVITT: -100% ROI backtest (1 trade)
     'KXROGANMENTION',         # ROGAN: no backtest data, cut for variance
     'KXCOOPERMENTION',        # COOPER: no backtest data, cut for variance
+    'KXNBAMENTION',           # NBA: +3.7% ROI at best, -12% at cheap — not worth variance
 }
 # --- Taker Adverse Selection Gating ---
 # Pre-event taker is -39% ROI from actual fills. Live taker is +13%.
@@ -147,7 +148,6 @@ ACTIVE_SERIES = None              # All categories active
 # Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
     # Sports — per-category NO ranges (see CATEGORY_NO_RANGE)
-    'KXNBAMENTION',                                    # NBA 50-90c
     'KXNFLMENTION',                                    # NFL 30-70c
     'KXNCAAMENTION', 'KXNCAABMENTION',                 # NCAA 5-30c
     'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION', 'KXMLBMENTION',
