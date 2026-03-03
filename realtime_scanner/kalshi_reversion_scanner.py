@@ -109,8 +109,6 @@ PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
-PREMARKET_MAX_LADDER = 3          # Max resting orders per ticker (ladder levels)
-PREMARKET_LADDER_OFFSETS = [0, 3, 7]  # Cents above ideal price for each ladder level
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
 PREMARKET_NEW_SERIES_BET = 2      # $ bet for new/unknown series
 # Pre-recorded/scripted shows — insider edge too high, skip entirely
@@ -2539,52 +2537,44 @@ class KalshiReversionScanner:
 
                 # --- Penny-above bid management ---
                 # Rule: always be exactly 1c above the next highest bidder, no more.
-                # Only apply to the LOWEST rung of our ladder — upper rungs stay put.
-                our_prices = {v['price_cents'] for v in self._resting_premarket_orders.values()
-                              if v['ticker'] == ticker}
-                is_lowest_rung = not any(p < price_cents for p in our_prices)
+                # Find highest OTHER bid (excluding our own price level)
+                other_bids = [b[0] for b in no_bids if b[0] != price_cents]
+                # Exclude dust bids (<$1.50 total size at that level)
+                other_bids_filtered = []
+                for lvl in set(other_bids):
+                    lvl_size = sum(b[1] for b in no_bids if b[0] == lvl) * lvl / 100.0
+                    if lvl_size > 1.50:
+                        other_bids_filtered.append(lvl)
+                next_best_bid = max(other_bids_filtered) if other_bids_filtered else 0
 
-                if not is_lowest_rung:
-                    pass  # Skip rebid for upper ladder rungs
+                # Compute ideal price: 1c above next best, or min_no_c if alone
+                if next_best_bid > 0:
+                    ideal_price = next_best_bid + 1
                 else:
-                    # Find highest OTHER bid (excluding ALL our ladder prices)
-                    other_bids = [b[0] for b in no_bids if b[0] not in our_prices]
-                    # Exclude dust bids (<$1.50 total size at that level)
-                    other_bids_filtered = []
-                    for lvl in set(other_bids):
-                        lvl_size = sum(b[1] for b in no_bids if b[0] == lvl) * lvl / 100.0
-                        if lvl_size > 1.50:
-                            other_bids_filtered.append(lvl)
-                    next_best_bid = max(other_bids_filtered) if other_bids_filtered else 0
+                    ideal_price = min_no_c  # We're alone — sit at floor
 
-                    # Compute ideal price: 1c above next best, or min_no_c if alone
-                    if next_best_bid > 0:
-                        ideal_price = next_best_bid + 1
-                    else:
-                        ideal_price = min_no_c  # We're alone — sit at floor
+                # Clamp to valid range
+                ideal_price = max(ideal_price, min_no_c)
+                ideal_price = min(ideal_price, max_no_c)
 
-                    # Clamp to valid range
-                    ideal_price = max(ideal_price, min_no_c)
-                    ideal_price = min(ideal_price, max_no_c)
-
-                    # Only rebid if price needs to change AND ideal is below the ask
-                    if ideal_price != price_cents and ideal_price < best_no_ask:
-                        direction = "UP" if ideal_price > price_cents else "DOWN"
-                        print(f"    PREMARKET REBID {direction}: {ticker} {price_cents}c → {ideal_price}c "
-                              f"(next_best={next_best_bid}c, ask={best_no_ask}c, spread={spread}c)")
-                        self._rebid_resting_order(order_id, info, ideal_price, spread, to_remove)
-                        if ideal_price > price_cents:
-                            await self.notifier.send_order_event(
-                                f"RESTING REBID [{category}]", ticker,
-                                price_cents=ideal_price,
-                                contracts=int(info['bet_dollars'] / (ideal_price / 100)) or 1,
-                                bet_dollars=info['bet_dollars'],
-                                title=info.get('signal', {}).get('title', '')[:60],
-                                extra=f"Was {price_cents}c → {ideal_price}c (next_best={next_best_bid}c)")
-                        log_event('premarket_rebid_penny', ticker=ticker, old_price=price_cents,
-                                  new_price=ideal_price, next_best=next_best_bid,
-                                  spread=spread, direction=direction)
-                        continue
+                # Only rebid if price needs to change AND ideal is below the ask
+                if ideal_price != price_cents and ideal_price < best_no_ask:
+                    direction = "UP" if ideal_price > price_cents else "DOWN"
+                    print(f"    PREMARKET REBID {direction}: {ticker} {price_cents}c → {ideal_price}c "
+                          f"(next_best={next_best_bid}c, ask={best_no_ask}c, spread={spread}c)")
+                    self._rebid_resting_order(order_id, info, ideal_price, spread, to_remove)
+                    if ideal_price > price_cents:
+                        await self.notifier.send_order_event(
+                            f"RESTING REBID [{category}]", ticker,
+                            price_cents=ideal_price,
+                            contracts=int(info['bet_dollars'] / (ideal_price / 100)) or 1,
+                            bet_dollars=info['bet_dollars'],
+                            title=info.get('signal', {}).get('title', '')[:60],
+                            extra=f"Was {price_cents}c → {ideal_price}c (next_best={next_best_bid}c)")
+                    log_event('premarket_rebid_penny', ticker=ticker, old_price=price_cents,
+                              new_price=ideal_price, next_best=next_best_bid,
+                              spread=spread, direction=direction)
+                    continue
 
             # Check fill status
             status = self.client.get_order(order_id)
@@ -3711,19 +3701,17 @@ class KalshiReversionScanner:
             print(f"  Stale orders filled: {n_filled}")
 
     def _execute_premarket_maker(self, sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA'):
-        """Place resting NO buy limit orders for pre-event markets (ladder).
-        Places up to PREMARKET_MAX_LADDER orders at staggered prices.
-        Returns None — fills detected by _check_resting_premarket_orders."""
+        """Place a single resting NO buy limit order for pre-event markets.
+        Price: 1c above highest other bidder (penny-above rule).
+        Returns None — fill detected by _check_resting_premarket_orders."""
         ticker = sig['ticker']
         no_price_cents = sig['no_price_cents']
         event_start_ts = sig.get('event_start_ts')
 
-        # Count existing resting orders for this ticker (ladder support)
-        existing_orders = [(oid, info) for oid, info in self._resting_premarket_orders.items()
-                          if info['ticker'] == ticker]
-        if len(existing_orders) >= PREMARKET_MAX_LADDER:
-            return None
-        existing_prices = {info['price_cents'] for _, info in existing_orders}
+        # Skip if we already have a resting order on this ticker
+        for info in self._resting_premarket_orders.values():
+            if info['ticker'] == ticker:
+                return None
 
         # Get best NO bid from orderbook
         no_bids_raw = orderbook.get('no', [])
@@ -3731,40 +3719,30 @@ class KalshiReversionScanner:
             no_bids_raw = []
         best_no_bid = max(b[0] for b in no_bids_raw) if no_bids_raw else 0
 
-        # Compute base price: 1c above highest OTHER bidder (penny-above rule)
-        # Exclude our own prices from consideration
-        other_bids = [b[0] for b in no_bids_raw if b[0] not in existing_prices]
+        # Penny-above rule: 1c above highest other bidder, ignore dust (<$1.50)
         other_bids_filtered = []
-        for lvl in set(other_bids):
+        for lvl in set(b[0] for b in no_bids_raw):
             lvl_size = sum(b[1] for b in no_bids_raw if b[0] == lvl) * lvl / 100.0
-            if lvl_size > 1.50:  # ignore dust
+            if lvl_size > 1.50:
                 other_bids_filtered.append(lvl)
         next_best_bid = max(other_bids_filtered) if other_bids_filtered else 0
 
-        # Validate price range
         min_no_c, max_no_c = get_no_range(ticker)
         if next_best_bid > 0:
-            base_price = next_best_bid + 1
+            resting_price = next_best_bid + 1
         else:
-            base_price = min_no_c  # No other bids — sit at floor
+            resting_price = min_no_c  # No other bids — sit at floor
+
+        # Clamp to category range
+        resting_price = max(resting_price, min_no_c)
+        resting_price = min(resting_price, max_no_c)
+
+        if resting_price >= best_no_ask:
+            return None  # Would cross the spread
 
         spread = best_no_ask - best_no_bid if best_no_bid > 0 else best_no_ask
         if spread < PREMARKET_MIN_SPREAD:
             print(f"    Spread {spread}c too narrow (<{PREMARKET_MIN_SPREAD}c), skipping maker — taker may be better")
-            return None
-
-        # Build ladder: compute candidate prices at offsets from base
-        candidates = []
-        for offset in PREMARKET_LADDER_OFFSETS:
-            p = base_price + offset
-            if p < min_no_c or p > max_no_c or p >= best_no_ask:
-                continue
-            if p in existing_prices:
-                continue  # already have order at this level
-            candidates.append(p)
-        if not candidates:
-            if not existing_orders:
-                print(f"    Maker: no valid ladder prices in [{min_no_c}-{max_no_c}c] (base={base_price}c, ask={best_no_ask}c), skipping")
             return None
 
         # Bet sizing (same logic as taker path)
@@ -3795,11 +3773,10 @@ class KalshiReversionScanner:
 
         mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
 
-        # Per-market exposure check (include resting order $ in exposure)
+        # Per-market exposure check
         ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
                          if p.get('ticker') == ticker and p.get('status') == 'open')
-        resting_exp = sum(info['bet_dollars'] for _, info in existing_orders)
-        remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp - resting_exp
+        remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp
         if remaining_market_cap <= 0:
             return None
         mention_bet = min(mention_bet, remaining_market_cap)
@@ -3812,77 +3789,66 @@ class KalshiReversionScanner:
                 return None
             mention_bet = min(mention_bet, remaining_cap)
 
-        # Split bet across ladder levels
-        n_levels = min(len(candidates), PREMARKET_MAX_LADDER - len(existing_orders))
-        candidates = candidates[:n_levels]
-        level_bet = mention_bet / max(n_levels, 1)
+        contracts = int(mention_bet / (resting_price / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * resting_price / 100, 2)
 
         h2e = sig.get('hours_to_event', 0)
         print(f"    OB: NO_BIDS={no_bids_raw[:5]} YES_BIDS={yes_bids_raw[:5] if isinstance(yes_bids_raw, list) else []} "
               f"best_no_bid={best_no_bid} no_ask={best_no_ask} next_best={next_best_bid}")
+        print(f"    Maker: {contracts} NO @ {resting_price}c (spread={spread}c) "
+              f"${bet_dollars:.2f} h2e={h2e:.1f}h [{category}]")
 
-        # Place orders for each ladder level
-        placed = 0
-        for resting_price in candidates:
-            contracts = int(level_bet / (resting_price / 100))
-            if contracts < 1:
-                contracts = 1
-            bet_dollars = round(contracts * resting_price / 100, 2)
-
-            print(f"    Maker L{placed+1}: {contracts} NO @ {resting_price}c (spread={spread}c) "
-                  f"${bet_dollars:.2f} h2e={h2e:.1f}h [{category}]")
-
-            if DRY_RUN:
-                order_id = f'DRY-MKR-{uuid.uuid4().hex[:8]}'
-                self._resting_premarket_orders[order_id] = {
-                    'ticker': ticker, 'price_cents': resting_price,
-                    'contracts': contracts, 'bet_dollars': bet_dollars,
-                    'placed_ts': time.time(), 'category': category,
-                    'signal': sig, 'ladder_level': placed,
-                }
-                self.trade_logger.record({
-                    'type': 'maker_placed', 'strategy': 'mention_buy_no',
-                    'ticker': ticker, 'side': 'no', 'action': 'buy',
-                    'contracts': contracts, 'price_cents': resting_price,
-                    'bet_dollars': bet_dollars, 'dry_run': True,
-                    'expiration_ts': event_start_ts, 'ladder_level': placed,
-                })
-                placed += 1
-                continue
-
-            order = self.client.create_order(
-                ticker=ticker, side='no', action='buy',
-                count=contracts, price_cents=resting_price,
-                expiration_ts=event_start_ts,
-            )
-            if not order:
-                print(f"    Maker order failed for {ticker} @ {resting_price}c")
-                continue
-
-            order_id = order.get('order_id', '')
+        if DRY_RUN:
+            order_id = f'DRY-MKR-{uuid.uuid4().hex[:8]}'
             self._resting_premarket_orders[order_id] = {
                 'ticker': ticker, 'price_cents': resting_price,
                 'contracts': contracts, 'bet_dollars': bet_dollars,
                 'placed_ts': time.time(), 'category': category,
-                'signal': sig, 'ladder_level': placed,
+                'signal': sig,
             }
-            placed += 1
-
-            print(f"    MAKER RESTING L{placed}: {order_id} {contracts} NO @ {resting_price}c (${bet_dollars:.2f})")
-            log_event('premarket_maker_placed', ticker=ticker, order_id=order_id,
-                      contracts=contracts, price_cents=resting_price, bet_dollars=bet_dollars,
-                      category=category, hours_to_event=h2e, ladder_level=placed,
-                      no_bid=best_no_bid, no_ask=best_no_ask, spread=spread,
-                      expiration_ts=event_start_ts)
-
-        if placed > 0:
+            self.trade_logger.record({
+                'type': 'maker_placed', 'strategy': 'mention_buy_no',
+                'ticker': ticker, 'side': 'no', 'action': 'buy',
+                'contracts': contracts, 'price_cents': resting_price,
+                'bet_dollars': bet_dollars, 'dry_run': True,
+                'expiration_ts': event_start_ts,
+            })
             self.mention_detector.signal_history[ticker] = time.time()
             self.mention_detector._save()
-            self._save_resting_orders()
-            self._queue_tg(f"RESTING LADDER [{category}] x{placed}", ticker,
-                           price_cents=candidates[0], contracts=0,
-                           bet_dollars=round(level_bet * placed, 2),
-                           title=sig.get('title', '')[:60])
+            print(f"    DRY RUN MAKER: resting {contracts} NO @ {resting_price}c (${bet_dollars:.2f})")
+            return None
+
+        order = self.client.create_order(
+            ticker=ticker, side='no', action='buy',
+            count=contracts, price_cents=resting_price,
+            expiration_ts=event_start_ts,
+        )
+        if not order:
+            print(f"    Maker order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        self._resting_premarket_orders[order_id] = {
+            'ticker': ticker, 'price_cents': resting_price,
+            'contracts': contracts, 'bet_dollars': bet_dollars,
+            'placed_ts': time.time(), 'category': category,
+            'signal': sig,
+        }
+        self.mention_detector.signal_history[ticker] = time.time()
+        self.mention_detector._save()
+        self._save_resting_orders()
+
+        print(f"    MAKER RESTING: {order_id} {contracts} NO @ {resting_price}c (${bet_dollars:.2f}) expires at event start")
+        log_event('premarket_maker_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=resting_price, bet_dollars=bet_dollars,
+                  category=category, hours_to_event=h2e,
+                  no_bid=best_no_bid, no_ask=best_no_ask, spread=spread,
+                  expiration_ts=event_start_ts)
+        self._queue_tg(f"RESTING ORDER [{category}]", ticker,
+                       price_cents=resting_price, contracts=contracts, bet_dollars=bet_dollars,
+                       title=sig.get('title', '')[:60])
 
         return None
 
