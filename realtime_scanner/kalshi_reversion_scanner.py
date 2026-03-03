@@ -2338,6 +2338,9 @@ class KalshiReversionScanner:
                         # Skip if we already have a MENTION position on this ticker
                         if self.positions.has_open_ticker(sig['ticker'], signal_type='mention_buy_no'):
                             continue
+                        # Skip if we have a resting maker order on this ticker
+                        if any(info['ticker'] == sig['ticker'] for info in self._resting_premarket_orders.values()):
+                            continue
 
                         # Per-event exposure cap
                         event = sig.get('event_ticker', '')
@@ -3773,9 +3776,12 @@ class KalshiReversionScanner:
 
         mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
 
-        # Per-market exposure check
+        # Per-market exposure check (includes resting maker orders)
         ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
                          if p.get('ticker') == ticker and p.get('status') == 'open')
+        for info in self._resting_premarket_orders.values():
+            if info.get('ticker') == ticker:
+                ticker_exp += info.get('bet_dollars', 0)
         remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp
         if remaining_market_cap <= 0:
             return None
@@ -4041,14 +4047,17 @@ class KalshiReversionScanner:
         # Per-market hard cap
         mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
 
-        # Per-market exposure check
+        # Per-market exposure check (includes resting maker orders)
         ticker_exp = 0
         for p in self.positions.positions:
             if p.get('ticker') == ticker and p.get('status') == 'open':
                 ticker_exp += p.get('bet_dollars', 0)
+        for info in self._resting_premarket_orders.values():
+            if info.get('ticker') == ticker:
+                ticker_exp += info.get('bet_dollars', 0)
         remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp
         if remaining_market_cap <= 0:
-            print(f"    Market cap reached (${ticker_exp:.0f}/${MENTION_MAX_MARKET_DOLLARS}), skipping")
+            print(f"    Market cap reached (${ticker_exp:.2f}/${MENTION_MAX_MARKET_DOLLARS} incl resting), skipping")
             return None
         mention_bet = min(mention_bet, remaining_market_cap)
 
