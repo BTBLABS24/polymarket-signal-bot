@@ -179,6 +179,7 @@ NBA_ARENA_BLACKLIST = {
     'MSG', 'TD', 'XFIN', 'SPEC', 'MODA', 'TARG', 'PAYC', 'INTU', 'TOYO',
     'KIA', 'AMER', 'CHAS', 'CRYP', 'ROCK', 'FROS', 'FEDE', 'LITT', 'BALL',
     'CAPI', 'GOLD', 'FISE', 'SCOT', 'DELT', 'STAT', 'GAIN', 'KASE',
+    'CENT', 'AREN', 'STAD',  # Generic venue words: Center, Arena, Stadium
 }
 
 # --- NCAAB Word Blacklist ---
@@ -194,6 +195,7 @@ NCAAB_ARENA_BLACKLIST = {
     'ALLEN', 'COLE', 'SAND', 'CAPI', 'MEMO', 'UNIT', 'MSG', 'STAT', 'STEG',
     'NEVI', 'CRIS', 'MARR', 'WELS', 'LENO', 'CARV', 'MIZZ', 'DESE', 'CAME',
     'BUD', 'FERT', 'MILL', 'PAUL',  # Pauley Pavilion (UCLA)
+    'CENT', 'AREN', 'STAD',  # Generic venue words: Center, Arena, Stadium
 }
 
 # --- NBA YES Buy Strategy ---
