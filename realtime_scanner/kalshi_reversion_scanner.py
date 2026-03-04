@@ -73,7 +73,7 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 MENTION_BET_DOLLARS = 3            # $3 all named categories (capped until backtest validates)
 MENTION_BET_NCAA = 3               # $3 for NCAAB/NCAA
 MENTION_BET_OTHER = 3              # $3 for "other" categories
-MENTION_MAX_NO_PRICE = 0.70       # Global fallback max (per-category overrides below)
+MENTION_MAX_NO_PRICE = 0.30       # Global fallback max — conservative for unmapped categories
 MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides below)
 # Per-category NO price ranges — backtest-optimized (60 days, taker +4c slippage).
 # Cheap NOs (5-30c) are losers for most categories: the word usually gets said.
@@ -193,7 +193,7 @@ NCAAB_ARENA_BLACKLIST = {
     'MCKA', 'STEP', 'PINN', 'BRES', 'MACK', 'GALE', 'RUPP', 'HILT', 'KOHL',
     'ALLEN', 'COLE', 'SAND', 'CAPI', 'MEMO', 'UNIT', 'MSG', 'STAT', 'STEG',
     'NEVI', 'CRIS', 'MARR', 'WELS', 'LENO', 'CARV', 'MIZZ', 'DESE', 'CAME',
-    'BUD', 'FERT', 'MILL',
+    'BUD', 'FERT', 'MILL', 'PAUL',  # Pauley Pavilion (UCLA)
 }
 
 # --- NBA YES Buy Strategy ---
@@ -253,6 +253,10 @@ EARNINGS_WINDOW_HOURS_BEFORE = 720  # effectively unlimited — maker rests pre-
 EARNINGS_WORD_BLACKLIST = {
     'INTE', 'TOKE', 'GUID', 'RETE', 'OPEN', 'DELI',
     'WAYM', 'LOYA', 'DIGI', 'OMNI', 'EXPN',
+    # Robinhood/crypto keynotes — these words are always said
+    'BITC', 'BLOC', 'CRYP', 'BANK', 'PRED', 'PERP',
+    # Victoria's Secret — always said on their calls
+    'FRAG', 'TARI',
 }
 EARNINGS_EXCLUDED_WORDS = EARNINGS_WORD_BLACKLIST  # legacy alias
 
@@ -1016,7 +1020,7 @@ class MentionBuyNoDetector:
             if is_ncaa and word_suffix in NCAAB_ARENA_BLACKLIST:
                 cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                 continue
-            if is_earnings and word_suffix in EARNINGS_WORD_BLACKLIST:
+            if word_suffix in EARNINGS_WORD_BLACKLIST:
                 cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                 continue
 
@@ -2091,6 +2095,7 @@ class KalshiReversionScanner:
         self._event_volume_prev = {}  # event_ticker -> (sum_volume_24h, scan_ts) from previous cycle
         self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
         self._resting_premarket_orders = {}  # order_id -> {ticker, price_cents, contracts, bet_dollars, placed_ts, category, signal}
+        self._entered_this_cycle = set()  # tickers entered this scan cycle (reset each cycle)
         self._resting_file = Path(__file__).parent / 'resting_orders.json'
         self._load_resting_orders()
         self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
@@ -2214,6 +2219,7 @@ class KalshiReversionScanner:
 
         if should_scan_mentions:
             self._last_mention_scan = now
+            self._entered_this_cycle = set()  # Prevent any ticker from being entered twice per scan
             print(f"  Mention scan: fetching open mention markets...")
             mention_markets = self.client.get_open_mention_markets()
             print(f"  Mention markets found: {len(mention_markets)}")
@@ -2321,6 +2327,14 @@ class KalshiReversionScanner:
                     sig_type = sig.get('signal_type', 'mention_buy_no')
                     is_earn = sig.get('is_earnings', False)
 
+                    # Global scan-cycle dedup: never enter same ticker twice in one scan
+                    if sig['ticker'] in self._entered_this_cycle:
+                        continue
+
+                    # Skip if we have a resting maker order on this ticker (applies to ALL signal types)
+                    if any(info['ticker'] == sig['ticker'] for info in self._resting_premarket_orders.values()):
+                        continue
+
                     if is_earn:
                         # Earnings: check cap and execute
                         earn_count = self.positions.count('earnings_buy_no')
@@ -2337,9 +2351,6 @@ class KalshiReversionScanner:
 
                         # Skip if we already have a MENTION position on this ticker
                         if self.positions.has_open_ticker(sig['ticker'], signal_type='mention_buy_no'):
-                            continue
-                        # Skip if we have a resting maker order on this ticker
-                        if any(info['ticker'] == sig['ticker'] for info in self._resting_premarket_orders.values()):
                             continue
 
                         # Per-event exposure cap
@@ -2380,6 +2391,7 @@ class KalshiReversionScanner:
                             tg_label = "PRE-EVENT TAKER"
                         await self.notifier.send_mention_signal(sig, order_info, trade_label=tg_label)
                         self.positions.add(sig, order_info)
+                        self._entered_this_cycle.add(sig['ticker'])
                         if not is_earn:
                             mention_count += 1
                             mention_allowed = mention_count < MENTION_MAX_POSITIONS
@@ -3879,8 +3891,8 @@ class KalshiReversionScanner:
         if ('NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper) and word_suffix in NCAAB_ARENA_BLACKLIST:
             print(f"    Blacklisted NCAAB arena: {word_suffix} ({ticker}), skipping")
             return None
-        if 'EARNINGS' in ticker_upper and word_suffix in EARNINGS_WORD_BLACKLIST:
-            print(f"    Blacklisted earnings word: {word_suffix} ({ticker}), skipping")
+        if word_suffix in EARNINGS_WORD_BLACKLIST:
+            print(f"    Blacklisted always-said word: {word_suffix} ({ticker}), skipping")
             return None
 
         orderbook = self.client.get_orderbook(ticker)
