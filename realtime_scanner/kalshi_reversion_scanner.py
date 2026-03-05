@@ -90,7 +90,7 @@ CATEGORY_NO_RANGE = {
     'Mamdani':  (30, 70),   # +18.8% ROI, $0.50/d — cheap is -24%, medium is +19%
     'NFL':      (30, 70),   # +13.1% ROI, $0.24/d — cheap is -9%, medium is +13%
     'SECPRESS': (30, 70),   # +32.2% ROI, $0.25/d — cheap is -43%, medium is +32%
-    # NBA: KILLED — +3.7% ROI at best range (50-90c), not worth the variance
+    'NBA':      (20, 70),   # +28.4% ROI, halftime+ high-conf words only (separate gating)
     'Fight':    (5, 30),    # +28.2% ROI, $0.01/d — small sample, keep conservative
     'Earnings': (15, 50),   # +20.4% ROI, $0.31/d — cheap 5-15c are -62% losers
     'MADDOW':   (5, 30),    # +197% ROI, tiny sample — keep if it shows up
@@ -117,7 +117,52 @@ PRERECORDED_SERIES = {
     'KXSOUTHPARKMENTION',     # South Park (scripted animated)
     'KXMRBEASTMENTION',       # MrBeast (pre-recorded YouTube)
     'KXGOLDENMENTION',        # Golden Bachelor (pre-recorded reality)
+    'KXDWTSMENTION',          # Dancing with the Stars (pre-recorded)
+    'KXKARDASHIANMENTION',    # Kardashians (pre-recorded reality)
+    'KXDOGSHOWMENTION',       # National Dog Show (pre-recorded)
+    'KXCENAMENTION',          # WWE (scripted entertainment)
+    'KXLEBRONMENTION',        # LeBron entertainment special
+    'KXSHAQMENTION',          # NBA studio show
+    'KXBARKLEYMENTION',       # NBA studio show
+    'KXSNOOPMENTION',         # Entertainment
+    'KXVIEWMENTION',          # The View (often pre-taped)
+    'KXMINAJMENTION',         # Entertainment
+    'KXKINGMENTION',          # King Charles scripted address
+    'KXAPPLEMENTION',         # Apple keynote (scripted presentation)
+    'KXWWDCMENTION',          # WWDC keynote (scripted presentation)
+    'KXGREENDAY',             # Concert (scripted)
+    'KXCMAMENTION',           # CMA Awards (scripted)
+    'KXAWARDMENTION',         # Awards (scripted)
+    'KXGAMEDAY',              # College GameDay
+    'KXTHREADGUYMENTION',     # YouTuber (pre-recorded)
+    'KXGLASERMENTION',        # Golden Globes (scripted)
+    'KXHARTMENTION',          # Pre-taped interview
 }
+
+# --- Political pct_words_said Strategy ---
+# Backtest: when >=50% of words have been said, buy NO on remaining words.
+# 396 days, 952 trades, 60.6% WR, +18.7% ROI (all data).
+# Recent 30d: 69% WR, +46.5% ROI. Recent 90d: 66.7% WR, +29.2% ROI.
+# Test set (post Jan-28): 331 trades, 62.2% WR, +18.4% ROI, Sharpe +0.336.
+POLITICAL_PCT_ENABLED = True
+POLITICAL_PCT_THRESHOLD = 0.50       # Entry when >= 50% of words said
+POLITICAL_PCT_BET_DOLLARS = 5        # $5/bet
+POLITICAL_PCT_MIN_NO_CENTS = 5       # Min NO price (cents)
+POLITICAL_PCT_MAX_NO_CENTS = 70      # Max NO price (cents)
+POLITICAL_PCT_MAX_POSITIONS = 30     # Independent position cap
+POLITICAL_PCT_MAX_EVENT_DOLLARS = 30 # Per-event cap
+POLITICAL_PCT_MAX_MARKET_DOLLARS = 5 # Per-market cap (no duplicate markets)
+POLITICAL_PCT_MIN_MARKETS = 5        # Min markets per event (skip tiny events)
+# Sports prefixes — excluded from political pct strategy (handled by other strategies)
+POLITICAL_EXCLUDE_SPORTS = {
+    'NBAMENTION', 'NFLMENTION', 'NCAAMENTION', 'NCAABMENTION',
+    'SNFMENTION', 'TNFMENTION', 'CFBMENTION', 'MLBMENTION',
+    'FIGHTMENTION', 'SBMENTION', 'NHLMENTION', 'SOCCERMENTION',
+    'GOLFMENTION', 'UFCMENTION', 'TENNISMENTION', 'CRICKETMENTION',
+    'WOMENTION', 'NBAFINALS', 'EARNINGSMENTION', 'MMMENTION',
+}
+# Rally events — excluded (34% WR baseline on train, words get said)
+POLITICAL_EXCLUDE_RALLY = True
 # Categories with <10% actual WR from live fills — net losers, skip entirely
 CATEGORY_KILL_LIST = {
     'KXVANCEMENTION',         # VANCE: -73% ROI actual
@@ -132,7 +177,6 @@ CATEGORY_KILL_LIST = {
     'KXLEAVITTMENTION',       # LEAVITT: -100% ROI backtest (1 trade)
     'KXROGANMENTION',         # ROGAN: no backtest data, cut for variance
     'KXCOOPERMENTION',        # COOPER: no backtest data, cut for variance
-    'KXNBAMENTION',           # NBA: +3.7% ROI at best, -12% at cheap — not worth variance
 }
 # --- Taker Adverse Selection Gating ---
 # Pre-event taker is -39% ROI from actual fills. Live taker is +13%.
@@ -151,6 +195,7 @@ MENTION_SCAN_SERIES = [
     'KXNFLMENTION',                                    # NFL 30-70c
     'KXNCAAMENTION', 'KXNCAABMENTION',                 # NCAA 5-30c
     'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION', 'KXMLBMENTION',
+    'KXNBAMENTION',                                      # NBA 20-70c (halftime+ high-conf words)
     'KXFIGHTMENTION', 'KXSBMENTION',                   # Fight 5-30c
     # Politics/Gov — per-category NO ranges
     'KXTRUMPMENTION', 'KXTRUMPMENTIONB',               # Trump 15-50c
@@ -210,6 +255,31 @@ NBA_YES_BUY_WORDS = {
 NBA_YES_BET_DOLLARS = 1          # $1/bet — validating logic is correct
 NBA_YES_MAX_POSITIONS = 20       # independent cap
 NBA_YES_MAX_EVENT_DOLLARS = 20   # per-event cap
+
+# --- NBA Halftime NO Strategy ---
+# Buy NO on high-confidence T4 words once game is ≥50% done (halftime+).
+# Backtest (corrected price): 73% WR, +28.4% ROI, $1.35/trade on test set.
+# Only actual NO-side fills from tape (taker-executable prices 20-70c).
+# Words selected: train WR ≥ 65% AND EV ≥ 10c.
+NBA_HALFTIME_ENABLED = True
+NBA_HALFTIME_BET_DOLLARS = 5     # $5/bet
+NBA_HALFTIME_MAX_POSITIONS = 20  # independent cap
+NBA_HALFTIME_MAX_EVENT_DOLLARS = 30  # per-event cap
+NBA_HALFTIME_MAX_MARKET_DOLLARS = 5  # per-market cap
+NBA_HALFTIME_MIN_NO_CENTS = 20   # min NO price
+NBA_HALFTIME_MAX_NO_CENTS = 70   # max NO price
+NBA_HALFTIME_MIN_HOURS_LIVE = 1.3  # ~halftime (50% of game ≈ 1.3h after tipoff)
+NBA_HALFTIME_MAX_HOURS_LIVE = 3.0  # don't enter too late (game over)
+# High-confidence words only (train WR ≥ 65% AND EV ≥ 10c on corrected data)
+NBA_HALFTIME_WORD_ALLOWLIST = {
+    'ANKL',   # Ankle — 78% WR test, +22.6c EV
+    'ALLE',   # Alley-oop — 70% WR test, +14.7c EV
+    'BUZZ',   # Buzzer — 75% WR test, +12.8c EV
+    'TRIP',   # Triple Double — 60% WR test, +5.6c EV
+    'AIR',    # Airball — 83% WR test, +23.3c EV
+    'DRAF',   # Draft — 56% WR test, +0.0c EV (strong on train: 73% WR)
+    'RETI',   # Retire/Retirement — 100%/83% WR test
+}
 
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
 # Buys NO when market is below statistically-derived fair value based on
@@ -1010,12 +1080,18 @@ class MentionBuyNoDetector:
 
             # Word blacklist — skip words almost always said
             word_suffix = ticker.split('-')[-1].upper()
-            if is_nba and word_suffix in NBA_WORD_BLACKLIST:
-                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
-                continue
-            if is_nba and word_suffix in NBA_ARENA_BLACKLIST:
-                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
-                continue
+            if is_nba and NBA_HALFTIME_ENABLED:
+                # NBA halftime strategy: ALLOWLIST approach — only high-conf words
+                if word_suffix not in NBA_HALFTIME_WORD_ALLOWLIST:
+                    cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                    continue
+            elif is_nba:
+                if word_suffix in NBA_WORD_BLACKLIST:
+                    cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                    continue
+                if word_suffix in NBA_ARENA_BLACKLIST:
+                    cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                    continue
             if is_ncaa and word_suffix in NCAAB_WORD_BLACKLIST:
                 cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                 continue
@@ -1069,7 +1145,7 @@ class MentionBuyNoDetector:
                             cat_debug[_cat]['_logged'] = ncaa_skip_count + 1
                         continue
                 elif is_nba:
-                    # NBA: pre-event maker up to 24h + live taker 0.5-2h after tipoff
+                    # NBA: pre-event maker up to 24h + live taker from halftime (~1.3h) to 3h
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
@@ -1078,7 +1154,7 @@ class MentionBuyNoDetector:
                             print(f"    NBA timing skip: {ticker} h2e={hours_to_event:.2f}h ({event_ticker})")
                             cat_debug[_cat]['_logged'] = nba_skip_count + 1
                         continue
-                    if hours_to_event < -2:
+                    if hours_to_event < -NBA_HALFTIME_MAX_HOURS_LIVE:
                         debug_counts['too_far'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
@@ -1271,6 +1347,208 @@ class MentionBuyNoDetector:
                       f"{cd['price']} price, {cd['cooldown']} cooldown, "
                       f"{cd['eligible']} eligible")
 
+        return signals
+
+
+# =====================================================================
+# POLITICAL PCT_WORDS_SAID DETECTOR
+# =====================================================================
+
+class PoliticalPctDetector:
+    """Detects political/media mention events where >=50% of words have been
+    said (YES resolved), then generates BUY NO signals on remaining markets.
+
+    Backtest: 952 trades, 60.6% WR, +18.7% ROI (full dataset).
+    Recent 30d: 69% WR, +46.5% ROI. Edge comes from timing, not word selection.
+
+    How it works:
+    1. Group all open mention markets by event_ticker
+    2. For each event, count markets where YES price >= 98 (word was said)
+    3. Compute pct_words_said = yes_resolved / total_markets
+    4. If pct >= threshold, emit BUY NO signals on remaining unsettled markets
+    """
+
+    def __init__(self):
+        self._cooldown = {}  # ticker -> timestamp (no duplicate market entries)
+
+    def _is_sports_or_earnings(self, ticker):
+        t = ticker.upper()
+        for sp in POLITICAL_EXCLUDE_SPORTS:
+            if sp in t:
+                return True
+        return False
+
+    def _is_rally(self, title):
+        """Detect Trump rallies — excluded due to 34% WR (words get said)."""
+        if not POLITICAL_EXCLUDE_RALLY:
+            return False
+        u = (title or '').upper()
+        return 'RALLY' in u
+
+    def _is_prerecorded(self, event_ticker):
+        """Check if event belongs to a pre-recorded series."""
+        series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
+        return series in PRERECORDED_SERIES
+
+    def detect(self, open_markets, client, now_ts):
+        """Scan open mention markets for political pct_words_said signals.
+
+        Args:
+            open_markets: list of market dicts from Kalshi API
+            client: KalshiClient instance (for milestones)
+            now_ts: current timestamp
+
+        Returns: list of signal dicts for OrderExecutor
+        """
+        if not POLITICAL_PCT_ENABLED:
+            return []
+
+        milestones = client.get_milestones()
+
+        # Group markets by event_ticker
+        events = {}  # event_ticker -> list of market dicts
+        for m in open_markets:
+            ticker = m.get('ticker', '')
+            event_ticker = m.get('event_ticker', '')
+            if not ticker or not event_ticker:
+                continue
+            # Skip sports, earnings, pre-recorded
+            if self._is_sports_or_earnings(ticker) or self._is_sports_or_earnings(event_ticker):
+                continue
+            if self._is_prerecorded(event_ticker):
+                continue
+            # Must be a mention market
+            if 'MENTION' not in ticker.upper() and 'MENTION' not in event_ticker.upper():
+                continue
+            # Skip killed categories
+            series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
+            if series in CATEGORY_KILL_LIST:
+                continue
+            events.setdefault(event_ticker, []).append(m)
+
+        signals = []
+        n_events_checked = 0
+        n_events_qualified = 0
+        n_rally_skipped = 0
+
+        for event_ticker, event_markets in events.items():
+            total_markets = len(event_markets)
+            if total_markets < POLITICAL_PCT_MIN_MARKETS:
+                continue
+
+            n_events_checked += 1
+
+            # Check milestone — event must be live (started)
+            ms = milestones.get(event_ticker)
+            if not ms:
+                continue
+            event_start_ts = ms.get('start_ts', 0)
+            event_end_ts = ms.get('end_ts')
+            title = ms.get('title', '')
+
+            # Must have started
+            if event_start_ts > now_ts:
+                continue
+            # Must not have ended
+            if event_end_ts and event_end_ts < now_ts:
+                continue
+
+            # Skip rallies
+            if self._is_rally(title):
+                n_rally_skipped += 1
+                continue
+
+            # Count YES-resolved markets (last_price >= 98 OR result == 'yes')
+            yes_count = 0
+            for m in event_markets:
+                result = m.get('result', '')
+                last_price = 0
+                try:
+                    last_price = int(m.get('last_price', 0) or 0)
+                except (ValueError, TypeError):
+                    pass
+                if result == 'yes' or last_price >= 98:
+                    yes_count += 1
+
+            pct_said = yes_count / total_markets
+            if pct_said < POLITICAL_PCT_THRESHOLD:
+                continue
+
+            n_events_qualified += 1
+
+            # Emit signals for remaining unsettled markets with NO in range
+            for m in event_markets:
+                ticker = m.get('ticker', '')
+                result = m.get('result', '')
+                last_price = 0
+                try:
+                    last_price = int(m.get('last_price', 0) or 0)
+                except (ValueError, TypeError):
+                    pass
+                # Skip already resolved (YES or NO)
+                if result in ('yes', 'no') or last_price >= 98:
+                    continue
+
+                # Get YES price → derive NO price
+                yes_price = None
+                yes_bid = m.get('yes_bid')
+                yes_ask = m.get('yes_ask')
+                if yes_bid is not None and yes_ask is not None:
+                    try:
+                        yes_price = (int(yes_bid) + int(yes_ask)) / 2 / 100
+                    except (ValueError, TypeError):
+                        pass
+                if yes_price is None:
+                    lp = m.get('last_price')
+                    if lp is not None:
+                        try:
+                            yes_price = int(lp) / 100
+                        except (ValueError, TypeError):
+                            pass
+                if yes_price is None:
+                    continue
+
+                no_price = 1 - yes_price
+                no_cents = int(no_price * 100)
+                if no_cents < POLITICAL_PCT_MIN_NO_CENTS or no_cents > POLITICAL_PCT_MAX_NO_CENTS:
+                    continue
+
+                # Cooldown — 24h per ticker (no duplicate market entries)
+                last_sig = self._cooldown.get(ticker, 0)
+                if now_ts - last_sig < 24 * 3600:
+                    continue
+
+                signals.append({
+                    'ticker': ticker,
+                    'title': m.get('title', ticker),
+                    'event_ticker': event_ticker,
+                    'fade_action': 'SELL',
+                    'fade_side': 'no',
+                    'entry_price': round(yes_price, 4),
+                    'pre_signal_price': round(yes_price, 4),
+                    'price_move': 0,
+                    'n_small_trades': 0,
+                    'retail_contracts': 0,
+                    'signal_time': now_ts,
+                    'signal_type': 'political_pct_no',
+                    'is_earnings': False,
+                    'no_price': round(no_price, 4),
+                    'no_price_cents': no_cents,
+                    'hours_before_close': 0,
+                    'hours_to_event': round((event_start_ts - now_ts) / 3600, 2),
+                    'close_ts': event_end_ts or (now_ts + 4 * 3600),
+                    'volume_24h': int(m.get('volume_24h', 0) or 0),
+                    'open_interest': int(m.get('open_interest', 0) or 0),
+                    'pct_words_said': round(pct_said, 3),
+                    'event_title': title,
+                    'event_yes_count': yes_count,
+                    'event_total_markets': total_markets,
+                })
+
+        print(f"  Political pct: {n_events_checked} events checked, "
+              f"{n_events_qualified} qualified (>={POLITICAL_PCT_THRESHOLD:.0%}), "
+              f"{n_rally_skipped} rallies skipped, "
+              f"{len(signals)} signals")
         return signals
 
 
@@ -2088,6 +2366,7 @@ class KalshiReversionScanner:
     def __init__(self):
         self.client = KalshiClient()
         self.mention_detector = MentionBuyNoDetector()
+        self.political_pct_detector = PoliticalPctDetector()
         self.positions = KalshiPositionTracker()
         self.notifier = KalshiNotifier()
         self.trade_logger = TradeLogger()
@@ -2152,6 +2431,7 @@ class KalshiReversionScanner:
         print(f"Strategy 2: Degradation curve — {'PAUSED' if not DEGRADE_ENABLED else f'${DEGRADE_BET_DOLLARS}/bet, NBA passive NO bids'}")
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, {EARNINGS_WINDOW_HOURS_BEFORE*60:.0f}min pre-event")
         print(f"Strategy 4: Stale snipe (all mention markets) — {'ON' if STALE_ENABLED else 'OFF'}, ${STALE_BET_DOLLARS}/bet, gap>={STALE_MIN_GAP_CENTS}c, NO>={STALE_MIN_NO_CENTS}c, {STALE_MIN_HOURS_INTO_GAME}h+ into event")
+        print(f"Strategy 5: Political pct_words_said — {'ON' if POLITICAL_PCT_ENABLED else 'OFF'}, ${POLITICAL_PCT_BET_DOLLARS}/bet, NO {POLITICAL_PCT_MIN_NO_CENTS}-{POLITICAL_PCT_MAX_NO_CENTS}c, threshold>={POLITICAL_PCT_THRESHOLD:.0%}, excl. rallies={'Y' if POLITICAL_EXCLUDE_RALLY else 'N'}")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -2311,8 +2591,8 @@ class KalshiReversionScanner:
                         # NCAA: pre 1-24h + live 0.5-1.5h
                         return (-1.5 <= h <= -0.5) or (1 <= h <= 24)
                     elif is_nba:
-                        # NBA: pre-event maker up to 24h + live taker 0.5-2h
-                        return -2 <= h <= 24
+                        # NBA: pre-event maker up to 24h + live taker from halftime to 3h
+                        return -NBA_HALFTIME_MAX_HOURS_LIVE <= h <= 24
                     else:
                         # Trump, Mamdani, Newsom, etc:
                         # pre-event maker up to 24h + live window to 2h after milestone
@@ -2337,6 +2617,8 @@ class KalshiReversionScanner:
                     if any(info['ticker'] == sig['ticker'] for info in self._resting_premarket_orders.values()):
                         continue
 
+                    sig_is_nba = 'NBAMENTION' in sig.get('ticker', '').upper()
+
                     if is_earn:
                         # Earnings: check cap and execute
                         earn_count = self.positions.count('earnings_buy_no')
@@ -2346,20 +2628,31 @@ class KalshiReversionScanner:
                         if self.positions.has_open_ticker(sig['ticker'], signal_type='earnings_buy_no'):
                             continue
                     else:
-                        # Mention caps
-                        if not mention_allowed:
-                            print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
-                            break
+                        # NBA halftime has its own position cap
+                        if sig_is_nba and NBA_HALFTIME_ENABLED:
+                            nba_ht_count = self.positions.count('nba_halftime_no')
+                            if nba_ht_count >= NBA_HALFTIME_MAX_POSITIONS:
+                                print(f"    NBA HT CAP: {nba_ht_count}/{NBA_HALFTIME_MAX_POSITIONS}, skipping")
+                                continue
+                        else:
+                            # Mention caps
+                            if not mention_allowed:
+                                print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
+                                break
 
-                        # Skip if we already have a MENTION position on this ticker
+                        # Skip if we already have a position on this ticker
                         if self.positions.has_open_ticker(sig['ticker'], signal_type='mention_buy_no'):
+                            continue
+                        if sig_is_nba and self.positions.has_open_ticker(sig['ticker'], signal_type='nba_halftime_no'):
                             continue
 
                         # Per-event exposure cap
                         event = sig.get('event_ticker', '')
                         if event:
-                            event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
-                            if event_exp >= MENTION_MAX_EVENT_DOLLARS:
+                            evt_cap = NBA_HALFTIME_MAX_EVENT_DOLLARS if (sig_is_nba and NBA_HALFTIME_ENABLED) else MENTION_MAX_EVENT_DOLLARS
+                            st = 'nba_halftime_no' if (sig_is_nba and NBA_HALFTIME_ENABLED) else 'mention_buy_no'
+                            event_exp = self.positions.event_exposure(event, signal_type=st)
+                            if event_exp >= evt_cap:
                                 continue
 
                     no_c = sig.get('no_price_cents', 0)
@@ -2371,7 +2664,14 @@ class KalshiReversionScanner:
                         time_str = f"started {abs(h2e)*60:.0f}m ago"
                     else:
                         time_str = "?"
-                    label = "EARNINGS" if is_earn else "MENTION"
+                    # Tag NBA halftime signals with distinct signal_type
+                    if sig_is_nba and NBA_HALFTIME_ENABLED:
+                        sig['signal_type'] = 'nba_halftime_no'
+                        label = "NBA-HT"
+                    elif is_earn:
+                        label = "EARNINGS"
+                    else:
+                        label = "MENTION"
                     print(f"  {label}: BUY NO @ {no_c}c '{sig['title'][:50]}' ({time_str}, evt_vol={evt_vol:,})")
 
                     if low_balance:
@@ -2383,7 +2683,9 @@ class KalshiReversionScanner:
 
                     if order_info:
                         evt_vel = sig.get('event_velocity', 0)
-                        if is_earn:
+                        if sig_is_nba and NBA_HALFTIME_ENABLED:
+                            tg_label = "NBA HALFTIME TAKER"
+                        elif is_earn:
                             tg_label = "EARNINGS TAKER"
                         elif h2e is not None and h2e < 0:
                             tg_label = "LIVE TAKER"
@@ -2394,7 +2696,7 @@ class KalshiReversionScanner:
                         await self.notifier.send_mention_signal(sig, order_info, trade_label=tg_label)
                         self.positions.add(sig, order_info)
                         self._entered_this_cycle.add(sig['ticker'])
-                        if not is_earn:
+                        if not is_earn and not (sig_is_nba and NBA_HALFTIME_ENABLED):
                             mention_count += 1
                             mention_allowed = mention_count < MENTION_MAX_POSITIONS
 
@@ -2412,6 +2714,10 @@ class KalshiReversionScanner:
                 # 3e. Stale order strategy: buy forgotten limit orders 1h+ into game
                 if not low_balance:
                     await self._scan_stale_orders(mention_markets, milestones, now)
+
+                # 3f. Political pct_words_said strategy — buy NO when >=50% of event words said
+                if POLITICAL_PCT_ENABLED and not low_balance:
+                    await self._scan_political_pct(mention_markets, now)
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
@@ -2428,11 +2734,17 @@ class KalshiReversionScanner:
                           fill_count=pos.get('fill_count'), is_live=pos.get('is_live'))
 
         mention_count = self.positions.count('mention_buy_no')
+        nba_ht_count = self.positions.count('nba_halftime_no')
         degrade_count = self.positions.count('degrade_buy_no')
         earnings_count = self.positions.count('earnings_buy_no')
         yes_buy_count = self.positions.count('mention_buy_yes')
         theta_count = self.positions.count('ncaa_theta_reentry')
+        pol_pct_count = self.positions.count('political_pct_no')
         parts = [f"mention={mention_count}"]
+        if nba_ht_count:
+            parts.append(f"nba_ht={nba_ht_count}")
+        if pol_pct_count:
+            parts.append(f"pol_pct={pol_pct_count}")
         if yes_buy_count:
             parts.append(f"yes_buy={yes_buy_count}")
         if degrade_count:
@@ -3872,6 +4184,216 @@ class KalshiReversionScanner:
 
         return None
 
+    async def _scan_political_pct(self, mention_markets, now):
+        """Political pct_words_said strategy: buy NO on remaining markets
+        when >= 50% of words have been said in a live event.
+
+        Taker-only (event is live). $5/bet, NO 5-70c, per-market cap $5.
+        Backtest: 62.2% WR, +18.4% ROI on test set.
+        """
+        pol_count = self.positions.count('political_pct_no')
+        if pol_count >= POLITICAL_PCT_MAX_POSITIONS:
+            print(f"    POLITICAL PCT CAP: {pol_count}/{POLITICAL_PCT_MAX_POSITIONS}, skipping")
+            return
+
+        pol_signals = self.political_pct_detector.detect(mention_markets, self.client, now)
+        if not pol_signals:
+            return
+
+        for sig in pol_signals:
+            ticker = sig['ticker']
+
+            # Global scan-cycle dedup
+            if ticker in self._entered_this_cycle:
+                continue
+
+            # Skip if resting maker order on this ticker
+            if any(info['ticker'] == ticker for info in self._resting_premarket_orders.values()):
+                continue
+
+            # Position cap
+            if pol_count >= POLITICAL_PCT_MAX_POSITIONS:
+                break
+
+            # Skip if already holding this ticker (any strategy)
+            if self.positions.has_open_ticker(ticker, signal_type='political_pct_no'):
+                continue
+            if self.positions.has_open_ticker(ticker, signal_type='mention_buy_no'):
+                continue
+
+            # Per-event cap
+            event = sig.get('event_ticker', '')
+            if event:
+                event_exp = self.positions.event_exposure(event, signal_type='political_pct_no')
+                if event_exp >= POLITICAL_PCT_MAX_EVENT_DOLLARS:
+                    continue
+
+            no_c = sig['no_price_cents']
+            pct = sig.get('pct_words_said', 0)
+            evt_title = sig.get('event_title', '')[:40]
+            yes_n = sig.get('event_yes_count', 0)
+            total_n = sig.get('event_total_markets', 0)
+            print(f"  POL-PCT: BUY NO @ {no_c}c '{sig['title'][:50]}' "
+                  f"(pct={pct:.0%}, {yes_n}/{total_n} said, event='{evt_title}')")
+
+            order_info = None
+            if self.client.can_trade:
+                order_info = self._execute_political_pct_entry(sig)
+
+            if order_info:
+                await self.notifier.send_mention_signal(sig, order_info,
+                    trade_label=f"POLITICAL PCT ({pct:.0%} said)")
+                self.positions.add(sig, order_info)
+                self._entered_this_cycle.add(ticker)
+                pol_count += 1
+                # Set cooldown on the political detector
+                self.political_pct_detector._cooldown[ticker] = now
+
+    def _execute_political_pct_entry(self, sig):
+        """Execute a political pct BUY NO entry. Taker at the ask.
+        $5/bet, NO 5-70c, per-market cap $5."""
+        ticker = sig['ticker']
+        no_price_cents = sig['no_price_cents']
+
+        orderbook = self.client.get_orderbook(ticker)
+        if not orderbook:
+            print(f"    No orderbook for {ticker}, skipping")
+            return None
+
+        yes_bids_raw = orderbook.get('yes', [])
+        if not isinstance(yes_bids_raw, list):
+            yes_bids_raw = []
+        if not yes_bids_raw:
+            print(f"    No YES bids for {ticker}, skipping")
+            return None
+
+        best_yes_bid = max(b[0] for b in yes_bids_raw)
+        best_no_ask = 100 - best_yes_bid
+
+        if best_no_ask < POLITICAL_PCT_MIN_NO_CENTS or best_no_ask > POLITICAL_PCT_MAX_NO_CENTS:
+            print(f"    NO ask {best_no_ask}c outside [{POLITICAL_PCT_MIN_NO_CENTS}-{POLITICAL_PCT_MAX_NO_CENTS}c], skipping")
+            return None
+
+        # Slippage guard: 4c
+        max_slip = 4
+        if best_no_ask > no_price_cents + max_slip:
+            print(f"    Slippage: ask {best_no_ask}c > signal {no_price_cents}c + {max_slip}c, skipping")
+            return None
+
+        # Bet sizing: $5, capped by per-market and per-event
+        bet = POLITICAL_PCT_BET_DOLLARS
+
+        # Per-market cap check (includes existing positions)
+        ticker_exp = 0
+        for p in self.positions.positions:
+            if p.get('ticker') == ticker and p.get('status') == 'open':
+                ticker_exp += p.get('bet_dollars', 0)
+        remaining_market = POLITICAL_PCT_MAX_MARKET_DOLLARS - ticker_exp
+        if remaining_market <= 0:
+            print(f"    Market cap reached (${ticker_exp:.2f}/${POLITICAL_PCT_MAX_MARKET_DOLLARS}), skipping")
+            return None
+        bet = min(bet, remaining_market)
+
+        # Per-event cap
+        event = sig.get('event_ticker', '')
+        if event:
+            event_exp = self.positions.event_exposure(event, signal_type='political_pct_no')
+            remaining_event = POLITICAL_PCT_MAX_EVENT_DOLLARS - event_exp
+            if remaining_event <= 0:
+                return None
+            bet = min(bet, remaining_event)
+
+        # Depth within slippage window
+        max_slip_price = no_price_cents + max_slip
+        min_yes_bid = 100 - max_slip_price
+        depth_contracts = sum(qty for bid_p, qty in yes_bids_raw if bid_p >= min_yes_bid)
+        depth_dollars = round(depth_contracts * best_no_ask / 100, 2) if depth_contracts > 0 else 0
+        if depth_dollars > 0 and bet > depth_dollars:
+            bet = depth_dollars
+
+        contracts = int(bet / (best_no_ask / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * best_no_ask / 100, 2)
+
+        order_price = max_slip_price
+        print(f"    Political taker: {contracts} NO @ {best_no_ask}c (limit {order_price}c) = ${bet_dollars:.2f}")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-POL-{uuid.uuid4().hex[:8]}',
+                'fill_price': best_no_ask / 100,
+                'fill_count': contracts,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'political_pct_no',
+                'ticker': ticker, 'side': 'no', 'action': 'buy',
+                'contracts': contracts, 'price_cents': best_no_ask,
+                'bet_dollars': bet_dollars, 'dry_run': True,
+            })
+            print(f"    DRY RUN: {contracts} NO @ {best_no_ask}c (${bet_dollars:.2f})")
+            return order_info
+
+        order = self.client.create_order(
+            ticker=ticker, side='no', action='buy',
+            count=contracts, price_cents=order_price,
+        )
+        if not order:
+            print(f"    Political order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    Political taker order placed: {order_id}")
+        log_event('political_pct_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=order_price, bet_dollars=bet_dollars,
+                  pct_words_said=sig.get('pct_words_said'))
+
+        # Check fill
+        time.sleep(2)
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', best_no_ask)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'political_pct_no',
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'no', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': best_no_ask,
+                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                })
+                print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
+                log_event('political_pct_filled', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
+                self._queue_tg("POL-PCT FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                               title=sig.get('title', '')[:60])
+                return info
+
+        # Not filled — cancel
+        try:
+            self.client.cancel_order(order_id)
+        except Exception:
+            pass
+        print(f"    Political taker not filled for {ticker}, canceled")
+        return None
+
     def _execute_mention_entry(self, sig):
         """Execute a mention BUY NO entry. Taker order at the ask for
         immediate fill — avoids adverse selection from passive bids."""
@@ -3948,15 +4470,32 @@ class KalshiReversionScanner:
                 prefix = ticker_upper.split('MENTION')[0].replace('KX', '')
                 maker_cat = prefix if prefix else 'Other'
 
-        # NBA pre-game: maker only, no taker (taker only during live 0.5-2h)
-        nba_pre_game = is_nba and h2e is not None and h2e > 0
-        if nba_pre_game:
-            if can_rest_maker:
-                print(f"    NBA pre-game ({h2e:.1f}h to tipoff), maker only [{maker_cat}]")
-                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
-            else:
-                print(f"    NBA pre-game ({h2e:.1f}h to tipoff) but too close for maker, skipping (no taker pre-game)")
+        # NBA halftime strategy: taker only from halftime (~1.3h into game) onward.
+        # Pre-game: maker only. Pre-halftime live: skip taker entirely.
+        if is_nba and NBA_HALFTIME_ENABLED:
+            hours_into_game = -h2e if h2e is not None else 0
+            if h2e is not None and h2e > 0:
+                # Pre-game: no maker or taker for NBA halftime strat
+                # (the edge is halftime+, not pre-game)
+                print(f"    NBA halftime strat: pre-game ({h2e:.1f}h to tipoff), skipping")
                 return None
+            if hours_into_game < NBA_HALFTIME_MIN_HOURS_LIVE:
+                print(f"    NBA halftime strat: too early ({hours_into_game:.1f}h into game, need {NBA_HALFTIME_MIN_HOURS_LIVE}h), skipping")
+                return None
+            # Word allowlist check in executor (belt-and-suspenders with detector)
+            if word_suffix not in NBA_HALFTIME_WORD_ALLOWLIST:
+                print(f"    NBA halftime strat: word {word_suffix} not in allowlist, skipping")
+                return None
+        elif is_nba:
+            # Fallback: original NBA pre-game maker logic
+            nba_pre_game = h2e is not None and h2e > 0
+            if nba_pre_game:
+                if can_rest_maker:
+                    print(f"    NBA pre-game ({h2e:.1f}h to tipoff), maker only [{maker_cat}]")
+                    return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
+                else:
+                    print(f"    NBA pre-game ({h2e:.1f}h to tipoff) but too close for maker, skipping")
+                    return None
 
         # --- Taker adverse selection gating ---
         # Pre-event taker is -39% ROI from actual fills. Route to maker unless live.
@@ -4042,6 +4581,8 @@ class KalshiReversionScanner:
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
         if is_earnings_taker:
             mention_bet = EARNINGS_BET_DOLLARS
+        elif is_nba and NBA_HALFTIME_ENABLED:
+            mention_bet = NBA_HALFTIME_BET_DOLLARS
         elif is_other:
             mention_bet = MENTION_BET_OTHER
         elif is_ncaa:
@@ -4059,7 +4600,8 @@ class KalshiReversionScanner:
                 print(f"    New series {series} ({resolved} resolved < {PREMARKET_NEW_SERIES_MIN}), capping at ${PREMARKET_NEW_SERIES_BET}")
 
         # Per-market hard cap
-        mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
+        market_cap = NBA_HALFTIME_MAX_MARKET_DOLLARS if (is_nba and NBA_HALFTIME_ENABLED) else MENTION_MAX_MARKET_DOLLARS
+        mention_bet = min(mention_bet, market_cap)
 
         # Per-market exposure check (includes resting maker orders)
         ticker_exp = 0
@@ -4069,17 +4611,18 @@ class KalshiReversionScanner:
         for info in self._resting_premarket_orders.values():
             if info.get('ticker') == ticker:
                 ticker_exp += info.get('bet_dollars', 0)
-        remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp
+        remaining_market_cap = market_cap - ticker_exp
         if remaining_market_cap <= 0:
             print(f"    Market cap reached (${ticker_exp:.2f}/${MENTION_MAX_MARKET_DOLLARS} incl resting), skipping")
             return None
         mention_bet = min(mention_bet, remaining_market_cap)
 
         # Per-event exposure cap
+        event_cap = NBA_HALFTIME_MAX_EVENT_DOLLARS if (is_nba and NBA_HALFTIME_ENABLED) else MENTION_MAX_EVENT_DOLLARS
         event = sig.get('event_ticker', '')
         if event:
             event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
-            remaining_cap = MENTION_MAX_EVENT_DOLLARS - event_exp
+            remaining_cap = event_cap - event_exp
             if remaining_cap <= 0:
                 print(f"    Event cap reached (${event_exp:.0f}/${MENTION_MAX_EVENT_DOLLARS}), skipping")
                 return None
