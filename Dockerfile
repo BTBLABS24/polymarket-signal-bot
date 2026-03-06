@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY realtime_scanner/kalshi_reversion_scanner.py .
 
-ENTRYPOINT ["python", "-u", "kalshi_reversion_scanner.py"]
+CMD ["python", "-u", "kalshi_reversion_scanner.py"]
