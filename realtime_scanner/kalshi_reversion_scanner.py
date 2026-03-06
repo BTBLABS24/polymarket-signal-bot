@@ -107,6 +107,8 @@ MENTION_MAX_MARKET_DOLLARS = 3    # Hard cap $ per individual market/ticker (cap
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
+PREMARKET_BET_DOLLARS = 8          # $ per resting maker order (independent of taker sizing)
+PREMARKET_MAX_MARKET_DOLLARS = 8   # Hard cap $ per market for maker orders
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
@@ -215,7 +217,7 @@ MENTION_SCAN_SERIES = [
 # --- NBA Word Blacklist ---
 # Words with <15% NO win rate — almost always said, losing bet at any price.
 # Ticker suffix -> matched against last segment of ticker (e.g. KXNBAMENTION-...-ROOK)
-NBA_WORD_BLACKLIST = {'ROOK', 'INJU', 'CROW', 'ALL', 'ELBO', 'PLAY'}  # <50% NO WR: Rookie 3%, Injury 4%, Crowd 11%, All-Star 13%, Elbow 24%, Playoff 47%
+NBA_WORD_BLACKLIST = {'ROOK', 'INJU', 'CROW', 'ALL', 'ELBO', 'PLAY', 'TECH'}  # <50% NO WR: Rookie 3%, Injury 4%, Crowd 11%, All-Star 13%, Elbow 24%, Playoff 47%, Technical ~always said
 
 # --- NBA Arena/Venue Blacklist ---
 # Arena names, sponsors, venue words. Announcers almost always name the arena.
@@ -4106,23 +4108,8 @@ class KalshiReversionScanner:
             print(f"    Spread {spread}c too narrow (<{PREMARKET_MIN_SPREAD}c), skipping maker — taker may be better")
             return None
 
-        # Bet sizing (same logic as taker path)
-        ticker_upper = ticker.upper()
-        is_earnings_maker = 'EARNINGSMENTION' in ticker_upper
-        is_other = not any(k in ticker_upper for k in (
-            'TRUMPMENTION', 'MAMDANIMENTION', 'NEWSOMMENTION',
-            'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION',
-            'VANCEMENTION', 'EARNINGSMENTION',
-        ))
-        is_ncaa_maker = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
-        if is_earnings_maker:
-            mention_bet = EARNINGS_BET_DOLLARS
-        elif is_other:
-            mention_bet = MENTION_BET_OTHER
-        elif is_ncaa_maker:
-            mention_bet = MENTION_BET_NCAA
-        else:
-            mention_bet = MENTION_BET_DOLLARS
+        # Bet sizing — maker uses its own PREMARKET_BET_DOLLARS, independent of taker
+        mention_bet = PREMARKET_BET_DOLLARS
 
         # New/unknown series cap
         event_ticker = sig.get('event_ticker', '')
@@ -4132,7 +4119,7 @@ class KalshiReversionScanner:
             if resolved < PREMARKET_NEW_SERIES_MIN:
                 mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
 
-        mention_bet = min(mention_bet, MENTION_MAX_MARKET_DOLLARS)
+        mention_bet = min(mention_bet, PREMARKET_MAX_MARKET_DOLLARS)
 
         # Per-market exposure check (includes resting maker orders)
         ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
@@ -4140,7 +4127,7 @@ class KalshiReversionScanner:
         for info in self._resting_premarket_orders.values():
             if info.get('ticker') == ticker:
                 ticker_exp += info.get('bet_dollars', 0)
-        remaining_market_cap = MENTION_MAX_MARKET_DOLLARS - ticker_exp
+        remaining_market_cap = PREMARKET_MAX_MARKET_DOLLARS - ticker_exp
         if remaining_market_cap <= 0:
             return None
         mention_bet = min(mention_bet, remaining_market_cap)
