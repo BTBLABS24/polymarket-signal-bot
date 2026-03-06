@@ -242,6 +242,13 @@ NCAAB_ARENA_BLACKLIST = {
     'ALLEN', 'COLE', 'SAND', 'CAPI', 'MEMO', 'UNIT', 'MSG', 'STAT', 'STEG',
     'NEVI', 'CRIS', 'MARR', 'WELS', 'LENO', 'CARV', 'MIZZ', 'DESE', 'CAME',
     'BUD', 'FERT', 'MILL', 'PAUL',  # Pauley Pavilion (UCLA)
+    'PURC',  # Purcell Pavilion (Notre Dame)
+    'SIMO',  # Simon Skjodt Assembly Hall (Indiana)
+    'SMIT',  # Dean Smith Center (UNC)
+    'FOOD',  # Food sponsor venue names
+    'ALKE',  # Ahearn Field House / venue word
+    'PEOP',  # Peoples Bank Arena / venue word
+    'VALU',  # Value City Arena (Ohio State)
     'CENT', 'AREN', 'STAD',  # Generic venue words: Center, Arena, Stadium
 }
 
