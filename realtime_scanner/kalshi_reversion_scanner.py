@@ -4759,8 +4759,17 @@ class KalshiReversionScanner:
 
 
 if __name__ == "__main__":
-    scanner = KalshiReversionScanner()
+    import sys
+    print("Bot starting...", flush=True)
     try:
+        scanner = KalshiReversionScanner()
         asyncio.run(scanner.run())
     except KeyboardInterrupt:
         print("\nStopped.")
+    except Exception as e:
+        print(f"FATAL: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.exit(1)
