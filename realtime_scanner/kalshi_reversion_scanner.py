@@ -281,6 +281,29 @@ NBA_HALFTIME_WORD_ALLOWLIST = {
     'RETI',   # Retire/Retirement — 100%/83% WR test
 }
 
+# --- NCAAB Halftime NO Strategy ---
+# Buy NO on high-confidence basketball words once game >= 0.75h (halftime).
+# Backtest: 71.4% WR, +33.7% ROI on test (42 trades, 19 events).
+# NCAAB games ~2h, halftime ~45min in. Entry from 0.75h to 2.5h.
+NCAAB_HALFTIME_ENABLED = True
+NCAAB_HALFTIME_BET_DOLLARS = 5     # $5/bet
+NCAAB_HALFTIME_MAX_POSITIONS = 20  # independent cap
+NCAAB_HALFTIME_MAX_EVENT_DOLLARS = 30  # per-event cap
+NCAAB_HALFTIME_MAX_MARKET_DOLLARS = 5  # per-market cap
+NCAAB_HALFTIME_MIN_NO_CENTS = 20   # min NO price
+NCAAB_HALFTIME_MAX_NO_CENTS = 70   # max NO price
+NCAAB_HALFTIME_MIN_HOURS_LIVE = 0.75  # ~halftime (NCAAB halves are 20min)
+NCAAB_HALFTIME_MAX_HOURS_LIVE = 2.5   # game over ~2h
+NCAAB_HALFTIME_WORD_ALLOWLIST = {
+    'ANKL',   # Ankle — 72% train, 67% test WR
+    'ALLE',   # Alley-oop — 86% train WR
+    'MARC',   # March Madness — 80% train, 80% test WR
+    'WALK',   # Walk On — 58% train, 83% test WR
+    'DOUB',   # Double Double — 61% train, 50% test WR
+    'NIL',    # NIL — 67% train WR
+    'RECR',   # Recruit — 67% train, 57% test WR
+}
+
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
 # Buys NO when market is below statistically-derived fair value based on
 # time-into-game degradation curves. Separate from main mention strategy.
@@ -1123,13 +1146,17 @@ class MentionBuyNoDetector:
                         cat_debug[_cat]['timing'] += 1
                         continue
                 elif is_ncaa:
-                    # NCAA: pre 1-24h + live 0.5-1.5h (skip last hour pre + first 0.5h live)
+                    # NCAA: pre 1-24h + live window
+                    # NCAAB (basketball): live to 2.5h (halftime strat needs 0.75-2.5h)
+                    # NCAA (football): live to 1.5h
+                    is_ncaab_det = 'NCAABMENTION' in ticker_upper
+                    ncaa_max_live = 2.5 if is_ncaab_det else 1.5
                     ncaa_skip_count = cat_debug[_cat].get('_logged', 0)
                     if hours_to_event > 24:
                         debug_counts['too_early'] += 1
                         cat_debug[_cat]['timing'] += 1
                         continue
-                    if hours_to_event < -1.5:
+                    if hours_to_event < -ncaa_max_live:
                         debug_counts['too_far'] += 1
                         cat_debug[_cat]['timing'] += 1
                         if ncaa_skip_count < 3:
@@ -2432,6 +2459,8 @@ class KalshiReversionScanner:
         print(f"Strategy 3: Earnings BUY NO — {'ON' if EARNINGS_ENABLED else 'OFF'}, ${EARNINGS_BET_DOLLARS}/bet, {EARNINGS_MIN_NO_PRICE*100:.0f}-{EARNINGS_MAX_NO_PRICE*100:.0f}c, {EARNINGS_WINDOW_HOURS_BEFORE*60:.0f}min pre-event")
         print(f"Strategy 4: Stale snipe (all mention markets) — {'ON' if STALE_ENABLED else 'OFF'}, ${STALE_BET_DOLLARS}/bet, gap>={STALE_MIN_GAP_CENTS}c, NO>={STALE_MIN_NO_CENTS}c, {STALE_MIN_HOURS_INTO_GAME}h+ into event")
         print(f"Strategy 5: Political pct_words_said — {'ON' if POLITICAL_PCT_ENABLED else 'OFF'}, ${POLITICAL_PCT_BET_DOLLARS}/bet, NO {POLITICAL_PCT_MIN_NO_CENTS}-{POLITICAL_PCT_MAX_NO_CENTS}c, threshold>={POLITICAL_PCT_THRESHOLD:.0%}, excl. rallies={'Y' if POLITICAL_EXCLUDE_RALLY else 'N'}")
+        ncaab_words = ', '.join(sorted(NCAAB_HALFTIME_WORD_ALLOWLIST))
+        print(f"Strategy 6: NCAAB halftime NO — {'ON' if NCAAB_HALFTIME_ENABLED else 'OFF'}, ${NCAAB_HALFTIME_BET_DOLLARS}/bet, NO {NCAAB_HALFTIME_MIN_NO_CENTS}-{NCAAB_HALFTIME_MAX_NO_CENTS}c, >={NCAAB_HALFTIME_MIN_HOURS_LIVE}h, words: {ncaab_words}")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -2588,8 +2617,11 @@ class KalshiReversionScanner:
                         # Earnings: maker pre + live taker up to 1h after start
                         return -1 <= h <= EARNINGS_WINDOW_HOURS_BEFORE
                     elif is_ncaa:
-                        # NCAA: pre 1-24h + live 0.5-1.5h
-                        return (-1.5 <= h <= -0.5) or (1 <= h <= 24)
+                        # NCAA: pre 1-24h + live window
+                        # NCAAB (basketball): live to 2.5h for halftime strat
+                        is_ncaab_ew = 'NCAABMENTION' in ticker_up
+                        ncaa_max = 2.5 if is_ncaab_ew else 1.5
+                        return (-ncaa_max <= h <= -0.5) or (1 <= h <= 24)
                     elif is_nba:
                         # NBA: pre-event maker up to 24h + live taker from halftime to 3h
                         return -NBA_HALFTIME_MAX_HOURS_LIVE <= h <= 24
@@ -4443,6 +4475,7 @@ class KalshiReversionScanner:
         # Per-category price range (taker)
         ticker_upper = ticker.upper()
         is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+        is_ncaab = 'NCAABMENTION' in ticker_upper  # basketball only (not football)
         is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
 
         # Pre-event maker eligibility: all mention categories can fall back to resting limit orders
@@ -4496,6 +4529,27 @@ class KalshiReversionScanner:
                 else:
                     print(f"    NBA pre-game ({h2e:.1f}h to tipoff) but too close for maker, skipping")
                     return None
+
+        # NCAAB halftime strategy: taker only from 0.75h into game onward.
+        # Basketball only (NCAABMENTION), not football (NCAAMENTION).
+        if is_ncaab and NCAAB_HALFTIME_ENABLED:
+            hours_into_game = -h2e if h2e is not None else 0
+            if h2e is not None and h2e > 0:
+                print(f"    NCAAB halftime strat: pre-game ({h2e:.1f}h to tipoff), skipping")
+                return None
+            if hours_into_game < NCAAB_HALFTIME_MIN_HOURS_LIVE:
+                print(f"    NCAAB halftime strat: too early ({hours_into_game:.1f}h into game, need {NCAAB_HALFTIME_MIN_HOURS_LIVE}h), skipping")
+                return None
+            if hours_into_game > NCAAB_HALFTIME_MAX_HOURS_LIVE:
+                print(f"    NCAAB halftime strat: too late ({hours_into_game:.1f}h, game likely over), skipping")
+                return None
+            if word_suffix not in NCAAB_HALFTIME_WORD_ALLOWLIST:
+                print(f"    NCAAB halftime strat: word {word_suffix} not in allowlist, skipping")
+                return None
+            # Override price range for NCAAB halftime
+            if best_no_ask < NCAAB_HALFTIME_MIN_NO_CENTS or best_no_ask > NCAAB_HALFTIME_MAX_NO_CENTS:
+                print(f"    NCAAB halftime strat: NO ask {best_no_ask}c outside [{NCAAB_HALFTIME_MIN_NO_CENTS}-{NCAAB_HALFTIME_MAX_NO_CENTS}c], skipping")
+                return None
 
         # --- Taker adverse selection gating ---
         # Pre-event taker is -39% ROI from actual fills. Route to maker unless live.
