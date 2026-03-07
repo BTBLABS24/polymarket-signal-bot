@@ -1279,6 +1279,16 @@ class MentionBuyNoDetector:
 
             # Per-category price ranges from CATEGORY_NO_RANGE (backtest-optimized)
             _min_c, _max_c = get_no_range(ticker)
+            # Override price range for halftime strategies when game is live
+            is_ncaab_det = 'NCAABMENTION' in ticker_upper
+            if is_ncaab_det and NCAAB_HALFTIME_ENABLED and word_suffix in NCAAB_HALFTIME_WORD_ALLOWLIST:
+                hours_into_game = -hours_to_event if hours_to_event is not None else 0
+                if hours_into_game >= NCAAB_HALFTIME_MIN_HOURS_LIVE:
+                    _min_c, _max_c = NCAAB_HALFTIME_MIN_NO_CENTS, NCAAB_HALFTIME_MAX_NO_CENTS
+            if is_nba and NBA_HALFTIME_ENABLED and word_suffix in NBA_HALFTIME_WORD_ALLOWLIST:
+                hours_into_game = -hours_to_event if hours_to_event is not None else 0
+                if hours_into_game >= NBA_HALFTIME_MIN_HOURS_LIVE:
+                    _min_c, _max_c = NBA_HALFTIME_MIN_NO_CENTS, NBA_HALFTIME_MAX_NO_CENTS
             min_no, max_no = _min_c / 100, _max_c / 100
             if no_price < min_no or no_price > max_no:
                 # Mid-price is out of range — but for pre-event maker-eligible
