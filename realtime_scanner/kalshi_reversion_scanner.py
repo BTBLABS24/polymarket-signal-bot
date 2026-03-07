@@ -388,6 +388,22 @@ THETA_REENTRY_MAX_DEVIATION = 5     # max cents NO can deviate from start price
 THETA_REENTRY_MAX_MARKET_DOLLARS = 3 # per-market cap for theta entries
 THETA_REENTRY_MAX_POSITIONS = 20    # independent cap
 
+# --- NCAAB Game Outcome Fade Strategy ---
+# When a pregame NCAAB favorite (YES >= 55c) sees their live moneyline drop
+# to the trigger price within the first 50 minutes, buy YES expecting reversion.
+# Backtest: vel>=0.015, drop>=0.25, trigger @45c → 65% WR, +43% ROI (30d, $20/bet).
+NCAAB_FADE_ENABLED = True
+NCAAB_FADE_BET_DOLLARS = 30           # $30 per trade
+NCAAB_FADE_TRIGGER_CENTS = 45        # Buy YES at this price (limit order)
+NCAAB_FADE_MIN_PREGAME_YES = 55      # Min pregame YES price (cents) — must be a favorite
+NCAAB_FADE_MIN_DROP_SIZE = 25        # Min drop in cents (pregame - trigger)
+NCAAB_FADE_MIN_VELOCITY = 1.5         # Min price drop velocity (cents/min). Backtest: 0.015 in dollars/min = 1.5c/min
+NCAAB_FADE_MAX_MINUTES = 50          # Only enter within first 50 min of game
+NCAAB_FADE_MAX_POSITIONS = 10        # Independent position cap
+NCAAB_FADE_MAX_MARKET_DOLLARS = 30   # Per-market cap (one bet per market)
+NCAAB_FADE_SERIES = 'KXNCAAMBGAME'   # Series for NCAAB game outcomes
+NCAAB_FADE_GAME_DURATION_HOURS = 2.5 # Approximate game duration
+
 # State files
 STATE_DIR = Path(__file__).parent
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
@@ -1785,7 +1801,7 @@ class KalshiPositionTracker:
             'status': 'open',
             'signal_type': signal_type,
         }
-        if signal_type in ('mention_buy_no', 'ncaa_theta_reentry'):
+        if signal_type in ('mention_buy_no', 'ncaa_theta_reentry', 'ncaab_fade_yes'):
             pos['no_price'] = signal.get('no_price', 0)
             pos['hold_until_settle'] = True
         if order_info:
@@ -1833,7 +1849,7 @@ class KalshiPositionTracker:
                 result = market.get('result', '')
                 fill_price = pos.get('fill_price', pos.get('no_price', 0))
                 fill_count = pos.get('fill_count', 0)
-                is_yes_buy = pos.get('signal_type') == 'mention_buy_yes'
+                is_yes_buy = pos.get('signal_type') in ('mention_buy_yes', 'ncaab_fade_yes')
 
                 if is_yes_buy:
                     # YES-buy position: wins when result='yes'
@@ -2470,6 +2486,7 @@ class KalshiReversionScanner:
         print(f"Strategy 5: Political pct_words_said — {'ON' if POLITICAL_PCT_ENABLED else 'OFF'}, ${POLITICAL_PCT_BET_DOLLARS}/bet, NO {POLITICAL_PCT_MIN_NO_CENTS}-{POLITICAL_PCT_MAX_NO_CENTS}c, threshold>={POLITICAL_PCT_THRESHOLD:.0%}, excl. rallies={'Y' if POLITICAL_EXCLUDE_RALLY else 'N'}")
         ncaab_words = ', '.join(sorted(NCAAB_HALFTIME_WORD_ALLOWLIST))
         print(f"Strategy 6: NCAAB halftime NO — {'ON' if NCAAB_HALFTIME_ENABLED else 'OFF'}, ${NCAAB_HALFTIME_BET_DOLLARS}/bet, NO {NCAAB_HALFTIME_MIN_NO_CENTS}-{NCAAB_HALFTIME_MAX_NO_CENTS}c, >={NCAAB_HALFTIME_MIN_HOURS_LIVE}h, words: {ncaab_words}")
+        print(f"Strategy 7: NCAAB fade BUY YES — {'ON' if NCAAB_FADE_ENABLED else 'OFF'}, ${NCAAB_FADE_BET_DOLLARS}/bet, trigger={NCAAB_FADE_TRIGGER_CENTS}c, vel>={NCAAB_FADE_MIN_VELOCITY}, drop>={NCAAB_FADE_MIN_DROP_SIZE}c, <{NCAAB_FADE_MAX_MINUTES}min")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -2762,6 +2779,10 @@ class KalshiReversionScanner:
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
+        # NCAAB fade strategy — runs independently from mention scan (different series)
+        if NCAAB_FADE_ENABLED and not low_balance:
+            await self._scan_ncaab_fade(now)
+
         # Check positions for settlement
         alerts = self.positions.check(self.client)
         for atype, pos in alerts:
@@ -2781,6 +2802,7 @@ class KalshiReversionScanner:
         yes_buy_count = self.positions.count('mention_buy_yes')
         theta_count = self.positions.count('ncaa_theta_reentry')
         pol_pct_count = self.positions.count('political_pct_no')
+        fade_count = self.positions.count('ncaab_fade_yes')
         parts = [f"mention={mention_count}"]
         if nba_ht_count:
             parts.append(f"nba_ht={nba_ht_count}")
@@ -2794,6 +2816,8 @@ class KalshiReversionScanner:
             parts.append(f"earnings={earnings_count}")
         if theta_count:
             parts.append(f"theta={theta_count}")
+        if fade_count:
+            parts.append(f"fade={fade_count}")
         if self._resting_premarket_orders:
             parts.append(f"resting={len(self._resting_premarket_orders)}")
         print(f"  Open positions: {self.positions.count()} ({', '.join(parts)}, {self.positions.live_count()} live)")
@@ -4069,6 +4093,383 @@ class KalshiReversionScanner:
 
         if n_filled > 0:
             print(f"  Stale orders filled: {n_filled}")
+
+    # ------------------------------------------------------------------
+    # NCAAB Game Outcome Fade Strategy: buy YES when live favorite drops
+    # ------------------------------------------------------------------
+    async def _scan_ncaab_fade(self, now):
+        """NCAAB fade strategy: when a pregame favorite's YES price drops to
+        the trigger level within the first 50 minutes of the game, buy YES
+        expecting reversion to the mean.
+
+        Backtest: vel>=0.015, drop>=0.25, trigger @45c → 65% WR, +43% ROI.
+        """
+        if not NCAAB_FADE_ENABLED:
+            return
+
+        fade_count = self.positions.count('ncaab_fade_yes')
+        if fade_count >= NCAAB_FADE_MAX_POSITIONS:
+            return
+
+        # Discover KXNCAAMBGAME markets — cache series for 1 hour
+        if not hasattr(self, '_ncaab_fade_markets_cache') or now - self._ncaab_fade_markets_cache_ts > 300:
+            try:
+                all_markets = []
+                cursor = None
+                pages = 0
+                while pages < 20:
+                    params = {
+                        'series_ticker': NCAAB_FADE_SERIES,
+                        'status': 'open',
+                        'limit': 200,
+                    }
+                    if cursor:
+                        params['cursor'] = cursor
+                    resp = self.client.session.get(
+                        f'{KALSHI_BASE}/markets', params=params, timeout=15
+                    )
+                    if resp.status_code == 429:
+                        time.sleep(2)
+                        continue
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    markets = data.get('markets', [])
+                    all_markets.extend(markets)
+                    cursor = data.get('cursor', '')
+                    pages += 1
+                    if not markets or not cursor:
+                        break
+                self._ncaab_fade_markets_cache = all_markets
+                self._ncaab_fade_markets_cache_ts = now
+            except Exception as e:
+                print(f"  NCAAB FADE: market fetch error: {e}")
+                self._ncaab_fade_markets_cache = getattr(self, '_ncaab_fade_markets_cache', [])
+                self._ncaab_fade_markets_cache_ts = now
+
+        ncaab_markets = self._ncaab_fade_markets_cache
+        if not ncaab_markets:
+            return
+
+        # Get milestones for game start times
+        milestones = self.client.get_milestones()
+
+        trigger_c = NCAAB_FADE_TRIGGER_CENTS
+        min_pregame = NCAAB_FADE_MIN_PREGAME_YES
+        min_drop = NCAAB_FADE_MIN_DROP_SIZE
+        min_vel = NCAAB_FADE_MIN_VELOCITY
+        max_minutes = NCAAB_FADE_MAX_MINUTES
+
+        skip_reasons = {
+            'no_milestone': 0, 'not_live': 0, 'too_late': 0,
+            'no_price': 0, 'price_above_trigger': 0,
+            'already_pos': 0, 'no_pregame': 0,
+            'drop_too_small': 0, 'vel_too_low': 0,
+        }
+        signals = []
+
+        for m in ncaab_markets:
+            ticker = m.get('ticker', '')
+            event_ticker = m.get('event_ticker', '')
+
+            # Game start from milestone or expected_expiration
+            ms = milestones.get(event_ticker)
+            game_start_ts = None
+            if ms and ms.get('start_ts'):
+                game_start_ts = ms['start_ts']
+            else:
+                # Fallback: expected_expiration - 2.5h
+                exp_str = m.get('expected_expiration_time', '')
+                if exp_str:
+                    try:
+                        exp_dt = datetime.fromisoformat(exp_str.replace('Z', '+00:00'))
+                        game_start_ts = exp_dt.timestamp() - NCAAB_FADE_GAME_DURATION_HOURS * 3600
+                    except Exception:
+                        pass
+
+            if game_start_ts is None:
+                skip_reasons['no_milestone'] += 1
+                continue
+
+            minutes_into_game = (now - game_start_ts) / 60.0
+            if minutes_into_game < 0:
+                skip_reasons['not_live'] += 1
+                continue
+            if minutes_into_game > max_minutes:
+                skip_reasons['too_late'] += 1
+                continue
+
+            # Get current YES price
+            yes_price_c = None
+            yes_bid = m.get('yes_bid')
+            yes_ask = m.get('yes_ask')
+            if yes_bid is not None and yes_ask is not None:
+                try:
+                    yes_price_c = (int(yes_bid) + int(yes_ask)) // 2
+                except (ValueError, TypeError):
+                    pass
+            if yes_price_c is None:
+                last = m.get('last_price')
+                if last is not None:
+                    try:
+                        yes_price_c = int(last)
+                    except (ValueError, TypeError):
+                        pass
+            if yes_price_c is None:
+                skip_reasons['no_price'] += 1
+                continue
+
+            # Price must be at or below trigger
+            if yes_price_c > trigger_c:
+                skip_reasons['price_above_trigger'] += 1
+                continue
+
+            # Dedup: skip if already holding this ticker
+            if self.positions.has_open_ticker(ticker, signal_type='ncaab_fade_yes'):
+                skip_reasons['already_pos'] += 1
+                continue
+
+            # Global scan-cycle dedup
+            if ticker in self._entered_this_cycle:
+                skip_reasons['already_pos'] += 1
+                continue
+
+            # Need pregame price — fetch recent trades from before game start
+            # Use a cached pregame price to avoid repeated API calls
+            pregame_key = f'_fade_pregame_{ticker}'
+            pregame_price_c = getattr(self, pregame_key, None)
+
+            if pregame_price_c is None:
+                # Fetch trades in the 60-min window before game start
+                pregame_start = int(game_start_ts - 3600)
+                pregame_end = int(game_start_ts)
+                try:
+                    trades, _ = self.client.get_trades(
+                        ticker=ticker, limit=100,
+                        min_ts=pregame_start, max_ts=pregame_end,
+                    )
+                    if trades:
+                        prices = []
+                        for t in trades:
+                            try:
+                                prices.append(int(t.get('yes_price', 0)))
+                            except (ValueError, TypeError):
+                                pass
+                        if prices:
+                            pregame_price_c = int(sum(prices) / len(prices))
+                            setattr(self, pregame_key, pregame_price_c)
+                except Exception:
+                    pass
+                time.sleep(0.3)  # Rate limit
+
+            if pregame_price_c is None or pregame_price_c < min_pregame:
+                skip_reasons['no_pregame'] += 1
+                continue
+
+            # Check drop size
+            drop_size = pregame_price_c - trigger_c
+            if drop_size < min_drop:
+                skip_reasons['drop_too_small'] += 1
+                continue
+
+            # Check velocity: cents dropped per minute
+            if minutes_into_game > 0:
+                velocity = (pregame_price_c - yes_price_c) / minutes_into_game
+            else:
+                velocity = 0
+            if velocity < min_vel:
+                skip_reasons['vel_too_low'] += 1
+                continue
+
+            signals.append({
+                'ticker': ticker,
+                'event_ticker': event_ticker,
+                'title': m.get('title', ticker),
+                'yes_price_c': yes_price_c,
+                'pregame_price_c': pregame_price_c,
+                'drop_size': drop_size,
+                'velocity': round(velocity, 4),
+                'minutes_into_game': round(minutes_into_game, 1),
+                'game_start_ts': game_start_ts,
+            })
+
+        active_skips = {k: v for k, v in skip_reasons.items() if v > 0}
+        if signals or active_skips:
+            print(f"  NCAAB FADE: {len(ncaab_markets)} markets, {len(signals)} signals, "
+                  f"{fade_count}/{NCAAB_FADE_MAX_POSITIONS} pos, skips: {active_skips}")
+
+        for sig in signals:
+            if fade_count >= NCAAB_FADE_MAX_POSITIONS:
+                print(f"    NCAAB FADE CAP: {fade_count}/{NCAAB_FADE_MAX_POSITIONS}, stopping")
+                break
+
+            print(f"  NCAAB FADE: BUY YES @ {trigger_c}c '{sig['title'][:50]}' "
+                  f"(pre={sig['pregame_price_c']}c, drop={sig['drop_size']}c, "
+                  f"vel={sig['velocity']:.3f}c/min, T+{sig['minutes_into_game']:.0f}min)")
+
+            order_info = None
+            if self.client.can_trade:
+                order_info = self._execute_ncaab_fade_entry(sig)
+
+            if order_info:
+                # Build signal dict for position tracker
+                pos_sig = {
+                    'ticker': sig['ticker'],
+                    'event_ticker': sig['event_ticker'],
+                    'title': sig['title'],
+                    'signal_type': 'ncaab_fade_yes',
+                    'fade_action': 'BUY',
+                    'fade_side': 'yes',
+                    'entry_price': trigger_c / 100,
+                    'pre_signal_price': sig['pregame_price_c'] / 100,
+                    'price_move': sig['drop_size'] / 100,
+                    'n_small_trades': 0,
+                    'retail_contracts': 0,
+                    'signal_time': now,
+                    'no_price': (100 - trigger_c) / 100,
+                    'no_price_cents': 100 - trigger_c,
+                    'hours_before_close': 0,
+                    'hours_to_event': -(sig['minutes_into_game'] / 60),
+                    'close_ts': sig['game_start_ts'] + NCAAB_FADE_GAME_DURATION_HOURS * 3600,
+                }
+                self.positions.add(pos_sig, order_info)
+                self._entered_this_cycle.add(sig['ticker'])
+                fade_count += 1
+                await self.notifier.send_order_event(
+                    "NCAAB FADE BUY YES", sig['ticker'],
+                    price_cents=order_info.get('fill_price', trigger_c / 100) * 100
+                        if isinstance(order_info.get('fill_price'), float) else trigger_c,
+                    contracts=order_info.get('fill_count', 0),
+                    bet_dollars=order_info.get('bet_dollars', 0),
+                    title=sig['title'][:60],
+                    extra=f"Pre={sig['pregame_price_c']}c, drop={sig['drop_size']}c, vel={sig['velocity']:.3f}c/min, T+{sig['minutes_into_game']:.0f}min")
+                log_event('ncaab_fade_filled', ticker=sig['ticker'],
+                          pregame=sig['pregame_price_c'], trigger=trigger_c,
+                          drop=sig['drop_size'], velocity=sig['velocity'],
+                          minutes_into=sig['minutes_into_game'],
+                          bet_dollars=order_info.get('bet_dollars', 0))
+
+    def _execute_ncaab_fade_entry(self, sig):
+        """Execute a NCAAB fade BUY YES entry at the trigger price.
+        Taker order: buy YES at 45c (or best ask if cheaper)."""
+        ticker = sig['ticker']
+        trigger_c = NCAAB_FADE_TRIGGER_CENTS
+
+        orderbook = self.client.get_orderbook(ticker)
+        if not orderbook:
+            print(f"    NCAAB FADE: no orderbook for {ticker}, skipping")
+            return None
+
+        # Best YES ask = 100 - best NO bid
+        no_bids_raw = orderbook.get('no', [])
+        if not isinstance(no_bids_raw, list):
+            no_bids_raw = []
+        if not no_bids_raw:
+            print(f"    NCAAB FADE: no NO bids for {ticker} (no YES ask available), skipping")
+            return None
+
+        best_no_bid = max(b[0] for b in no_bids_raw)
+        best_yes_ask = 100 - best_no_bid
+
+        # Only buy at or below trigger
+        if best_yes_ask > trigger_c:
+            print(f"    NCAAB FADE: YES ask {best_yes_ask}c > trigger {trigger_c}c, skipping")
+            return None
+
+        # Buy at trigger price (limit order — may fill at better price)
+        buy_price = trigger_c
+        contracts = int(NCAAB_FADE_BET_DOLLARS / (buy_price / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * buy_price / 100, 2)
+
+        # Cap to $30
+        if bet_dollars > NCAAB_FADE_BET_DOLLARS:
+            contracts = int(NCAAB_FADE_BET_DOLLARS / (buy_price / 100))
+            bet_dollars = round(contracts * buy_price / 100, 2)
+            if contracts < 1:
+                print(f"    NCAAB FADE: can't fit within ${NCAAB_FADE_BET_DOLLARS} at {buy_price}c, skipping")
+                return None
+
+        print(f"    NCAAB FADE taker: {contracts} YES @ {buy_price}c (ask={best_yes_ask}c) = ${bet_dollars:.2f}")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-FADE-{uuid.uuid4().hex[:8]}',
+                'fill_price': buy_price / 100,
+                'fill_count': contracts,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+                'side': 'yes',
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'ncaab_fade_yes',
+                'ticker': ticker, 'side': 'yes', 'action': 'buy',
+                'contracts': contracts, 'price_cents': buy_price,
+                'bet_dollars': bet_dollars, 'dry_run': True,
+            })
+            print(f"    DRY RUN: {contracts} YES @ {buy_price}c (${bet_dollars:.2f})")
+            return order_info
+
+        order = self.client.create_order(
+            ticker=ticker, side='yes', action='buy',
+            count=contracts, price_cents=buy_price,
+        )
+        if not order:
+            print(f"    NCAAB FADE: order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    NCAAB FADE order placed: {order_id} ({contracts} YES @ {buy_price}c, ${bet_dollars:.2f})")
+        log_event('ncaab_fade_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=buy_price, bet_dollars=bet_dollars,
+                  pregame=sig.get('pregame_price_c'), velocity=sig.get('velocity'))
+
+        # Taker — should fill instantly
+        time.sleep(2)
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', buy_price)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                    'side': 'yes',
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'ncaab_fade_yes',
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'yes', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': buy_price,
+                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                })
+                print(f"    NCAAB FADE FILLED: {filled}/{contracts} YES @ avg {avg_fill}c (${actual_dollars:.2f})")
+                log_event('ncaab_fade_entry_filled', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars)
+                self._queue_tg("NCAAB FADE FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                               title=sig.get('title', '')[:60])
+                return info
+
+        # Not filled — cancel
+        try:
+            self.client.cancel_order(order_id)
+        except Exception:
+            pass
+        print(f"    NCAAB FADE taker not filled for {ticker}, canceled")
+        log_event('ncaab_fade_unfilled', ticker=ticker, order_id=order_id)
+        return None
 
     def _execute_premarket_maker(self, sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA'):
         """Place a single resting NO buy limit order for pre-event markets.
