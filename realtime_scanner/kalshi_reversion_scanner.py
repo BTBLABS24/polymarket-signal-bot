@@ -101,7 +101,7 @@ MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (event
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
-MENTION_MAX_EVENT_DOLLARS = 99999 # No event cap
+MENTION_MAX_EVENT_DOLLARS = 30    # Max $ per event across all words (resting + filled)
 MENTION_MAX_MARKET_DOLLARS = 3    # Hard cap $ per individual market/ticker (capped until backtest validates)
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
@@ -2481,6 +2481,19 @@ class KalshiReversionScanner:
         except Exception as e:
             print(f"  WARNING: Failed to save resting orders: {e}")
 
+    def _total_event_exposure(self, event_ticker, signal_type=None):
+        """Total event exposure including BOTH open positions AND resting maker orders.
+        This prevents oversizing when multiple words in the same event each get maker orders."""
+        if not event_ticker:
+            return 0
+        pos_exp = self.positions.event_exposure(event_ticker, signal_type=signal_type)
+        resting_exp = sum(
+            info.get('bet_dollars', 0)
+            for info in self._resting_premarket_orders.values()
+            if info.get('signal', {}).get('event_ticker') == event_ticker
+        )
+        return pos_exp + resting_exp
+
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
         print("=" * 60)
@@ -2714,12 +2727,12 @@ class KalshiReversionScanner:
                         if sig_is_nba and self.positions.has_open_ticker(sig['ticker'], signal_type='nba_halftime_no'):
                             continue
 
-                        # Per-event exposure cap
+                        # Per-event exposure cap (includes resting maker orders)
                         event = sig.get('event_ticker', '')
                         if event:
                             evt_cap = NBA_HALFTIME_MAX_EVENT_DOLLARS if (sig_is_nba and NBA_HALFTIME_ENABLED) else MENTION_MAX_EVENT_DOLLARS
                             st = 'nba_halftime_no' if (sig_is_nba and NBA_HALFTIME_ENABLED) else 'mention_buy_no'
-                            event_exp = self.positions.event_exposure(event, signal_type=st)
+                            event_exp = self._total_event_exposure(event, signal_type=st)
                             if event_exp >= evt_cap:
                                 continue
 
@@ -2849,9 +2862,37 @@ class KalshiReversionScanner:
 
     def _rebid_resting_order(self, order_id, info, new_price, spread, to_remove):
         """Cancel existing resting order and place a new one at new_price.
-        Used by outbid detection and gap optimization."""
+        Used by outbid detection and gap optimization.
+        Checks for partial fills on old order before cancelling."""
         ticker = info['ticker']
         old_price = info['price_cents']
+
+        # Check for partial fills BEFORE cancelling the old order
+        old_status = self.client.get_order(order_id)
+        partial_fills = 0
+        if old_status:
+            partial_fills = old_status.get('quantity_filled', 0)
+            prev_recorded = info.get('_recorded_fills', 0)
+            new_fills = partial_fills - prev_recorded
+            if new_fills > 0:
+                avg_fill = old_status.get('average_fill_price', old_price)
+                fill_dollars = round(new_fills * avg_fill / 100, 2)
+                print(f"    REBID PARTIAL FILL: {ticker} {new_fills} filled @ {avg_fill}c (${fill_dollars:.2f}) before rebid")
+                sig = info.get('signal', {})
+                sig['signal_type'] = 'mention_buy_no'
+                order_info = {
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'no', 'action': 'buy',
+                    'contracts_filled': new_fills, 'price_cents': old_price,
+                    'avg_fill_price': avg_fill, 'bet_dollars': fill_dollars,
+                    'fill_price': avg_fill / 100, 'fill_count': new_fills,
+                }
+                self.positions.add(sig, order_info)
+                log_event('premarket_rebid_partial_fill', ticker=ticker,
+                          order_id=order_id, filled=new_fills, avg_fill=avg_fill,
+                          bet_dollars=fill_dollars)
+                info['_recorded_fills'] = partial_fills
+
         self.client.cancel_order(order_id)
         new_contracts = int(info['bet_dollars'] / (new_price / 100))
         if new_contracts < 1:
@@ -4550,9 +4591,9 @@ class KalshiReversionScanner:
             return None
         mention_bet = min(mention_bet, remaining_market_cap)
 
-        # Per-event exposure cap
+        # Per-event exposure cap (includes resting maker orders)
         if event_ticker:
-            event_exp = self.positions.event_exposure(event_ticker, signal_type='mention_buy_no')
+            event_exp = self._total_event_exposure(event_ticker, signal_type='mention_buy_no')
             remaining_cap = MENTION_MAX_EVENT_DOLLARS - event_exp
             if remaining_cap <= 0:
                 return None
@@ -5076,14 +5117,14 @@ class KalshiReversionScanner:
             return None
         mention_bet = min(mention_bet, remaining_market_cap)
 
-        # Per-event exposure cap
+        # Per-event exposure cap (includes resting maker orders)
         event_cap = NBA_HALFTIME_MAX_EVENT_DOLLARS if (is_nba and NBA_HALFTIME_ENABLED) else MENTION_MAX_EVENT_DOLLARS
         event = sig.get('event_ticker', '')
         if event:
-            event_exp = self.positions.event_exposure(event, signal_type='mention_buy_no')
+            event_exp = self._total_event_exposure(event, signal_type='mention_buy_no')
             remaining_cap = event_cap - event_exp
             if remaining_cap <= 0:
-                print(f"    Event cap reached (${event_exp:.0f}/${MENTION_MAX_EVENT_DOLLARS}), skipping")
+                print(f"    Event cap reached (${event_exp:.0f}/${event_cap} incl resting), skipping")
                 return None
             mention_bet = min(mention_bet, remaining_cap)
 
