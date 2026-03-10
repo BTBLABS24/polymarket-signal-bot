@@ -423,28 +423,17 @@ NCAAB_FADE_SERIES = 'KXNCAAMBGAME'   # Series for NCAAB game outcomes
 NCAAB_FADE_GAME_DURATION_HOURS = 2.5 # Approximate game duration
 
 # --- Tennis Match Outcome Fade Strategy ---
-# Two tiers, only one fires per match (tight checked first):
-#   TIGHT: trig<=45c, pre>=55c, <=45min or vel>=2c/min → $10/bet
-#          Backtest: 166 trades, 63.9% WR, +97.7% ROI (~4.4/wk)
-#   WIDE:  trig<=50c, pre>=60c, drop>=10c, <=45min → $5/bet
-#          Backtest: 373 trades, 49.3% WR, +29.7% ROI (~9.9/wk)
+# Single tier: buy YES on favorites whose price drops early in match.
+# 30-day sim: 10 trades, 9W/1L, +77.1% ROI (~2.3/wk)
 TENNIS_FADE_ENABLED = True
 TENNIS_FADE_SERIES = ['KXATPMATCH', 'KXWTAMATCH']  # ATP + WTA
 TENNIS_FADE_MATCH_DURATION_HOURS = 2.0  # Best-of-3 estimate
 TENNIS_FADE_MAX_POSITIONS = 20        # Independent position cap
-# Tight tier — high conviction
-TENNIS_FADE_TIGHT_BET = 25            # $25 per trade
-TENNIS_FADE_TIGHT_TRIGGER = 45        # Buy YES at <=45c
-TENNIS_FADE_TIGHT_MIN_PREGAME = 55    # Pregame YES >= 55c
-TENNIS_FADE_TIGHT_MAX_MINUTES = 45    # First 45 min
-TENNIS_FADE_TIGHT_MIN_VELOCITY = 2.0  # OR velocity >= 2c/min (up to 60min)
-TENNIS_FADE_TIGHT_MIN_DROP = 10       # Min drop 10c
-# Wide tier — more signals, smaller bet
-TENNIS_FADE_WIDE_BET = 5              # $5 per trade
-TENNIS_FADE_WIDE_TRIGGER = 50         # Buy YES at <=50c
-TENNIS_FADE_WIDE_MIN_PREGAME = 60     # Pregame YES >= 60c (stronger favorites)
-TENNIS_FADE_WIDE_MAX_MINUTES = 45     # First 45 min
-TENNIS_FADE_WIDE_MIN_DROP = 10        # Min drop 10c
+TENNIS_FADE_BET_DOLLARS = 15          # $15 per trade
+TENNIS_FADE_TRIGGER_CENTS = 50        # Buy YES at <=50c
+TENNIS_FADE_MIN_PREGAME_YES = 60      # Pregame YES >= 60c
+TENNIS_FADE_MAX_MINUTES = 45          # First 45 min only
+TENNIS_FADE_MIN_DROP_SIZE = 10        # Min drop 10c
 
 # State files
 STATE_DIR = Path(__file__).parent
@@ -2562,9 +2551,7 @@ class KalshiReversionScanner:
         ncaab_words = ', '.join(sorted(NCAAB_HALFTIME_WORD_ALLOWLIST))
         print(f"Strategy 6: NCAAB halftime NO — {'ON' if NCAAB_HALFTIME_ENABLED else 'OFF'}, ${NCAAB_HALFTIME_BET_DOLLARS}/bet, NO {NCAAB_HALFTIME_MIN_NO_CENTS}-{NCAAB_HALFTIME_MAX_NO_CENTS}c, >={NCAAB_HALFTIME_MIN_HOURS_LIVE}h, words: {ncaab_words}")
         print(f"Strategy 7: NCAAB fade BUY YES — {'ON' if NCAAB_FADE_ENABLED else 'OFF'}, ${NCAAB_FADE_BET_DOLLARS}/bet, trigger={NCAAB_FADE_TRIGGER_CENTS}c, vel>={NCAAB_FADE_MIN_VELOCITY}, drop>={NCAAB_FADE_MIN_DROP_SIZE}c, <{NCAAB_FADE_MAX_MINUTES}min")
-        print(f"Strategy 8: Tennis fade BUY YES — {'ON' if TENNIS_FADE_ENABLED else 'OFF'}, "
-              f"TIGHT ${TENNIS_FADE_TIGHT_BET} @{TENNIS_FADE_TIGHT_TRIGGER}c pre>={TENNIS_FADE_TIGHT_MIN_PREGAME}c <={TENNIS_FADE_TIGHT_MAX_MINUTES}min|vel>={TENNIS_FADE_TIGHT_MIN_VELOCITY}, "
-              f"WIDE ${TENNIS_FADE_WIDE_BET} @{TENNIS_FADE_WIDE_TRIGGER}c pre>={TENNIS_FADE_WIDE_MIN_PREGAME}c <={TENNIS_FADE_WIDE_MAX_MINUTES}min")
+        print(f"Strategy 8: Tennis fade BUY YES — {'ON' if TENNIS_FADE_ENABLED else 'OFF'}, ${TENNIS_FADE_BET_DOLLARS}/bet, trigger={TENNIS_FADE_TRIGGER_CENTS}c, pre>={TENNIS_FADE_MIN_PREGAME_YES}c, drop>={TENNIS_FADE_MIN_DROP_SIZE}c, <={TENNIS_FADE_MAX_MINUTES}min")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -4645,15 +4632,16 @@ class KalshiReversionScanner:
 
         milestones = self.client.get_milestones()
 
-        # Wide trigger is the looser of the two — use it as the initial filter
-        wide_trigger = TENNIS_FADE_WIDE_TRIGGER
-        wide_max_min = TENNIS_FADE_WIDE_MAX_MINUTES
+        trigger_c = TENNIS_FADE_TRIGGER_CENTS
+        min_pregame = TENNIS_FADE_MIN_PREGAME_YES
+        min_drop = TENNIS_FADE_MIN_DROP_SIZE
+        max_minutes = TENNIS_FADE_MAX_MINUTES
 
         skip_reasons = {
             'no_timing': 0, 'not_live': 0, 'too_late': 0,
             'no_price': 0, 'price_above_trigger': 0,
             'already_pos': 0, 'no_pregame': 0,
-            'drop_too_small': 0, 'no_tier': 0,
+            'drop_too_small': 0, 'no_match': 0,
         }
         signals = []
 
@@ -4683,7 +4671,7 @@ class KalshiReversionScanner:
             if minutes_into_match < 0:
                 skip_reasons['not_live'] += 1
                 continue
-            if minutes_into_match > 60:  # hard cap (tight vel fallback up to 60min)
+            if minutes_into_match > max_minutes:
                 skip_reasons['too_late'] += 1
                 continue
 
@@ -4707,8 +4695,8 @@ class KalshiReversionScanner:
                 skip_reasons['no_price'] += 1
                 continue
 
-            # Must be at or below the wider trigger (50c)
-            if yes_price_c > wide_trigger:
+            # Price must be at or below trigger
+            if yes_price_c > trigger_c:
                 skip_reasons['price_above_trigger'] += 1
                 continue
 
@@ -4746,41 +4734,17 @@ class KalshiReversionScanner:
                     pass
                 time.sleep(0.3)
 
-            if pregame_price_c is None:
+            if pregame_price_c is None or pregame_price_c < min_pregame:
                 skip_reasons['no_pregame'] += 1
                 continue
 
             drop_size = pregame_price_c - yes_price_c
+            if drop_size < min_drop:
+                skip_reasons['drop_too_small'] += 1
+                continue
+
             velocity = (pregame_price_c - yes_price_c) / max(minutes_into_match, 1)
             tour = 'ATP' if 'KXATPMATCH' in ticker else 'WTA'
-
-            # Determine tier: tight checked first, then wide
-            tier = None
-            bet_dollars = 0
-            trigger_used = 0
-
-            # TIGHT: trig<=45c, pre>=55c, drop>=10c, <=45min or vel>=2c/min
-            if (yes_price_c <= TENNIS_FADE_TIGHT_TRIGGER
-                    and pregame_price_c >= TENNIS_FADE_TIGHT_MIN_PREGAME
-                    and drop_size >= TENNIS_FADE_TIGHT_MIN_DROP
-                    and (minutes_into_match <= TENNIS_FADE_TIGHT_MAX_MINUTES
-                         or velocity >= TENNIS_FADE_TIGHT_MIN_VELOCITY)):
-                tier = 'TIGHT'
-                bet_dollars = TENNIS_FADE_TIGHT_BET
-                trigger_used = TENNIS_FADE_TIGHT_TRIGGER
-
-            # WIDE: trig<=50c, pre>=60c, drop>=10c, <=45min
-            elif (yes_price_c <= TENNIS_FADE_WIDE_TRIGGER
-                    and pregame_price_c >= TENNIS_FADE_WIDE_MIN_PREGAME
-                    and drop_size >= TENNIS_FADE_WIDE_MIN_DROP
-                    and minutes_into_match <= TENNIS_FADE_WIDE_MAX_MINUTES):
-                tier = 'WIDE'
-                bet_dollars = TENNIS_FADE_WIDE_BET
-                trigger_used = TENNIS_FADE_WIDE_TRIGGER
-
-            if tier is None:
-                skip_reasons['no_tier'] += 1
-                continue
 
             signals.append({
                 'ticker': ticker,
@@ -4793,9 +4757,6 @@ class KalshiReversionScanner:
                 'minutes_into_match': round(minutes_into_match, 1),
                 'match_start_ts': match_start_ts,
                 'tour': tour,
-                'tier': tier,
-                'bet_dollars': bet_dollars,
-                'trigger_used': trigger_used,
             })
 
         active_skips = {k: v for k, v in skip_reasons.items() if v > 0}
@@ -4808,11 +4769,9 @@ class KalshiReversionScanner:
                 print(f"    TENNIS FADE CAP: {fade_count}/{TENNIS_FADE_MAX_POSITIONS}, stopping")
                 break
 
-            bet_dollars = sig['bet_dollars']
-            tier = sig['tier']
-            trigger_c = sig['trigger_used']
+            bet_dollars = TENNIS_FADE_BET_DOLLARS
 
-            print(f"  TENNIS FADE [{tier} ${bet_dollars}]: BUY YES @ {trigger_c}c '{sig['title'][:50]}' "
+            print(f"  TENNIS FADE: BUY YES @ {trigger_c}c '{sig['title'][:50]}' "
                   f"({sig['tour']}, pre={sig['pregame_price_c']}c, drop={sig['drop_size']}c, "
                   f"vel={sig['velocity']:.3f}c/min, T+{sig['minutes_into_match']:.0f}min)")
 
@@ -4844,7 +4803,7 @@ class KalshiReversionScanner:
                 self._entered_this_cycle.add(sig['ticker'])
                 fade_count += 1
                 await self.notifier.send_order_event(
-                    f"TENNIS FADE [{tier} ${bet_dollars}] BUY YES", sig['ticker'],
+                    "TENNIS FADE BUY YES", sig['ticker'],
                     price_cents=order_info.get('fill_price', trigger_c / 100) * 100
                         if isinstance(order_info.get('fill_price'), float) else trigger_c,
                     contracts=order_info.get('fill_count', 0),
@@ -4855,12 +4814,12 @@ class KalshiReversionScanner:
                           pregame=sig['pregame_price_c'], trigger=trigger_c,
                           drop=sig['drop_size'], velocity=sig['velocity'],
                           minutes_into=sig['minutes_into_match'], tour=sig['tour'],
-                          tier=tier, bet_dollars=order_info.get('bet_dollars', 0))
+                          bet_dollars=order_info.get('bet_dollars', 0))
 
     def _execute_tennis_fade_entry(self, sig, bet_dollars):
         """Execute a tennis fade BUY YES entry. Taker order at trigger price."""
         ticker = sig['ticker']
-        trigger_c = sig.get('trigger_used', TENNIS_FADE_WIDE_TRIGGER)
+        trigger_c = TENNIS_FADE_TRIGGER_CENTS
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
