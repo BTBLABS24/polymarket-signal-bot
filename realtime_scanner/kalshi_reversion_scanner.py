@@ -179,6 +179,8 @@ CATEGORY_KILL_LIST = {
     'KXLEAVITTMENTION',       # LEAVITT: -100% ROI backtest (1 trade)
     'KXROGANMENTION',         # ROGAN: no backtest data, cut for variance
     'KXCOOPERMENTION',        # COOPER: no backtest data, cut for variance
+    'KXMLBMENTION',           # MLB/WBC: disabled — no edge
+    'KXWBCMENTION',           # World Baseball Classic: disabled
 }
 # --- Taker Adverse Selection Gating ---
 # Pre-event taker is -39% ROI from actual fills. Live taker is +13%.
@@ -196,7 +198,7 @@ MENTION_SCAN_SERIES = [
     # Sports — per-category NO ranges (see CATEGORY_NO_RANGE)
     'KXNFLMENTION',                                    # NFL 30-70c
     'KXNCAAMENTION', 'KXNCAABMENTION',                 # NCAA 5-30c
-    'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION', 'KXMLBMENTION',
+    'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION',
     'KXNBAMENTION',                                      # NBA 20-70c (halftime+ high-conf words)
     'KXFIGHTMENTION', 'KXSBMENTION',                   # Fight 5-30c
     # Politics/Gov — per-category NO ranges
