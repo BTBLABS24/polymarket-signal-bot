@@ -422,6 +422,25 @@ NCAAB_FADE_MAX_MARKET_DOLLARS = 30   # Per-market cap (one bet per market)
 NCAAB_FADE_SERIES = 'KXNCAAMBGAME'   # Series for NCAAB game outcomes
 NCAAB_FADE_GAME_DURATION_HOURS = 2.5 # Approximate game duration
 
+# --- Tennis Match Outcome Fade Strategy ---
+# Same concept as NCAAB fade: when a pre-match favorite's YES price drops
+# to the trigger level early in the match, buy YES expecting reversion.
+# Backtest: 562 trades, 41.8% WR, +37.7% ROI (all); early entry (<=45min)
+# 166 trades, 55.4% WR, +86.5% ROI; fast velocity (>2c/min) 72.7% WR, +155% ROI.
+TENNIS_FADE_ENABLED = True
+TENNIS_FADE_BET_DOLLARS_BASE = 3      # $3 base bet
+TENNIS_FADE_BET_DOLLARS_HIGH = 10     # $10 for high-conviction signals
+TENNIS_FADE_TRIGGER_CENTS = 45        # Buy YES at this price (limit order)
+TENNIS_FADE_MIN_PREGAME_YES = 55      # Min pregame YES price (cents)
+TENNIS_FADE_MIN_DROP_SIZE = 10        # Min drop in cents (pregame - current)
+TENNIS_FADE_MAX_MINUTES = 60          # Entry window: first 60 min of match
+TENNIS_FADE_HIGH_CONV_MINUTES = 45    # Early entry threshold for $10 sizing
+TENNIS_FADE_HIGH_CONV_VELOCITY = 2.0  # Fast velocity threshold (c/min) for $10 sizing
+TENNIS_FADE_MAX_POSITIONS = 15        # Independent position cap
+TENNIS_FADE_MAX_MARKET_DOLLARS = 10   # Per-market cap
+TENNIS_FADE_SERIES = ['KXATPMATCH', 'KXWTAMATCH']  # ATP + WTA
+TENNIS_FADE_MATCH_DURATION_HOURS = 2.0  # Best-of-3 estimate
+
 # State files
 STATE_DIR = Path(__file__).parent
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
@@ -1829,7 +1848,7 @@ class KalshiPositionTracker:
             'status': 'open',
             'signal_type': signal_type,
         }
-        if signal_type in ('mention_buy_no', 'ncaa_theta_reentry', 'ncaab_fade_yes'):
+        if signal_type in ('mention_buy_no', 'ncaa_theta_reentry', 'ncaab_fade_yes', 'tennis_fade_yes'):
             pos['no_price'] = signal.get('no_price', 0)
             pos['hold_until_settle'] = True
         if order_info:
@@ -1877,7 +1896,7 @@ class KalshiPositionTracker:
                 result = market.get('result', '')
                 fill_price = pos.get('fill_price', pos.get('no_price', 0))
                 fill_count = pos.get('fill_count', 0)
-                is_yes_buy = pos.get('signal_type') in ('mention_buy_yes', 'ncaab_fade_yes')
+                is_yes_buy = pos.get('signal_type') in ('mention_buy_yes', 'ncaab_fade_yes', 'tennis_fade_yes')
 
                 if is_yes_buy:
                     # YES-buy position: wins when result='yes'
@@ -2538,6 +2557,7 @@ class KalshiReversionScanner:
         ncaab_words = ', '.join(sorted(NCAAB_HALFTIME_WORD_ALLOWLIST))
         print(f"Strategy 6: NCAAB halftime NO — {'ON' if NCAAB_HALFTIME_ENABLED else 'OFF'}, ${NCAAB_HALFTIME_BET_DOLLARS}/bet, NO {NCAAB_HALFTIME_MIN_NO_CENTS}-{NCAAB_HALFTIME_MAX_NO_CENTS}c, >={NCAAB_HALFTIME_MIN_HOURS_LIVE}h, words: {ncaab_words}")
         print(f"Strategy 7: NCAAB fade BUY YES — {'ON' if NCAAB_FADE_ENABLED else 'OFF'}, ${NCAAB_FADE_BET_DOLLARS}/bet, trigger={NCAAB_FADE_TRIGGER_CENTS}c, vel>={NCAAB_FADE_MIN_VELOCITY}, drop>={NCAAB_FADE_MIN_DROP_SIZE}c, <{NCAAB_FADE_MAX_MINUTES}min")
+        print(f"Strategy 8: Tennis fade BUY YES — {'ON' if TENNIS_FADE_ENABLED else 'OFF'}, ${TENNIS_FADE_BET_DOLLARS_BASE} base / ${TENNIS_FADE_BET_DOLLARS_HIGH} high-conv, trigger={TENNIS_FADE_TRIGGER_CENTS}c, <={TENNIS_FADE_MAX_MINUTES}min, high-conv: <={TENNIS_FADE_HIGH_CONV_MINUTES}min or vel>={TENNIS_FADE_HIGH_CONV_VELOCITY}c/min")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -2834,6 +2854,10 @@ class KalshiReversionScanner:
         if NCAAB_FADE_ENABLED and not low_balance:
             await self._scan_ncaab_fade(now)
 
+        # Tennis fade strategy — ATP + WTA match outcomes
+        if TENNIS_FADE_ENABLED and not low_balance:
+            await self._scan_tennis_fade(now)
+
         # Check positions for settlement
         alerts = self.positions.check(self.client)
         for atype, pos in alerts:
@@ -2854,6 +2878,7 @@ class KalshiReversionScanner:
         theta_count = self.positions.count('ncaa_theta_reentry')
         pol_pct_count = self.positions.count('political_pct_no')
         fade_count = self.positions.count('ncaab_fade_yes')
+        tennis_fade_count = self.positions.count('tennis_fade_yes')
         parts = [f"mention={mention_count}"]
         if nba_ht_count:
             parts.append(f"nba_ht={nba_ht_count}")
@@ -2869,6 +2894,8 @@ class KalshiReversionScanner:
             parts.append(f"theta={theta_count}")
         if fade_count:
             parts.append(f"fade={fade_count}")
+        if tennis_fade_count:
+            parts.append(f"tennis_fade={tennis_fade_count}")
         if self._resting_premarket_orders:
             parts.append(f"resting={len(self._resting_premarket_orders)}")
         print(f"  Open positions: {self.positions.count()} ({', '.join(parts)}, {self.positions.live_count()} live)")
@@ -4546,6 +4573,389 @@ class KalshiReversionScanner:
             pass
         print(f"    NCAAB FADE taker not filled for {ticker}, canceled")
         log_event('ncaab_fade_unfilled', ticker=ticker, order_id=order_id)
+        return None
+
+    # ================================================================
+    # TENNIS MATCH OUTCOME FADE — BUY YES on early-match price drops
+    # ================================================================
+
+    async def _scan_tennis_fade(self, now):
+        """Tennis fade strategy: when a pre-match favorite's YES price drops to
+        the trigger level within the first 60 minutes of the match, buy YES
+        expecting reversion.
+
+        Sizing: $3 base, $10 for early entry (<=45min) or fast velocity (>2c/min).
+        Backtest: 562 trades, 41.8% WR, +37.7% ROI overall;
+        early entry (<=45min): 55.4% WR, +86.5% ROI.
+        """
+        if not TENNIS_FADE_ENABLED:
+            return
+
+        fade_count = self.positions.count('tennis_fade_yes')
+        if fade_count >= TENNIS_FADE_MAX_POSITIONS:
+            return
+
+        # Discover ATP/WTA match markets — cache for 5 min
+        if not hasattr(self, '_tennis_fade_markets_cache') or now - self._tennis_fade_markets_cache_ts > 300:
+            try:
+                all_markets = []
+                for series in TENNIS_FADE_SERIES:
+                    cursor = None
+                    pages = 0
+                    while pages < 20:
+                        params = {
+                            'series_ticker': series,
+                            'status': 'open',
+                            'limit': 200,
+                        }
+                        if cursor:
+                            params['cursor'] = cursor
+                        resp = self.client.session.get(
+                            f'{KALSHI_BASE}/markets', params=params, timeout=15
+                        )
+                        if resp.status_code == 429:
+                            time.sleep(2)
+                            continue
+                        if resp.status_code != 200:
+                            break
+                        data = resp.json()
+                        markets = data.get('markets', [])
+                        all_markets.extend(markets)
+                        cursor = data.get('cursor', '')
+                        pages += 1
+                        if not markets or not cursor:
+                            break
+                self._tennis_fade_markets_cache = all_markets
+                self._tennis_fade_markets_cache_ts = now
+            except Exception as e:
+                print(f"  TENNIS FADE: market fetch error: {e}")
+                self._tennis_fade_markets_cache = getattr(self, '_tennis_fade_markets_cache', [])
+                self._tennis_fade_markets_cache_ts = now
+
+        tennis_markets = self._tennis_fade_markets_cache
+        if not tennis_markets:
+            return
+
+        milestones = self.client.get_milestones()
+
+        trigger_c = TENNIS_FADE_TRIGGER_CENTS
+        min_pregame = TENNIS_FADE_MIN_PREGAME_YES
+        min_drop = TENNIS_FADE_MIN_DROP_SIZE
+        max_minutes = TENNIS_FADE_MAX_MINUTES
+
+        skip_reasons = {
+            'no_timing': 0, 'not_live': 0, 'too_late': 0,
+            'no_price': 0, 'price_above_trigger': 0,
+            'already_pos': 0, 'no_pregame': 0,
+            'drop_too_small': 0,
+        }
+        signals = []
+
+        for m in tennis_markets:
+            ticker = m.get('ticker', '')
+            event_ticker = m.get('event_ticker', '')
+
+            # Match start from milestone or expected_expiration
+            ms = milestones.get(event_ticker)
+            match_start_ts = None
+            if ms and ms.get('start_ts'):
+                match_start_ts = ms['start_ts']
+            else:
+                exp_str = m.get('expected_expiration_time', '')
+                if exp_str:
+                    try:
+                        exp_dt = datetime.fromisoformat(exp_str.replace('Z', '+00:00'))
+                        match_start_ts = exp_dt.timestamp() - TENNIS_FADE_MATCH_DURATION_HOURS * 3600
+                    except Exception:
+                        pass
+
+            if match_start_ts is None:
+                skip_reasons['no_timing'] += 1
+                continue
+
+            minutes_into_match = (now - match_start_ts) / 60.0
+            if minutes_into_match < 0:
+                skip_reasons['not_live'] += 1
+                continue
+            if minutes_into_match > max_minutes:
+                skip_reasons['too_late'] += 1
+                continue
+
+            # Get current YES price
+            yes_price_c = None
+            yes_bid = m.get('yes_bid')
+            yes_ask = m.get('yes_ask')
+            if yes_bid is not None and yes_ask is not None:
+                try:
+                    yes_price_c = (int(yes_bid) + int(yes_ask)) // 2
+                except (ValueError, TypeError):
+                    pass
+            if yes_price_c is None:
+                last = m.get('last_price')
+                if last is not None:
+                    try:
+                        yes_price_c = int(last)
+                    except (ValueError, TypeError):
+                        pass
+            if yes_price_c is None:
+                skip_reasons['no_price'] += 1
+                continue
+
+            # Price must be at or below trigger
+            if yes_price_c > trigger_c:
+                skip_reasons['price_above_trigger'] += 1
+                continue
+
+            # Dedup
+            if self.positions.has_open_ticker(ticker, signal_type='tennis_fade_yes'):
+                skip_reasons['already_pos'] += 1
+                continue
+            if ticker in self._entered_this_cycle:
+                skip_reasons['already_pos'] += 1
+                continue
+
+            # Need pregame price
+            pregame_key = f'_tennis_fade_pregame_{ticker}'
+            pregame_price_c = getattr(self, pregame_key, None)
+
+            if pregame_price_c is None:
+                pregame_start = int(match_start_ts - 3600)
+                pregame_end = int(match_start_ts)
+                try:
+                    trades, _ = self.client.get_trades(
+                        ticker=ticker, limit=100,
+                        min_ts=pregame_start, max_ts=pregame_end,
+                    )
+                    if trades:
+                        prices = []
+                        for t in trades:
+                            try:
+                                prices.append(int(t.get('yes_price', 0)))
+                            except (ValueError, TypeError):
+                                pass
+                        if prices:
+                            pregame_price_c = int(sum(prices) / len(prices))
+                            setattr(self, pregame_key, pregame_price_c)
+                except Exception:
+                    pass
+                time.sleep(0.3)
+
+            if pregame_price_c is None or pregame_price_c < min_pregame:
+                skip_reasons['no_pregame'] += 1
+                continue
+
+            # Check drop size
+            drop_size = pregame_price_c - yes_price_c
+            if drop_size < min_drop:
+                skip_reasons['drop_too_small'] += 1
+                continue
+
+            # Velocity
+            velocity = (pregame_price_c - yes_price_c) / max(minutes_into_match, 1)
+
+            # Determine bet tier
+            is_high_conv = (
+                minutes_into_match <= TENNIS_FADE_HIGH_CONV_MINUTES
+                or velocity >= TENNIS_FADE_HIGH_CONV_VELOCITY
+            )
+
+            tour = 'ATP' if 'KXATPMATCH' in ticker else 'WTA'
+
+            signals.append({
+                'ticker': ticker,
+                'event_ticker': event_ticker,
+                'title': m.get('title', ticker),
+                'yes_price_c': yes_price_c,
+                'pregame_price_c': pregame_price_c,
+                'drop_size': drop_size,
+                'velocity': round(velocity, 4),
+                'minutes_into_match': round(minutes_into_match, 1),
+                'match_start_ts': match_start_ts,
+                'is_high_conv': is_high_conv,
+                'tour': tour,
+            })
+
+        active_skips = {k: v for k, v in skip_reasons.items() if v > 0}
+        if signals or active_skips:
+            print(f"  TENNIS FADE: {len(tennis_markets)} markets, {len(signals)} signals, "
+                  f"{fade_count}/{TENNIS_FADE_MAX_POSITIONS} pos, skips: {active_skips}")
+
+        for sig in signals:
+            if fade_count >= TENNIS_FADE_MAX_POSITIONS:
+                print(f"    TENNIS FADE CAP: {fade_count}/{TENNIS_FADE_MAX_POSITIONS}, stopping")
+                break
+
+            bet_dollars = TENNIS_FADE_BET_DOLLARS_HIGH if sig['is_high_conv'] else TENNIS_FADE_BET_DOLLARS_BASE
+            tier_label = '$10-HIGH' if sig['is_high_conv'] else '$3-BASE'
+
+            print(f"  TENNIS FADE [{tier_label}]: BUY YES @ {trigger_c}c '{sig['title'][:50]}' "
+                  f"({sig['tour']}, pre={sig['pregame_price_c']}c, drop={sig['drop_size']}c, "
+                  f"vel={sig['velocity']:.3f}c/min, T+{sig['minutes_into_match']:.0f}min)")
+
+            order_info = None
+            if self.client.can_trade:
+                order_info = self._execute_tennis_fade_entry(sig, bet_dollars)
+
+            if order_info:
+                pos_sig = {
+                    'ticker': sig['ticker'],
+                    'event_ticker': sig['event_ticker'],
+                    'title': sig['title'],
+                    'signal_type': 'tennis_fade_yes',
+                    'fade_action': 'BUY',
+                    'fade_side': 'yes',
+                    'entry_price': trigger_c / 100,
+                    'pre_signal_price': sig['pregame_price_c'] / 100,
+                    'price_move': sig['drop_size'] / 100,
+                    'n_small_trades': 0,
+                    'retail_contracts': 0,
+                    'signal_time': now,
+                    'no_price': (100 - trigger_c) / 100,
+                    'no_price_cents': 100 - trigger_c,
+                    'hours_before_close': 0,
+                    'hours_to_event': -(sig['minutes_into_match'] / 60),
+                    'close_ts': sig['match_start_ts'] + TENNIS_FADE_MATCH_DURATION_HOURS * 3600,
+                }
+                self.positions.add(pos_sig, order_info)
+                self._entered_this_cycle.add(sig['ticker'])
+                fade_count += 1
+                await self.notifier.send_order_event(
+                    f"TENNIS FADE BUY YES [{tier_label}]", sig['ticker'],
+                    price_cents=order_info.get('fill_price', trigger_c / 100) * 100
+                        if isinstance(order_info.get('fill_price'), float) else trigger_c,
+                    contracts=order_info.get('fill_count', 0),
+                    bet_dollars=order_info.get('bet_dollars', 0),
+                    title=sig['title'][:60],
+                    extra=f"{sig['tour']} Pre={sig['pregame_price_c']}c, drop={sig['drop_size']}c, vel={sig['velocity']:.3f}c/min, T+{sig['minutes_into_match']:.0f}min")
+                log_event('tennis_fade_filled', ticker=sig['ticker'],
+                          pregame=sig['pregame_price_c'], trigger=trigger_c,
+                          drop=sig['drop_size'], velocity=sig['velocity'],
+                          minutes_into=sig['minutes_into_match'], tour=sig['tour'],
+                          is_high_conv=sig['is_high_conv'],
+                          bet_dollars=order_info.get('bet_dollars', 0))
+
+    def _execute_tennis_fade_entry(self, sig, bet_dollars):
+        """Execute a tennis fade BUY YES entry. Taker order at trigger price."""
+        ticker = sig['ticker']
+        trigger_c = TENNIS_FADE_TRIGGER_CENTS
+
+        orderbook = self.client.get_orderbook(ticker)
+        if not orderbook:
+            print(f"    TENNIS FADE: no orderbook for {ticker}, skipping")
+            return None
+
+        no_bids_raw = orderbook.get('no', [])
+        if not isinstance(no_bids_raw, list):
+            no_bids_raw = []
+        if not no_bids_raw:
+            print(f"    TENNIS FADE: no NO bids for {ticker}, skipping")
+            return None
+
+        best_no_bid = max(b[0] for b in no_bids_raw)
+        best_yes_ask = 100 - best_no_bid
+
+        if best_yes_ask > trigger_c:
+            print(f"    TENNIS FADE: YES ask {best_yes_ask}c > trigger {trigger_c}c, skipping")
+            return None
+
+        buy_price = trigger_c
+        contracts = int(bet_dollars / (buy_price / 100))
+        if contracts < 1:
+            contracts = 1
+        actual_dollars = round(contracts * buy_price / 100, 2)
+
+        # Cap to bet_dollars
+        if actual_dollars > bet_dollars:
+            contracts = int(bet_dollars / (buy_price / 100))
+            actual_dollars = round(contracts * buy_price / 100, 2)
+            if contracts < 1:
+                print(f"    TENNIS FADE: can't fit within ${bet_dollars} at {buy_price}c, skipping")
+                return None
+
+        # Per-market cap
+        if actual_dollars > TENNIS_FADE_MAX_MARKET_DOLLARS:
+            contracts = int(TENNIS_FADE_MAX_MARKET_DOLLARS / (buy_price / 100))
+            actual_dollars = round(contracts * buy_price / 100, 2)
+
+        print(f"    TENNIS FADE taker: {contracts} YES @ {buy_price}c (ask={best_yes_ask}c) = ${actual_dollars:.2f}")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-TFADE-{uuid.uuid4().hex[:8]}',
+                'fill_price': buy_price / 100,
+                'fill_count': contracts,
+                'bet_dollars': actual_dollars,
+                'dry_run': True,
+                'side': 'yes',
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'tennis_fade_yes',
+                'ticker': ticker, 'side': 'yes', 'action': 'buy',
+                'contracts': contracts, 'price_cents': buy_price,
+                'bet_dollars': actual_dollars, 'dry_run': True,
+            })
+            print(f"    DRY RUN: {contracts} YES @ {buy_price}c (${actual_dollars:.2f})")
+            return order_info
+
+        order = self.client.create_order(
+            ticker=ticker, side='yes', action='buy',
+            count=contracts, price_cents=buy_price,
+        )
+        if not order:
+            print(f"    TENNIS FADE: order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    TENNIS FADE order placed: {order_id} ({contracts} YES @ {buy_price}c, ${actual_dollars:.2f})")
+        log_event('tennis_fade_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=buy_price, bet_dollars=actual_dollars,
+                  pregame=sig.get('pregame_price_c'), velocity=sig.get('velocity'),
+                  tour=sig.get('tour'))
+
+        # Taker — should fill instantly
+        time.sleep(2)
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', buy_price)
+                filled_dollars = round(filled * avg_fill / 100, 2)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': filled_dollars,
+                    'dry_run': False,
+                    'side': 'yes',
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'tennis_fade_yes',
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'yes', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': buy_price,
+                    'avg_fill_price': avg_fill, 'bet_dollars': filled_dollars,
+                })
+                print(f"    TENNIS FADE FILLED: {filled}/{contracts} YES @ avg {avg_fill}c (${filled_dollars:.2f})")
+                log_event('tennis_fade_entry_filled', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=filled_dollars)
+                self._queue_tg("TENNIS FADE FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=filled_dollars,
+                               title=sig.get('title', '')[:60])
+                return info
+
+        # Not filled — cancel
+        try:
+            self.client.cancel_order(order_id)
+        except Exception:
+            pass
+        print(f"    TENNIS FADE taker not filled for {ticker}, canceled")
+        log_event('tennis_fade_unfilled', ticker=ticker, order_id=order_id)
         return None
 
     def _execute_premarket_maker(self, sig, orderbook, yes_bids_raw, best_no_ask, category='NCAA'):
