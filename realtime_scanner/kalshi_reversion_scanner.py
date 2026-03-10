@@ -433,7 +433,7 @@ TENNIS_FADE_SERIES = ['KXATPMATCH', 'KXWTAMATCH']  # ATP + WTA
 TENNIS_FADE_MATCH_DURATION_HOURS = 2.0  # Best-of-3 estimate
 TENNIS_FADE_MAX_POSITIONS = 20        # Independent position cap
 # Tight tier — high conviction
-TENNIS_FADE_TIGHT_BET = 10            # $10 per trade
+TENNIS_FADE_TIGHT_BET = 25            # $25 per trade
 TENNIS_FADE_TIGHT_TRIGGER = 45        # Buy YES at <=45c
 TENNIS_FADE_TIGHT_MIN_PREGAME = 55    # Pregame YES >= 55c
 TENNIS_FADE_TIGHT_MAX_MINUTES = 45    # First 45 min
