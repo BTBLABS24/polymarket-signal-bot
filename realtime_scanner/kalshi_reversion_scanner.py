@@ -70,9 +70,19 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 3            # $3 all named categories (capped until backtest validates)
-MENTION_BET_NCAA = 3               # $3 for NCAAB/NCAA
+MENTION_BET_DOLLARS = 3            # $3 default for named categories
+MENTION_BET_NCAA = 2               # $2 for NCAAB/NCAA (actual underperforming backtest)
 MENTION_BET_OTHER = 3              # $3 for "other" categories
+# Per-category overrides for proven winners (actual ROI > +40%)
+CATEGORY_BET_OVERRIDE = {
+    'HEGSETH':      10,   # +142% ROI actual, 50% WR (16 clean trades)
+    'FOXNEWS':      10,   # +72% ROI actual, 44% WR (18 clean)
+    'LASTWORD':     10,   # +131% ROI actual, 40% WR (10 clean)
+    'THEWEEKNIGHT': 10,   # +115% ROI actual, 44% WR (9 clean)
+    'Newsom':       10,   # +228% ROI actual, 57% WR (7 clean)
+    'POLITICS':     10,   # +46% ROI actual, 42% WR (19 clean)
+    'Trump':        10,   # +24% ROI actual, +88% backtest (761 mkts, t=8.15)
+}
 MENTION_MAX_NO_PRICE = 0.30       # Global fallback max — conservative for unmapped categories
 MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides below)
 # Per-category NO price ranges — backtest-optimized (60 days, taker +4c slippage).
@@ -81,20 +91,18 @@ MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides 
 # Only NCAA and Newsom are profitable at the cheap end.
 CATEGORY_NO_RANGE = {
     # (min_cents, max_cents) — taker range. Maker can be wider (up to PREMARKET_MAX_NO_PRICE).
-    'NCAA':     (5, 30),    # +40.5% ROI, $0.18/d — cheap NOs work (theta decay)
-    'Newsom':   (5, 30),    # +95.9% ROI, $0.17/d — strong at cheap end
-    'LASTWORD': (5, 30),    # +101.7% ROI, $0.18/d — NEW: add to scan series
-    'FOXNEWS':  (5, 30),    # +46.1% ROI, $0.07/d — NEW: add to scan series
-    'HOCHUL':   (10, 50),   # +41.1% ROI, $0.13/d — wider range helps
-    'Trump':    (15, 50),   # +12.1% ROI, $0.33/d — cheap is -1.7%, medium is +12%
-    'Mamdani':  (30, 70),   # +18.8% ROI, $0.50/d — cheap is -24%, medium is +19%
-    'NFL':      (30, 70),   # +13.1% ROI, $0.24/d — cheap is -9%, medium is +13%
-    'SECPRESS': (30, 70),   # +32.2% ROI, $0.25/d — cheap is -43%, medium is +32%
+    'NCAA':     (5, 30),    # +151% ROI backtest, actual underperforming — keep range tight
+    'Newsom':   (5, 30),    # +228% ROI actual, 57% WR — strong winner
+    'LASTWORD': (5, 30),    # +131% ROI actual, 40% WR
+    'FOXNEWS':  (5, 30),    # +72% ROI actual, 44% WR
+    'HEGSETH':  (5, 30),    # +142% ROI actual, 50% WR — best winner
+    'THEWEEKNIGHT': (5, 30),# +115% ROI actual, 44% WR
+    'POLITICS': (5, 30),    # +46% ROI actual, 42% WR
+    'Trump':    (15, 50),   # +24% ROI actual, +88% backtest — cheap is noise, medium works
+    'NFL':      (30, 70),   # +13.1% ROI backtest — cheap is -9%, medium is +13%
     'NBA':      (20, 70),   # +28.4% ROI, halftime+ high-conf words only (separate gating)
-    'Fight':    (5, 30),    # +28.2% ROI, $0.01/d — small sample, keep conservative
-    'Earnings': (15, 50),   # +20.4% ROI, $0.31/d — cheap 5-15c are -62% losers
-    'MADDOW':   (5, 30),    # +197% ROI, tiny sample — keep if it shows up
-    'COLBERT':  (5, 30),    # small sample, keep conservative
+    'Fight':    (5, 30),    # +28.2% ROI backtest, small sample
+    'Earnings': (15, 50),   # disabled, kept for reference
 }
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (events live with 24h close)
@@ -102,13 +110,13 @@ MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 30    # Max $ per event across all words (resting + filled)
-MENTION_MAX_MARKET_DOLLARS = 3    # Hard cap $ per individual market/ticker (capped until backtest validates)
+MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker (raised for winner categories)
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
 PREMARKET_BET_DOLLARS = 8          # $ per resting maker order (independent of taker sizing)
-PREMARKET_MAX_MARKET_DOLLARS = 8   # Hard cap $ per market for maker orders
+PREMARKET_MAX_MARKET_DOLLARS = 10  # Hard cap $ per market for maker orders (raised for winner categories)
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
@@ -168,20 +176,27 @@ POLITICAL_EXCLUDE_SPORTS = {
 POLITICAL_EXCLUDE_RALLY = True
 # Categories with <10% actual WR from live fills — net losers, skip entirely
 CATEGORY_KILL_LIST = {
-    'KXVANCEMENTION',         # VANCE: -73% ROI actual
-    'KXGOVERNORMENTION',      # GOVERNOR: -100% ROI actual
+    'KXVANCEMENTION',         # VANCE: -55% ROI actual (3W/15L)
+    'KXGOVERNORMENTION',      # GOVERNOR: -99% ROI actual (1W/11L)
     'KXSPANBERGERMENTION',    # SPANBERGER: -100% ROI actual
-    'KXBERNIEMENTION',        # BERNIE: -100% ROI actual
-    'KXNEWSNATIONMENTION',    # NEWSNATION: losing
-    'KXSNLMENTION',           # SNL: losing
-    'KXECBMENTION',           # ECB: losing
+    'KXBERNIEMENTION',        # BERNIE: -100% ROI actual (1W/8L)
+    'KXNEWSNATIONMENTION',    # NEWSNATION: -100% ROI actual
+    'KXSNLMENTION',           # SNL: -100% ROI actual
+    'KXECBMENTION',           # ECB: -100% ROI actual
     'KXBESSENTMTPMENTION',    # BESSENTMTP: losing
-    'KXKIMMELMENTION',        # KIMMEL: -59% ROI backtest (11 trades)
-    'KXLEAVITTMENTION',       # LEAVITT: -100% ROI backtest (1 trade)
-    'KXROGANMENTION',         # ROGAN: no backtest data, cut for variance
-    'KXCOOPERMENTION',        # COOPER: no backtest data, cut for variance
-    'KXMLBMENTION',           # MLB/WBC: disabled — no edge
-    'KXWBCMENTION',           # World Baseball Classic: disabled
+    'KXKIMMELMENTION',        # KIMMEL: -59% ROI backtest
+    'KXLEAVITTMENTION',       # LEAVITT: -100% ROI backtest
+    'KXROGANMENTION',         # ROGAN: no data, cut for variance
+    'KXCOOPERMENTION',        # COOPER: no data, cut for variance
+    'KXMLBMENTION',           # MLB: disabled — no edge
+    'KXWBCMENTION',           # WBC: 0% WR actual (0W/19L)
+    'KXMAMDANIMENTION',       # Mamdani: -82% ROI actual (2W/21L, 9% WR)
+    'KXFTNMENTION',           # FTN: -100% ROI actual (0W/13L)
+    'KXMTPMENTION',           # MTP: -100% ROI actual (0W/11L)
+    'KXPRESMENTION',          # PRES: -69% ROI actual (2W/14L, 12% WR)
+    'KXWOMENTION',            # WO: -75% ROI actual (5W/12L, 12% clean WR)
+    'KXHOCHULMENTION',        # Hochul: -90% ROI actual (1W/9L, 10% WR)
+    'KXPSAKIMENTION',         # PSAKI: -49% ROI actual (5W/11L, 17% clean WR)
 }
 # --- Taker Adverse Selection Gating ---
 # Pre-event taker is -39% ROI from actual fills. Live taker is +13%.
@@ -4578,8 +4593,12 @@ class KalshiReversionScanner:
             print(f"    Spread {spread}c too narrow (<{PREMARKET_MIN_SPREAD}c), skipping maker — taker may be better")
             return None
 
-        # Bet sizing — maker uses its own PREMARKET_BET_DOLLARS, independent of taker
-        mention_bet = PREMARKET_BET_DOLLARS
+        # Bet sizing — maker uses PREMARKET_BET_DOLLARS, with per-category override for winners
+        maker_cat_name = get_mention_category(ticker)
+        if maker_cat_name in CATEGORY_BET_OVERRIDE:
+            mention_bet = CATEGORY_BET_OVERRIDE[maker_cat_name]
+        else:
+            mention_bet = PREMARKET_BET_DOLLARS
 
         # New/unknown series cap
         event_ticker = sig.get('event_ticker', '')
@@ -5072,7 +5091,9 @@ class KalshiReversionScanner:
 
         # Category detection for sizing and slippage
         is_earnings_taker = 'EARNINGSMENTION' in ticker_upper
-        is_other = not any(k in ticker_upper for k in (
+        taker_cat_check = get_mention_category(ticker)
+        is_winner_cat = taker_cat_check in CATEGORY_BET_OVERRIDE
+        is_other = not is_winner_cat and not any(k in ticker_upper for k in (
             'TRUMPMENTION', 'MAMDANIMENTION', 'NEWSOMMENTION',
             'NBAMENTION', 'NBAFINALS', 'NCAAMENTION', 'NCAABMENTION',
             'VANCEMENTION', 'EARNINGSMENTION',
@@ -5105,10 +5126,12 @@ class KalshiReversionScanner:
             mention_bet = EARNINGS_BET_DOLLARS
         elif is_nba and NBA_HALFTIME_ENABLED:
             mention_bet = NBA_HALFTIME_BET_DOLLARS
-        elif is_other:
-            mention_bet = MENTION_BET_OTHER
+        elif taker_cat_check in CATEGORY_BET_OVERRIDE:
+            mention_bet = CATEGORY_BET_OVERRIDE[taker_cat_check]
         elif is_ncaa:
             mention_bet = MENTION_BET_NCAA
+        elif is_other:
+            mention_bet = MENTION_BET_OTHER
         else:
             mention_bet = MENTION_BET_DOLLARS
         # New/unknown series: cap at $2 until we have enough history
