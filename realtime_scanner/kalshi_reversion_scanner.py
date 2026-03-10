@@ -113,6 +113,7 @@ PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
 PREMARKET_NEW_SERIES_BET = 1      # $ bet for new/unknown series
+PREMARKET_NEW_SERIES_EVENT_CAP = 10  # Max $ per event for new/unknown series
 # Pre-recorded/scripted shows — insider edge too high, skip entirely
 PRERECORDED_SERIES = {
     'KXSURVIVORMENTION',      # Survivor (pre-recorded reality TV)
@@ -2483,6 +2484,16 @@ class KalshiReversionScanner:
         except Exception as e:
             print(f"  WARNING: Failed to save resting orders: {e}")
 
+    def _is_new_series(self, event_ticker):
+        """Check if an event belongs to a new/unknown series (<3 resolved events)."""
+        if not event_ticker:
+            return False
+        series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
+        if series in MENTION_SCAN_SERIES:
+            return False  # Curated series are never "new"
+        resolved = getattr(self.client, '_series_resolved_counts', {}).get(series, 0)
+        return resolved < PREMARKET_NEW_SERIES_MIN
+
     def _total_event_exposure(self, event_ticker, signal_type=None):
         """Total event exposure including BOTH open positions AND resting maker orders.
         This prevents oversizing when multiple words in the same event each get maker orders."""
@@ -2733,6 +2744,8 @@ class KalshiReversionScanner:
                         event = sig.get('event_ticker', '')
                         if event:
                             evt_cap = NBA_HALFTIME_MAX_EVENT_DOLLARS if (sig_is_nba and NBA_HALFTIME_ENABLED) else MENTION_MAX_EVENT_DOLLARS
+                            if self._is_new_series(event):
+                                evt_cap = min(evt_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
                             st = 'nba_halftime_no' if (sig_is_nba and NBA_HALFTIME_ENABLED) else 'mention_buy_no'
                             event_exp = self._total_event_exposure(event, signal_type=st)
                             if event_exp >= evt_cap:
@@ -4595,8 +4608,11 @@ class KalshiReversionScanner:
 
         # Per-event exposure cap (includes resting maker orders)
         if event_ticker:
+            evt_cap = MENTION_MAX_EVENT_DOLLARS
+            if self._is_new_series(event_ticker):
+                evt_cap = min(evt_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
             event_exp = self._total_event_exposure(event_ticker, signal_type='mention_buy_no')
-            remaining_cap = MENTION_MAX_EVENT_DOLLARS - event_exp
+            remaining_cap = evt_cap - event_exp
             if remaining_cap <= 0:
                 return None
             mention_bet = min(mention_bet, remaining_cap)
@@ -4701,11 +4717,14 @@ class KalshiReversionScanner:
             if self.positions.has_open_ticker(ticker, signal_type='mention_buy_no'):
                 continue
 
-            # Per-event cap
+            # Per-event cap (includes resting orders; lower for new series)
             event = sig.get('event_ticker', '')
             if event:
-                event_exp = self.positions.event_exposure(event, signal_type='political_pct_no')
-                if event_exp >= POLITICAL_PCT_MAX_EVENT_DOLLARS:
+                pol_evt_cap = POLITICAL_PCT_MAX_EVENT_DOLLARS
+                if self._is_new_series(event):
+                    pol_evt_cap = min(pol_evt_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
+                event_exp = self._total_event_exposure(event, signal_type='political_pct_no')
+                if event_exp >= pol_evt_cap:
                     continue
 
             no_c = sig['no_price_cents']
@@ -4763,6 +4782,11 @@ class KalshiReversionScanner:
         # Bet sizing: $5, capped by per-market and per-event
         bet = POLITICAL_PCT_BET_DOLLARS
 
+        # New series cap: $1/bet for series with < 3 resolved events
+        event = sig.get('event_ticker', '')
+        if self._is_new_series(event):
+            bet = min(bet, PREMARKET_NEW_SERIES_BET)
+
         # Per-market cap check (includes existing positions)
         ticker_exp = 0
         for p in self.positions.positions:
@@ -4774,11 +4798,13 @@ class KalshiReversionScanner:
             return None
         bet = min(bet, remaining_market)
 
-        # Per-event cap
-        event = sig.get('event_ticker', '')
+        # Per-event cap (includes resting orders; lower for new series)
         if event:
-            event_exp = self.positions.event_exposure(event, signal_type='political_pct_no')
-            remaining_event = POLITICAL_PCT_MAX_EVENT_DOLLARS - event_exp
+            pol_evt_cap = POLITICAL_PCT_MAX_EVENT_DOLLARS
+            if self._is_new_series(event):
+                pol_evt_cap = min(pol_evt_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
+            event_exp = self._total_event_exposure(event, signal_type='political_pct_no')
+            remaining_event = pol_evt_cap - event_exp
             if remaining_event <= 0:
                 return None
             bet = min(bet, remaining_event)
@@ -5123,6 +5149,8 @@ class KalshiReversionScanner:
         event_cap = NBA_HALFTIME_MAX_EVENT_DOLLARS if (is_nba and NBA_HALFTIME_ENABLED) else MENTION_MAX_EVENT_DOLLARS
         event = sig.get('event_ticker', '')
         if event:
+            if self._is_new_series(event):
+                event_cap = min(event_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
             event_exp = self._total_event_exposure(event, signal_type='mention_buy_no')
             remaining_cap = event_cap - event_exp
             if remaining_cap <= 0:
