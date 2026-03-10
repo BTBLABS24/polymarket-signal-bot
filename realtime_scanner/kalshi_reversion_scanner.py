@@ -2719,7 +2719,7 @@ class KalshiReversionScanner:
                         if earn_count >= EARNINGS_MAX_POSITIONS:
                             print(f"    EARNINGS CAP: {earn_count}/{EARNINGS_MAX_POSITIONS}, skipping")
                             continue
-                        if self.positions.has_open_ticker(sig['ticker'], signal_type='earnings_buy_no'):
+                        if self.positions.has_open_ticker(sig['ticker']):
                             continue
                     else:
                         # NBA halftime has its own position cap
@@ -2734,10 +2734,8 @@ class KalshiReversionScanner:
                                 print(f"    MENTION CAP: {mention_count}/{MENTION_MAX_POSITIONS}, skipping")
                                 break
 
-                        # Skip if we already have a position on this ticker
-                        if self.positions.has_open_ticker(sig['ticker'], signal_type='mention_buy_no'):
-                            continue
-                        if sig_is_nba and self.positions.has_open_ticker(sig['ticker'], signal_type='nba_halftime_no'):
+                        # Skip if we already have ANY position on this ticker (any signal type)
+                        if self.positions.has_open_ticker(sig['ticker']):
                             continue
 
                         # Per-event exposure cap (includes resting maker orders)
@@ -3989,10 +3987,8 @@ class KalshiReversionScanner:
 
             ticker = c['ticker']
 
-            # Skip if we already have any position on this ticker
-            if self.positions.has_open_ticker(ticker, signal_type='stale_buy_no'):
-                continue
-            if self.positions.has_open_ticker(ticker, signal_type='mention_buy_no'):
+            # Skip if we already have any position on this ticker (any signal type)
+            if self.positions.has_open_ticker(ticker):
                 continue
 
             # Per-market cap
@@ -4712,9 +4708,7 @@ class KalshiReversionScanner:
                 break
 
             # Skip if already holding this ticker (any strategy)
-            if self.positions.has_open_ticker(ticker, signal_type='political_pct_no'):
-                continue
-            if self.positions.has_open_ticker(ticker, signal_type='mention_buy_no'):
+            if self.positions.has_open_ticker(ticker):
                 continue
 
             # Per-event cap (includes resting orders; lower for new series)
@@ -5208,6 +5202,11 @@ class KalshiReversionScanner:
                   event_volume_24h=sig.get('event_volume_24h', 0),
                   event_velocity=sig.get('event_velocity', 0))
 
+        # Set cooldown IMMEDIATELY on order placement to prevent re-entry
+        # even if fill detection fails (get_order timeout, API error, etc.)
+        self.mention_detector.signal_history[ticker] = time.time()
+        self.mention_detector._save()
+
         # Taker should fill instantly — check after brief delay
         time.sleep(2)
         status = self.client.get_order(order_id)
@@ -5242,9 +5241,6 @@ class KalshiReversionScanner:
                 self._queue_tg("TAKER FILLED", ticker,
                                price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
                                title=sig.get('title', '')[:60])
-                # Set cooldown only after successful fill
-                self.mention_detector.signal_history[ticker] = time.time()
-                self.mention_detector._save()
                 return info
 
         # Not filled even as taker — cancel
