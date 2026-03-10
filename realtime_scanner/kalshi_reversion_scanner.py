@@ -428,14 +428,12 @@ NCAAB_FADE_GAME_DURATION_HOURS = 2.5 # Approximate game duration
 # Backtest: 562 trades, 41.8% WR, +37.7% ROI (all); early entry (<=45min)
 # 166 trades, 55.4% WR, +86.5% ROI; fast velocity (>2c/min) 72.7% WR, +155% ROI.
 TENNIS_FADE_ENABLED = True
-TENNIS_FADE_BET_DOLLARS_BASE = 3      # $3 base bet
-TENNIS_FADE_BET_DOLLARS_HIGH = 10     # $10 for high-conviction signals
+TENNIS_FADE_BET_DOLLARS = 10          # $10 per trade (high-conviction only)
 TENNIS_FADE_TRIGGER_CENTS = 45        # Buy YES at this price (limit order)
 TENNIS_FADE_MIN_PREGAME_YES = 55      # Min pregame YES price (cents)
 TENNIS_FADE_MIN_DROP_SIZE = 10        # Min drop in cents (pregame - current)
-TENNIS_FADE_MAX_MINUTES = 60          # Entry window: first 60 min of match
-TENNIS_FADE_HIGH_CONV_MINUTES = 45    # Early entry threshold for $10 sizing
-TENNIS_FADE_HIGH_CONV_VELOCITY = 2.0  # Fast velocity threshold (c/min) for $10 sizing
+TENNIS_FADE_MAX_MINUTES = 45          # Only enter within first 45 min (high-conv cutoff)
+TENNIS_FADE_MIN_VELOCITY = 2.0        # Also enter if velocity >= 2c/min even after 45min
 TENNIS_FADE_MAX_POSITIONS = 15        # Independent position cap
 TENNIS_FADE_MAX_MARKET_DOLLARS = 10   # Per-market cap
 TENNIS_FADE_SERIES = ['KXATPMATCH', 'KXWTAMATCH']  # ATP + WTA
@@ -2557,7 +2555,7 @@ class KalshiReversionScanner:
         ncaab_words = ', '.join(sorted(NCAAB_HALFTIME_WORD_ALLOWLIST))
         print(f"Strategy 6: NCAAB halftime NO — {'ON' if NCAAB_HALFTIME_ENABLED else 'OFF'}, ${NCAAB_HALFTIME_BET_DOLLARS}/bet, NO {NCAAB_HALFTIME_MIN_NO_CENTS}-{NCAAB_HALFTIME_MAX_NO_CENTS}c, >={NCAAB_HALFTIME_MIN_HOURS_LIVE}h, words: {ncaab_words}")
         print(f"Strategy 7: NCAAB fade BUY YES — {'ON' if NCAAB_FADE_ENABLED else 'OFF'}, ${NCAAB_FADE_BET_DOLLARS}/bet, trigger={NCAAB_FADE_TRIGGER_CENTS}c, vel>={NCAAB_FADE_MIN_VELOCITY}, drop>={NCAAB_FADE_MIN_DROP_SIZE}c, <{NCAAB_FADE_MAX_MINUTES}min")
-        print(f"Strategy 8: Tennis fade BUY YES — {'ON' if TENNIS_FADE_ENABLED else 'OFF'}, ${TENNIS_FADE_BET_DOLLARS_BASE} base / ${TENNIS_FADE_BET_DOLLARS_HIGH} high-conv, trigger={TENNIS_FADE_TRIGGER_CENTS}c, <={TENNIS_FADE_MAX_MINUTES}min, high-conv: <={TENNIS_FADE_HIGH_CONV_MINUTES}min or vel>={TENNIS_FADE_HIGH_CONV_VELOCITY}c/min")
+        print(f"Strategy 8: Tennis fade BUY YES — {'ON' if TENNIS_FADE_ENABLED else 'OFF'}, ${TENNIS_FADE_BET_DOLLARS}/bet, trigger={TENNIS_FADE_TRIGGER_CENTS}c, <={TENNIS_FADE_MAX_MINUTES}min or vel>={TENNIS_FADE_MIN_VELOCITY}c/min")
         print(f"Open positions: {self.positions.count()}")
         print("=" * 60)
 
@@ -4642,12 +4640,13 @@ class KalshiReversionScanner:
         min_pregame = TENNIS_FADE_MIN_PREGAME_YES
         min_drop = TENNIS_FADE_MIN_DROP_SIZE
         max_minutes = TENNIS_FADE_MAX_MINUTES
+        min_velocity = TENNIS_FADE_MIN_VELOCITY
 
         skip_reasons = {
             'no_timing': 0, 'not_live': 0, 'too_late': 0,
             'no_price': 0, 'price_above_trigger': 0,
             'already_pos': 0, 'no_pregame': 0,
-            'drop_too_small': 0,
+            'drop_too_small': 0, 'not_high_conv': 0,
         }
         signals = []
 
@@ -4677,7 +4676,7 @@ class KalshiReversionScanner:
             if minutes_into_match < 0:
                 skip_reasons['not_live'] += 1
                 continue
-            if minutes_into_match > max_minutes:
+            if minutes_into_match > 60:  # hard cap; high-conv filter applied after velocity calc
                 skip_reasons['too_late'] += 1
                 continue
 
@@ -4753,11 +4752,10 @@ class KalshiReversionScanner:
             # Velocity
             velocity = (pregame_price_c - yes_price_c) / max(minutes_into_match, 1)
 
-            # Determine bet tier
-            is_high_conv = (
-                minutes_into_match <= TENNIS_FADE_HIGH_CONV_MINUTES
-                or velocity >= TENNIS_FADE_HIGH_CONV_VELOCITY
-            )
+            # High-conviction only: early entry (<=45min) OR fast velocity (>=2c/min)
+            if minutes_into_match > max_minutes and velocity < min_velocity:
+                skip_reasons['not_high_conv'] += 1
+                continue
 
             tour = 'ATP' if 'KXATPMATCH' in ticker else 'WTA'
 
@@ -4771,7 +4769,6 @@ class KalshiReversionScanner:
                 'velocity': round(velocity, 4),
                 'minutes_into_match': round(minutes_into_match, 1),
                 'match_start_ts': match_start_ts,
-                'is_high_conv': is_high_conv,
                 'tour': tour,
             })
 
@@ -4785,10 +4782,9 @@ class KalshiReversionScanner:
                 print(f"    TENNIS FADE CAP: {fade_count}/{TENNIS_FADE_MAX_POSITIONS}, stopping")
                 break
 
-            bet_dollars = TENNIS_FADE_BET_DOLLARS_HIGH if sig['is_high_conv'] else TENNIS_FADE_BET_DOLLARS_BASE
-            tier_label = '$10-HIGH' if sig['is_high_conv'] else '$3-BASE'
+            bet_dollars = TENNIS_FADE_BET_DOLLARS
 
-            print(f"  TENNIS FADE [{tier_label}]: BUY YES @ {trigger_c}c '{sig['title'][:50]}' "
+            print(f"  TENNIS FADE: BUY YES @ {trigger_c}c '{sig['title'][:50]}' "
                   f"({sig['tour']}, pre={sig['pregame_price_c']}c, drop={sig['drop_size']}c, "
                   f"vel={sig['velocity']:.3f}c/min, T+{sig['minutes_into_match']:.0f}min)")
 
@@ -4820,7 +4816,7 @@ class KalshiReversionScanner:
                 self._entered_this_cycle.add(sig['ticker'])
                 fade_count += 1
                 await self.notifier.send_order_event(
-                    f"TENNIS FADE BUY YES [{tier_label}]", sig['ticker'],
+                    "TENNIS FADE BUY YES", sig['ticker'],
                     price_cents=order_info.get('fill_price', trigger_c / 100) * 100
                         if isinstance(order_info.get('fill_price'), float) else trigger_c,
                     contracts=order_info.get('fill_count', 0),
@@ -4831,7 +4827,6 @@ class KalshiReversionScanner:
                           pregame=sig['pregame_price_c'], trigger=trigger_c,
                           drop=sig['drop_size'], velocity=sig['velocity'],
                           minutes_into=sig['minutes_into_match'], tour=sig['tour'],
-                          is_high_conv=sig['is_high_conv'],
                           bet_dollars=order_info.get('bet_dollars', 0))
 
     def _execute_tennis_fade_entry(self, sig, bet_dollars):
