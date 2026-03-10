@@ -112,7 +112,7 @@ PREMARKET_MAX_MARKET_DOLLARS = 8   # Hard cap $ per market for maker orders
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
-PREMARKET_NEW_SERIES_BET = 2      # $ bet for new/unknown series
+PREMARKET_NEW_SERIES_BET = 1      # $ bet for new/unknown series
 # Pre-recorded/scripted shows — insider edge too high, skip entirely
 PRERECORDED_SERIES = {
     'KXSURVIVORMENTION',      # Survivor (pre-recorded reality TV)
