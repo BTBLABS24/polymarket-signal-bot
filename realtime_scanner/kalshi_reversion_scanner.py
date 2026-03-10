@@ -5202,8 +5202,8 @@ class KalshiReversionScanner:
                   event_volume_24h=sig.get('event_volume_24h', 0),
                   event_velocity=sig.get('event_velocity', 0))
 
-        # Set cooldown IMMEDIATELY on order placement to prevent re-entry
-        # even if fill detection fails (get_order timeout, API error, etc.)
+        # Set cooldown on placement as safety net — cleared below if confirmed no-fill.
+        # Prevents re-entry when get_order() fails (timeout/API error) but order filled.
         self.mention_detector.signal_history[ticker] = time.time()
         self.mention_detector._save()
 
@@ -5242,6 +5242,13 @@ class KalshiReversionScanner:
                                price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
                                title=sig.get('title', '')[:60])
                 return info
+            else:
+                # Confirmed 0 fills — clear safety cooldown so we can retry
+                self.mention_detector.signal_history.pop(ticker, None)
+                self.mention_detector._save()
+        else:
+            # get_order() failed — keep safety cooldown (order may have filled)
+            print(f"    WARNING: get_order failed for {order_id}, keeping safety cooldown on {ticker}")
 
         # Not filled even as taker — cancel
         try:
