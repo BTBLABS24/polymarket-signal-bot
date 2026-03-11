@@ -168,6 +168,7 @@ POLITICAL_PCT_MIN_MARKETS = 5        # Min markets per event (skip tiny events)
 POLITICAL_EXCLUDE_SPORTS = {
     'NBAMENTION', 'NFLMENTION', 'NCAAMENTION', 'NCAABMENTION',
     'SNFMENTION', 'TNFMENTION', 'CFBMENTION', 'MLBMENTION',
+    'WBCMENTION',                                                # World Baseball Classic
     'FIGHTMENTION', 'SBMENTION', 'NHLMENTION', 'SOCCERMENTION',
     'GOLFMENTION', 'UFCMENTION', 'TENNISMENTION', 'CRICKETMENTION',
     'WOMENTION', 'NBAFINALS', 'EARNINGSMENTION', 'MMMENTION',
@@ -3965,6 +3966,12 @@ class KalshiReversionScanner:
             if 'MENTION' not in ticker_upper and 'FINALS' not in ticker_upper:
                 continue
 
+            # Skip killed categories and pre-recorded shows
+            event_ticker = m.get('event_ticker', '')
+            series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
+            if series in CATEGORY_KILL_LIST or series in PRERECORDED_SERIES:
+                continue
+
             # Detect category for blacklists and labeling
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
@@ -3976,7 +3983,6 @@ class KalshiReversionScanner:
             if is_ncaa and (word in NCAAB_WORD_BLACKLIST or word in NCAAB_ARENA_BLACKLIST):
                 continue
 
-            event_ticker = m.get('event_ticker', '')
             ms = milestones.get(event_ticker)
             if not ms or not ms.get('start_ts'):
                 continue
