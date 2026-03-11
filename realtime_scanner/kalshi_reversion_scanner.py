@@ -5012,7 +5012,10 @@ class KalshiReversionScanner:
             if resolved < PREMARKET_NEW_SERIES_MIN:
                 mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
 
-        mention_bet = min(mention_bet, PREMARKET_MAX_MARKET_DOLLARS)
+        # NBA halftime uses tighter per-market cap even for maker orders
+        is_nba_maker = 'NBAMENTION' in ticker.upper() or 'NBAFINALS' in ticker.upper()
+        maker_market_cap = NBA_HALFTIME_MAX_MARKET_DOLLARS if (is_nba_maker and NBA_HALFTIME_ENABLED) else PREMARKET_MAX_MARKET_DOLLARS
+        mention_bet = min(mention_bet, maker_market_cap)
 
         # Per-market exposure check (includes resting maker orders)
         ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
@@ -5020,7 +5023,7 @@ class KalshiReversionScanner:
         for info in self._resting_premarket_orders.values():
             if info.get('ticker') == ticker:
                 ticker_exp += info.get('bet_dollars', 0)
-        remaining_market_cap = PREMARKET_MAX_MARKET_DOLLARS - ticker_exp
+        remaining_market_cap = maker_market_cap - ticker_exp
         if remaining_market_cap <= 0:
             return None
         mention_bet = min(mention_bet, remaining_market_cap)
