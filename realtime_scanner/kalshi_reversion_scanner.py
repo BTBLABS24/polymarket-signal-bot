@@ -2567,19 +2567,60 @@ class KalshiReversionScanner:
             else:
                 print("WARNING: Could not fetch balance — check API keys")
 
-            # Seed cooldown from existing API positions so we don't
-            # re-bet tickers we already hold (survives redeploys)
+            # Seed cooldown AND position tracker from existing API positions
+            # so we don't re-bet tickers we already hold (survives redeploys)
             existing = self.client.get_positions()
             seeded = 0
+            reconciled = 0
             for pos in existing:
                 t = pos.get('ticker', '')
                 qty = pos.get('total_traded', 0) or pos.get('position', 0) or 0
-                if 'MENTION' in t.upper() and t not in self.mention_detector.signal_history and qty > 0:
+                if not t or qty <= 0:
+                    continue
+                # Seed mention detector cooldown
+                if 'MENTION' in t.upper() and t not in self.mention_detector.signal_history:
                     self.mention_detector.signal_history[t] = time.time()
                     seeded += 1
+                # Reconcile position tracker: add stub for any ticker we hold
+                # but don't have in position tracker (lost on redeploy)
+                if not self.positions.has_open_ticker(t):
+                    # Prefer _dollars field (cents fields deprecated March 12 2026)
+                    exp_str = pos.get('market_exposure_dollars')
+                    if exp_str:
+                        try:
+                            bet_dollars = abs(float(exp_str))
+                        except (ValueError, TypeError):
+                            bet_dollars = qty * 0.50
+                    else:
+                        exposure = pos.get('market_exposure', 0)
+                        bet_dollars = abs(exposure) / 100 if isinstance(exposure, (int, float)) else qty * 0.50
+                    # Infer signal type from ticker
+                    tu = t.upper()
+                    if 'FADE' in tu or 'BGAME' in tu:
+                        sig_type = 'ncaab_fade_yes' if 'BGAME' in tu else 'mention_buy_no'
+                    elif 'TENNIS' in tu:
+                        sig_type = 'tennis_fade_yes'
+                    else:
+                        sig_type = 'mention_buy_no'
+                    stub = {
+                        'ticker': t,
+                        'event_ticker': re.sub(r'-[A-Z]{2,6}$', '', t),  # strip word suffix
+                        'signal_type': sig_type,
+                        'status': 'open',
+                        'bet_dollars': round(bet_dollars, 2),
+                        'is_live': True,
+                        'hold_until_settle': True,
+                        'reconciled': True,  # flag so we know this was restored
+                        'opened_at': datetime.now(timezone.utc).isoformat(),
+                    }
+                    self.positions.positions.append(stub)
+                    reconciled += 1
             if seeded:
                 self.mention_detector._save()
                 print(f"  Seeded cooldown from {seeded} existing mention positions")
+            if reconciled:
+                self.positions._save()
+                print(f"  Reconciled {reconciled} positions from API (per-market caps restored)")
 
         await self.notifier.send_startup(self.positions.count(), balance)
 
