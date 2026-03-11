@@ -5565,7 +5565,7 @@ class KalshiReversionScanner:
                 ticker_exp += info.get('bet_dollars', 0)
         remaining_market_cap = market_cap - ticker_exp
         if remaining_market_cap <= 0:
-            print(f"    Market cap reached (${ticker_exp:.2f}/${MENTION_MAX_MARKET_DOLLARS} incl resting), skipping")
+            print(f"    Market cap reached (${ticker_exp:.2f}/${market_cap} incl resting), skipping")
             return None
         mention_bet = min(mention_bet, remaining_market_cap)
 
@@ -5575,7 +5575,8 @@ class KalshiReversionScanner:
         if event:
             if self._is_new_series(event):
                 event_cap = min(event_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
-            event_exp = self._total_event_exposure(event, signal_type='mention_buy_no')
+            evt_sig_type = 'nba_halftime_no' if (is_nba and NBA_HALFTIME_ENABLED) else 'mention_buy_no'
+            event_exp = self._total_event_exposure(event, signal_type=evt_sig_type)
             remaining_cap = event_cap - event_exp
             if remaining_cap <= 0:
                 print(f"    Event cap reached (${event_exp:.0f}/${event_cap} incl resting), skipping")
