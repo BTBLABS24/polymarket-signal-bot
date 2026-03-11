@@ -57,7 +57,7 @@ KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 SCAN_INTERVAL_SECONDS = 300  # 5 min
 # Trading config
 DRY_RUN = False
-MAX_BET_DOLLARS = 10          # Max per signal
+MAX_BET_DOLLARS = 15          # Max per signal
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
 ORDER_WAIT_SECONDS = 5        # Wait for fill after placing order
@@ -71,17 +71,19 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
 MENTION_BET_DOLLARS = 3            # $3 default for named categories
-MENTION_BET_NCAA = 2               # $2 for NCAAB/NCAA (actual underperforming backtest)
+MENTION_BET_NCAA = 1               # $1 for NCAAB/NCAA (-34% clean ROI, -25% actual 21d)
 MENTION_BET_OTHER = 3              # $3 for "other" categories
-# Per-category overrides for proven winners (actual ROI > +40%)
+# Per-category overrides — 21-day actual + clean-trade ROI (2026-02-18 to 2026-03-11)
 CATEGORY_BET_OVERRIDE = {
-    'HEGSETH':      10,   # +142% ROI actual, 50% WR (16 clean trades)
-    'FOXNEWS':      10,   # +72% ROI actual, 44% WR (18 clean)
-    'LASTWORD':     10,   # +131% ROI actual, 40% WR (10 clean)
-    'THEWEEKNIGHT': 10,   # +115% ROI actual, 44% WR (9 clean)
-    'Newsom':       10,   # +228% ROI actual, 57% WR (7 clean)
-    'POLITICS':     10,   # +46% ROI actual, 42% WR (19 clean)
-    'Trump':        10,   # +24% ROI actual, +88% backtest (761 mkts, t=8.15)
+    # Tier 1: best clean ROI, sized up to $15
+    'HEGSETH':      15,   # +224% actual, +141% clean, 50% WR (16 clean trades)
+    'LASTWORD':     15,   # +98% actual, +131% clean, 40% WR (10 clean)
+    'Newsom':       15,   # +228% clean, 57% WR — overall -47% was oversized bug trades
+    # Tier 2: solid edge, $10
+    'FOXNEWS':      10,   # +87% clean, 47% WR (17 clean) — overall -24% was bug trades
+    'THEWEEKNIGHT': 10,   # +115% clean, 44% WR (9 clean)
+    'POLITICS':     10,   # +56% clean, 44% WR (18 clean)
+    'Trump':        10,   # +41% clean, 29% WR — highest volume (187 trades)
 }
 MENTION_MAX_NO_PRICE = 0.30       # Global fallback max — conservative for unmapped categories
 MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides below)
@@ -91,14 +93,14 @@ MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides 
 # Only NCAA and Newsom are profitable at the cheap end.
 CATEGORY_NO_RANGE = {
     # (min_cents, max_cents) — taker range. Maker can be wider (up to PREMARKET_MAX_NO_PRICE).
-    'NCAA':     (5, 30),    # +151% ROI backtest, actual underperforming — keep range tight
-    'Newsom':   (5, 30),    # +228% ROI actual, 57% WR — strong winner
-    'LASTWORD': (5, 30),    # +131% ROI actual, 40% WR
-    'FOXNEWS':  (5, 30),    # +72% ROI actual, 44% WR
-    'HEGSETH':  (5, 30),    # +142% ROI actual, 50% WR — best winner
-    'THEWEEKNIGHT': (5, 30),# +115% ROI actual, 44% WR
-    'POLITICS': (5, 30),    # +46% ROI actual, 42% WR
-    'Trump':    (15, 50),   # +24% ROI actual, +88% backtest — cheap is noise, medium works
+    'NCAA':     (5, 30),    # -34% clean ROI 21d — reduced to $1/bet
+    'Newsom':   (5, 30),    # +228% clean, 57% WR — tier 1 $15
+    'LASTWORD': (5, 30),    # +131% clean, 40% WR — tier 1 $15
+    'FOXNEWS':  (5, 30),    # +87% clean, 47% WR — tier 2 $10
+    'HEGSETH':  (5, 30),    # +141% clean, 50% WR — tier 1 $15
+    'THEWEEKNIGHT': (5, 30),# +115% clean, 44% WR — tier 2 $10
+    'POLITICS': (5, 30),    # +56% clean, 44% WR — tier 2 $10
+    'Trump':    (15, 50),   # +41% clean, 29% WR — tier 2 $10, medium NOs only
     'NFL':      (30, 70),   # +13.1% ROI backtest — cheap is -9%, medium is +13%
     'NBA':      (20, 70),   # +28.4% ROI, halftime+ high-conf words only (separate gating)
     'Fight':    (5, 30),    # +28.2% ROI backtest, small sample
@@ -109,14 +111,14 @@ MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (event
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
-MENTION_MAX_EVENT_DOLLARS = 30    # Max $ per event across all words (resting + filled)
-MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker (raised for winner categories)
+MENTION_MAX_EVENT_DOLLARS = 50    # Max $ per event across all words (resting + filled) — raised for diversification
+MENTION_MAX_MARKET_DOLLARS = 15   # Hard cap $ per individual market/ticker (supports tier 1 $15 bets)
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
-PREMARKET_BET_DOLLARS = 8          # $ per resting maker order (independent of taker sizing)
-PREMARKET_MAX_MARKET_DOLLARS = 10  # Hard cap $ per market for maker orders (raised for winner categories)
+PREMARKET_BET_DOLLARS = 12         # $ per resting maker order — no slippage on limits
+PREMARKET_MAX_MARKET_DOLLARS = 15  # Hard cap $ per market for maker orders (matches taker cap)
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
@@ -363,7 +365,7 @@ DEGRADE_BUY_BELOW = {
 # Original 0-0.5h window: +9% ROI (thin edge). Wider 0-24h: +25.5% ROI.
 # With word blacklist (0% WR words removed): +23.6% ROI on 1106 markets.
 EARNINGS_ENABLED = False
-EARNINGS_BET_DOLLARS = 3         # $3/bet (capped until backtest validates)
+EARNINGS_BET_DOLLARS = 2         # $2/bet — clean trades -43% ROI (21d), reduce exposure
 EARNINGS_MIN_NO_PRICE = 0.15     # 15c (was 5c — cheap NOs are -62% ROI losers)
 EARNINGS_MAX_NO_PRICE = 0.50     # 50c (was 30c — 15-50c is +20.4% ROI, $0.31/d)
 EARNINGS_MAX_POSITIONS = 20      # independent cap
