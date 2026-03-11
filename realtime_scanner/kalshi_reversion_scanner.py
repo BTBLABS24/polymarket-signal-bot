@@ -409,9 +409,10 @@ THETA_REENTRY_MAX_POSITIONS = 20    # independent cap
 # --- NCAAB Game Outcome Fade Strategy ---
 # When a pregame NCAAB favorite (YES >= 55c) sees their live moneyline drop
 # to the trigger price within the first 50 minutes, buy YES expecting reversion.
-# Backtest: vel>=0.015, drop>=0.25, trigger @45c → 65% WR, +43% ROI (30d, $20/bet).
+# Backtest (men): vel>=0.015, drop>=0.25, trigger @45c → 65% WR, +43% ROI (30d, $20/bet).
+# Backtest (women): same params → 70% WR, +75% ROI (6d sample, $15/bet).
 NCAAB_FADE_ENABLED = True
-NCAAB_FADE_BET_DOLLARS = 30           # $30 per trade
+NCAAB_FADE_BET_DOLLARS = 30           # $30 per trade (men's default)
 NCAAB_FADE_TRIGGER_CENTS = 45        # Buy YES at this price (limit order)
 NCAAB_FADE_MIN_PREGAME_YES = 55      # Min pregame YES price (cents) — must be a favorite
 NCAAB_FADE_MIN_DROP_SIZE = 25        # Min drop in cents (pregame - trigger)
@@ -419,7 +420,8 @@ NCAAB_FADE_MIN_VELOCITY = 1.5         # Min price drop velocity (cents/min). Bac
 NCAAB_FADE_MAX_MINUTES = 50          # Only enter within first 50 min of game
 NCAAB_FADE_MAX_POSITIONS = 10        # Independent position cap
 NCAAB_FADE_MAX_MARKET_DOLLARS = 30   # Per-market cap (one bet per market)
-NCAAB_FADE_SERIES = 'KXNCAAMBGAME'   # Series for NCAAB game outcomes
+NCAAB_FADE_SERIES = ['KXNCAAMBGAME', 'KXNCAAWBGAME']  # Men's + Women's
+NCAAB_FADE_BET_BY_SERIES = {'KXNCAAMBGAME': 30, 'KXNCAAWBGAME': 5}  # Per-series bet sizing
 NCAAB_FADE_GAME_DURATION_HOURS = 2.5 # Approximate game duration
 
 # --- Tennis Match Outcome Fade Strategy ---
@@ -4209,35 +4211,37 @@ class KalshiReversionScanner:
         if fade_count >= NCAAB_FADE_MAX_POSITIONS:
             return
 
-        # Discover KXNCAAMBGAME markets — cache series for 1 hour
+        # Discover NCAAB markets (men's + women's) — cache for 5 minutes
+        fade_series_list = NCAAB_FADE_SERIES if isinstance(NCAAB_FADE_SERIES, list) else [NCAAB_FADE_SERIES]
         if not hasattr(self, '_ncaab_fade_markets_cache') or now - self._ncaab_fade_markets_cache_ts > 300:
             try:
                 all_markets = []
-                cursor = None
-                pages = 0
-                while pages < 20:
-                    params = {
-                        'series_ticker': NCAAB_FADE_SERIES,
-                        'status': 'open',
-                        'limit': 200,
-                    }
-                    if cursor:
-                        params['cursor'] = cursor
-                    resp = self.client.session.get(
-                        f'{KALSHI_BASE}/markets', params=params, timeout=15
-                    )
-                    if resp.status_code == 429:
-                        time.sleep(2)
-                        continue
-                    if resp.status_code != 200:
-                        break
-                    data = resp.json()
-                    markets = data.get('markets', [])
-                    all_markets.extend(markets)
-                    cursor = data.get('cursor', '')
-                    pages += 1
-                    if not markets or not cursor:
-                        break
+                for series_ticker in fade_series_list:
+                    cursor = None
+                    pages = 0
+                    while pages < 20:
+                        params = {
+                            'series_ticker': series_ticker,
+                            'status': 'open',
+                            'limit': 200,
+                        }
+                        if cursor:
+                            params['cursor'] = cursor
+                        resp = self.client.session.get(
+                            f'{KALSHI_BASE}/markets', params=params, timeout=15
+                        )
+                        if resp.status_code == 429:
+                            time.sleep(2)
+                            continue
+                        if resp.status_code != 200:
+                            break
+                        data = resp.json()
+                        markets = data.get('markets', [])
+                        all_markets.extend(markets)
+                        cursor = data.get('cursor', '')
+                        pages += 1
+                        if not markets or not cursor:
+                            break
                 self._ncaab_fade_markets_cache = all_markets
                 self._ncaab_fade_markets_cache_ts = now
             except Exception as e:
@@ -4379,6 +4383,13 @@ class KalshiReversionScanner:
                 skip_reasons['vel_too_low'] += 1
                 continue
 
+            # Determine series for per-series bet sizing
+            series = ''
+            for s in fade_series_list:
+                if s in ticker:
+                    series = s
+                    break
+
             signals.append({
                 'ticker': ticker,
                 'event_ticker': event_ticker,
@@ -4389,6 +4400,7 @@ class KalshiReversionScanner:
                 'velocity': round(velocity, 4),
                 'minutes_into_game': round(minutes_into_game, 1),
                 'game_start_ts': game_start_ts,
+                'series': series,
             })
 
         active_skips = {k: v for k, v in skip_reasons.items() if v > 0}
@@ -4401,7 +4413,9 @@ class KalshiReversionScanner:
                 print(f"    NCAAB FADE CAP: {fade_count}/{NCAAB_FADE_MAX_POSITIONS}, stopping")
                 break
 
-            print(f"  NCAAB FADE: BUY YES @ {trigger_c}c '{sig['title'][:50]}' "
+            tag = 'NCAAW' if 'NCAAWB' in sig.get('series', '') else 'NCAAB'
+            sig_bet = NCAAB_FADE_BET_BY_SERIES.get(sig.get('series', ''), NCAAB_FADE_BET_DOLLARS)
+            print(f"  {tag} FADE: BUY YES @ {trigger_c}c ${sig_bet} '{sig['title'][:50]}' "
                   f"(pre={sig['pregame_price_c']}c, drop={sig['drop_size']}c, "
                   f"vel={sig['velocity']:.3f}c/min, T+{sig['minutes_into_game']:.0f}min)")
 
@@ -4434,7 +4448,7 @@ class KalshiReversionScanner:
                 self._entered_this_cycle.add(sig['ticker'])
                 fade_count += 1
                 await self.notifier.send_order_event(
-                    "NCAAB FADE BUY YES", sig['ticker'],
+                    f"{tag} FADE BUY YES", sig['ticker'],
                     price_cents=order_info.get('fill_price', trigger_c / 100) * 100
                         if isinstance(order_info.get('fill_price'), float) else trigger_c,
                     contracts=order_info.get('fill_count', 0),
@@ -4452,6 +4466,8 @@ class KalshiReversionScanner:
         Taker order: buy YES at 45c (or best ask if cheaper)."""
         ticker = sig['ticker']
         trigger_c = NCAAB_FADE_TRIGGER_CENTS
+        series = sig.get('series', '')
+        bet_dollars = NCAAB_FADE_BET_BY_SERIES.get(series, NCAAB_FADE_BET_DOLLARS)
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
@@ -4476,18 +4492,19 @@ class KalshiReversionScanner:
 
         # Buy at trigger price (limit order — may fill at better price)
         buy_price = trigger_c
-        contracts = int(NCAAB_FADE_BET_DOLLARS / (buy_price / 100))
+        contracts = int(bet_dollars / (buy_price / 100))
         if contracts < 1:
             contracts = 1
-        bet_dollars = round(contracts * buy_price / 100, 2)
+        actual_dollars = round(contracts * buy_price / 100, 2)
 
-        # Cap to $30
-        if bet_dollars > NCAAB_FADE_BET_DOLLARS:
-            contracts = int(NCAAB_FADE_BET_DOLLARS / (buy_price / 100))
-            bet_dollars = round(contracts * buy_price / 100, 2)
+        # Cap to series bet limit
+        if actual_dollars > bet_dollars:
+            contracts = int(bet_dollars / (buy_price / 100))
+            actual_dollars = round(contracts * buy_price / 100, 2)
             if contracts < 1:
-                print(f"    NCAAB FADE: can't fit within ${NCAAB_FADE_BET_DOLLARS} at {buy_price}c, skipping")
+                print(f"    NCAAB FADE: can't fit within ${bet_dollars} at {buy_price}c, skipping")
                 return None
+        bet_dollars = actual_dollars
 
         print(f"    NCAAB FADE taker: {contracts} YES @ {buy_price}c (ask={best_yes_ask}c) = ${bet_dollars:.2f}")
 
