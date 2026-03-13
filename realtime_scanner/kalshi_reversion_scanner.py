@@ -253,7 +253,7 @@ NBA_ARENA_BLACKLIST = {
 # --- NCAAB Word Blacklist ---
 # Words with <20% NO win rate — almost always said, losing bet at any price.
 # Freshman 0% NO WR (33 trades), Safety 3% (32 trades), Transfer 17% (76 trades)
-NCAAB_WORD_BLACKLIST = {'FRES', 'SAFE', 'TRAN', 'OVER', 'AIRB', 'SCHE', 'ELBO', 'DRAF', 'RECO'}  # <45% NO WR
+NCAAB_WORD_BLACKLIST = {'FRES', 'SAFE', 'TRAN', 'OVER', 'AIRB', 'SCHE', 'ELBO', 'DRAF', 'RECO', 'MARC'}  # <45% NO WR
 
 # --- NCAAB Arena/Venue Blacklist ---
 # Arena names for college basketball. Announcers almost always name the venue.
@@ -327,7 +327,6 @@ NCAAB_HALFTIME_MAX_HOURS_LIVE = 2.5   # game over ~2h
 NCAAB_HALFTIME_WORD_ALLOWLIST = {
     'ANKL',   # Ankle — 72% train, 67% test WR
     'ALLE',   # Alley-oop — 86% train WR
-    'MARC',   # March Madness — 80% train, 80% test WR
     'WALK',   # Walk On — 58% train, 83% test WR
     'DOUB',   # Double Double — 61% train, 50% test WR
     'NIL',    # NIL — 67% train WR
