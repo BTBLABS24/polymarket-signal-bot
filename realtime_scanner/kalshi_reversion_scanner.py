@@ -1422,6 +1422,7 @@ class MentionBuyNoDetector:
             })
 
         # Print debug breakdown
+        self._last_filter_stats = dict(debug_counts)
         print(f"  Mention filter: {debug_counts['total']} checked, "
               f"{debug_counts['skipped_cat']} skipped(cat), "
               f"{debug_counts.get('prerecorded', 0)} prerecorded, "
@@ -2952,13 +2953,22 @@ class KalshiReversionScanner:
         # Diagnostic Telegram: send scan summary every 30 min so we can debug without Railway logs
         if not hasattr(self, '_last_diag_tg'):
             self._last_diag_tg = 0
-        if now - self._last_diag_tg >= 1800:
+        if now - self._last_diag_tg >= 300:  # every 5 min while debugging (revert to 1800 later)
             self._last_diag_tg = now
             bal = self.client.get_balance() if self.client.can_trade else None
             bal_str = f"${bal/100:.2f}" if bal is not None else "N/A"
             mkts = getattr(self, '_last_mention_market_count', '?')
             sig_stats = getattr(self, '_last_mention_signal_stats', None)
             sig_str = f"{sig_stats[0]} total, {sig_stats[1]} w/milestone, {sig_stats[2]} in window" if sig_stats else "no scan yet"
+            fs = getattr(self.mention_detector, '_last_filter_stats', None)
+            if fs:
+                filter_str = (f"checked={fs.get('total',0)} kill={fs.get('skipped_cat',0)} "
+                              f"prerec={fs.get('prerecorded',0)} no_ms={fs.get('no_milestone',0)} "
+                              f"early={fs.get('too_early',0)} far={fs.get('too_far',0)} "
+                              f"no_px={fs.get('no_price',0)} OOR={fs.get('price_out_range',0)} "
+                              f"cd={fs.get('cooldown',0)} ok={fs.get('eligible',0)}")
+            else:
+                filter_str = "no scan yet"
             diag_lines = [
                 f"DIAG {now_str}",
                 f"can_trade: {self.client.can_trade}",
@@ -2966,6 +2976,7 @@ class KalshiReversionScanner:
                 f"low_balance: {low_balance}",
                 f"markets: {mkts}",
                 f"signals: {sig_str}",
+                f"filter: {filter_str}",
                 f"positions: {self.positions.count()} ({', '.join(parts)})",
                 f"resting: {len(self._resting_premarket_orders)}",
             ]
