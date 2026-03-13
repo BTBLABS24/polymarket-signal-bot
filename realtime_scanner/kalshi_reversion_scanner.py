@@ -484,6 +484,54 @@ def get_mention_category(ticker):
     return 'Other'
 
 
+def _market_cents(m, field):
+    """Read a market price field in cents, handling the March 12 2026 API migration.
+
+    Kalshi removed integer-cent fields (yes_bid, yes_ask, last_price, etc.)
+    on March 12 2026. New fields use _dollars suffix and return string values
+    like "0.56". This helper tries _dollars first, falls back to legacy cents.
+    Returns int cents or None.
+    """
+    # New _dollars field (string like "0.56")
+    dollars_val = m.get(f'{field}_dollars')
+    if dollars_val is not None:
+        try:
+            return int(round(float(dollars_val) * 100))
+        except (ValueError, TypeError):
+            pass
+    # Legacy integer cents field
+    legacy = m.get(field)
+    if legacy is not None:
+        try:
+            return int(legacy)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def _market_count(m, field):
+    """Read a market count/volume field, handling _fp migration.
+
+    Kalshi removed integer count fields on March 12 2026.
+    New fields use _fp suffix (fixed-point string like "150.00").
+    Falls back to legacy integer field.
+    Returns int or 0.
+    """
+    fp_val = m.get(f'{field}_fp')
+    if fp_val is not None:
+        try:
+            return int(float(fp_val))
+        except (ValueError, TypeError):
+            pass
+    legacy = m.get(field)
+    if legacy is not None:
+        try:
+            return int(legacy)
+        except (ValueError, TypeError):
+            pass
+    return 0
+
+
 def get_no_range(ticker):
     """Get (min_cents, max_cents) NO price range for this ticker's category.
     Returns per-category range from CATEGORY_NO_RANGE, or global fallback."""
@@ -927,7 +975,14 @@ class KalshiClient:
             resp = self.session.get(f'{KALSHI_BASE}/portfolio/balance', headers=headers, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
-                return data.get('balance', 0)  # cents
+                # Try _dollars field first (string like "182.68")
+                bal_dollars = data.get('balance_dollars')
+                if bal_dollars is not None:
+                    try:
+                        return int(round(float(bal_dollars) * 100))
+                    except (ValueError, TypeError):
+                        pass
+                return data.get('balance', 0)  # legacy cents
             else:
                 print(f'  Balance error {resp.status_code}: {resp.text[:200]}')
         except Exception as e:
@@ -952,11 +1007,36 @@ class KalshiClient:
         return []
 
     def get_orderbook(self, ticker):
-        """GET /markets/{ticker}/orderbook — returns yes/no bids and asks."""
+        """GET /markets/{ticker}/orderbook — returns yes/no bids as [[price_cents, qty], ...].
+
+        After March 12 2026 migration, Kalshi returns orderbook_fp with
+        yes_dollars/no_dollars (string arrays). We normalize back to
+        [[int_cents, int_qty], ...] for compatibility with the rest of the bot.
+        """
         try:
             resp = self.session.get(f'{KALSHI_BASE}/markets/{ticker}/orderbook', timeout=10)
             if resp.status_code == 200:
-                return resp.json().get('orderbook', {})
+                data = resp.json()
+                # Try new format first (orderbook_fp with _dollars arrays)
+                ob_fp = data.get('orderbook_fp', {})
+                if ob_fp:
+                    result = {}
+                    for side, key in [('yes', 'yes_dollars'), ('no', 'no_dollars')]:
+                        raw = ob_fp.get(key, [])
+                        levels = []
+                        for entry in raw:
+                            try:
+                                price_cents = int(round(float(entry[0]) * 100))
+                                qty = int(round(float(entry[1])))
+                                levels.append([price_cents, qty])
+                            except (ValueError, TypeError, IndexError):
+                                continue
+                        result[side] = levels
+                    return result
+                # Legacy format (orderbook with int arrays)
+                ob = data.get('orderbook', {})
+                if ob:
+                    return ob
         except Exception as e:
             print(f'  Orderbook error ({ticker}): {e}')
         return {}
@@ -1291,20 +1371,14 @@ class MentionBuyNoDetector:
 
             # Get current YES price → derive NO price
             yes_price = None
-            yes_bid = m.get('yes_bid')
-            yes_ask = m.get('yes_ask')
+            yes_bid = _market_cents(m, 'yes_bid')
+            yes_ask = _market_cents(m, 'yes_ask')
             if yes_bid is not None and yes_ask is not None:
-                try:
-                    yes_price = (int(yes_bid) + int(yes_ask)) / 2 / 100
-                except (ValueError, TypeError):
-                    pass
+                yes_price = (yes_bid + yes_ask) / 2 / 100
             if yes_price is None:
-                last = m.get('last_price')
+                last = _market_cents(m, 'last_price')
                 if last is not None:
-                    try:
-                        yes_price = int(last) / 100
-                    except (ValueError, TypeError):
-                        pass
+                    yes_price = last / 100
             if yes_price is None:
                 debug_counts['no_price'] += 1
                 cat_debug[_cat]['price'] += 1
@@ -1389,12 +1463,12 @@ class MentionBuyNoDetector:
             # Volume as proxy for "event is live" — high volume = active event
             volume_24h = 0
             try:
-                volume_24h = int(m.get('volume_24h', 0) or 0)
+                volume_24h = _market_count(m, 'volume_24h')
             except (ValueError, TypeError):
                 pass
             open_interest = 0
             try:
-                open_interest = int(m.get('open_interest', 0) or 0)
+                open_interest = _market_count(m, 'open_interest')
             except (ValueError, TypeError):
                 pass
 
@@ -1561,11 +1635,7 @@ class PoliticalPctDetector:
             yes_count = 0
             for m in event_markets:
                 result = m.get('result', '')
-                last_price = 0
-                try:
-                    last_price = int(m.get('last_price', 0) or 0)
-                except (ValueError, TypeError):
-                    pass
+                last_price = _market_cents(m, 'last_price') or 0
                 if result == 'yes' or last_price >= 98:
                     yes_count += 1
 
@@ -1579,31 +1649,21 @@ class PoliticalPctDetector:
             for m in event_markets:
                 ticker = m.get('ticker', '')
                 result = m.get('result', '')
-                last_price = 0
-                try:
-                    last_price = int(m.get('last_price', 0) or 0)
-                except (ValueError, TypeError):
-                    pass
+                last_price = _market_cents(m, 'last_price') or 0
                 # Skip already resolved (YES or NO)
                 if result in ('yes', 'no') or last_price >= 98:
                     continue
 
                 # Get YES price → derive NO price
                 yes_price = None
-                yes_bid = m.get('yes_bid')
-                yes_ask = m.get('yes_ask')
+                yes_bid = _market_cents(m, 'yes_bid')
+                yes_ask = _market_cents(m, 'yes_ask')
                 if yes_bid is not None and yes_ask is not None:
-                    try:
-                        yes_price = (int(yes_bid) + int(yes_ask)) / 2 / 100
-                    except (ValueError, TypeError):
-                        pass
+                    yes_price = (yes_bid + yes_ask) / 2 / 100
                 if yes_price is None:
-                    lp = m.get('last_price')
+                    lp = _market_cents(m, 'last_price')
                     if lp is not None:
-                        try:
-                            yes_price = int(lp) / 100
-                        except (ValueError, TypeError):
-                            pass
+                        yes_price = lp / 100
                 if yes_price is None:
                     continue
 
@@ -1636,8 +1696,8 @@ class PoliticalPctDetector:
                     'hours_before_close': 0,
                     'hours_to_event': round((event_start_ts - now_ts) / 3600, 2),
                     'close_ts': event_end_ts or (now_ts + 4 * 3600),
-                    'volume_24h': int(m.get('volume_24h', 0) or 0),
-                    'open_interest': int(m.get('open_interest', 0) or 0),
+                    'volume_24h': _market_count(m, 'volume_24h'),
+                    'open_interest': _market_count(m, 'open_interest'),
                     'pct_words_said': round(pct_said, 3),
                     'event_title': title,
                     'event_yes_count': yes_count,
@@ -2581,7 +2641,23 @@ class KalshiReversionScanner:
             reconciled = 0
             for pos in existing:
                 t = pos.get('ticker', '')
-                qty = pos.get('total_traded', 0) or pos.get('position', 0) or 0
+                # Try _fp/_dollars fields first (March 12 2026 migration)
+                qty = 0
+                tt_dollars = pos.get('total_traded_dollars')
+                if tt_dollars:
+                    try:
+                        qty = float(tt_dollars)
+                    except (ValueError, TypeError):
+                        pass
+                if not qty:
+                    pos_fp = pos.get('position_fp')
+                    if pos_fp:
+                        try:
+                            qty = float(pos_fp)
+                        except (ValueError, TypeError):
+                            pass
+                if not qty:
+                    qty = pos.get('total_traded', 0) or pos.get('position', 0) or 0
                 if not t or qty <= 0:
                     continue
                 # Seed mention detector cooldown
@@ -2690,7 +2766,7 @@ class KalshiReversionScanner:
                     et = m.get('event_ticker', m.get('ticker', ''))
                     vol = 0
                     try:
-                        vol = int(m.get('volume_24h', 0) or 0)
+                        vol = _market_count(m, 'volume_24h')
                     except (ValueError, TypeError):
                         pass
                     event_vol_now[et] = event_vol_now.get(et, 0) + vol
@@ -3289,20 +3365,14 @@ class KalshiReversionScanner:
 
             # Get current YES price
             yes_price = None
-            yes_bid = m.get('yes_bid')
-            yes_ask = m.get('yes_ask')
+            yes_bid = _market_cents(m, 'yes_bid')
+            yes_ask = _market_cents(m, 'yes_ask')
             if yes_bid is not None and yes_ask is not None:
-                try:
-                    yes_price = (int(yes_bid) + int(yes_ask)) / 2 / 100
-                except (ValueError, TypeError):
-                    pass
+                yes_price = (yes_bid + yes_ask) / 2 / 100
             if yes_price is None:
-                last = m.get('last_price')
+                last = _market_cents(m, 'last_price')
                 if last is not None:
-                    try:
-                        yes_price = int(last) / 100
-                    except (ValueError, TypeError):
-                        pass
+                    yes_price = last / 100
             if yes_price is None:
                 skip_reasons['no_price'] += 1
                 continue
@@ -3535,20 +3605,14 @@ class KalshiReversionScanner:
 
             # Get YES price estimate from market data
             yes_price = None
-            yes_bid = m.get('yes_bid')
-            yes_ask = m.get('yes_ask')
+            yes_bid = _market_cents(m, 'yes_bid')
+            yes_ask = _market_cents(m, 'yes_ask')
             if yes_bid is not None and yes_ask is not None:
-                try:
-                    yes_price = (int(yes_bid) + int(yes_ask)) / 2 / 100
-                except (ValueError, TypeError):
-                    pass
+                yes_price = (yes_bid + yes_ask) / 2 / 100
             if yes_price is None:
-                last = m.get('last_price')
+                last = _market_cents(m, 'last_price')
                 if last is not None:
-                    try:
-                        yes_price = int(last) / 100
-                    except (ValueError, TypeError):
-                        pass
+                    yes_price = last / 100
             if yes_price is None:
                 skip_reasons['no_price'] += 1
                 continue
@@ -4391,20 +4455,12 @@ class KalshiReversionScanner:
 
             # Get current YES price
             yes_price_c = None
-            yes_bid = m.get('yes_bid')
-            yes_ask = m.get('yes_ask')
+            yes_bid = _market_cents(m, 'yes_bid')
+            yes_ask = _market_cents(m, 'yes_ask')
             if yes_bid is not None and yes_ask is not None:
-                try:
-                    yes_price_c = (int(yes_bid) + int(yes_ask)) // 2
-                except (ValueError, TypeError):
-                    pass
+                yes_price_c = (yes_bid + yes_ask) // 2
             if yes_price_c is None:
-                last = m.get('last_price')
-                if last is not None:
-                    try:
-                        yes_price_c = int(last)
-                    except (ValueError, TypeError):
-                        pass
+                yes_price_c = _market_cents(m, 'last_price')
             if yes_price_c is None:
                 skip_reasons['no_price'] += 1
                 continue
@@ -4782,20 +4838,12 @@ class KalshiReversionScanner:
 
             # Get current YES price
             yes_price_c = None
-            yes_bid = m.get('yes_bid')
-            yes_ask = m.get('yes_ask')
+            yes_bid = _market_cents(m, 'yes_bid')
+            yes_ask = _market_cents(m, 'yes_ask')
             if yes_bid is not None and yes_ask is not None:
-                try:
-                    yes_price_c = (int(yes_bid) + int(yes_ask)) // 2
-                except (ValueError, TypeError):
-                    pass
+                yes_price_c = (yes_bid + yes_ask) // 2
             if yes_price_c is None:
-                last = m.get('last_price')
-                if last is not None:
-                    try:
-                        yes_price_c = int(last)
-                    except (ValueError, TypeError):
-                        pass
+                yes_price_c = _market_cents(m, 'last_price')
             if yes_price_c is None:
                 skip_reasons['no_price'] += 1
                 continue
