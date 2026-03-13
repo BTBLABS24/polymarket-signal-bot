@@ -2478,6 +2478,7 @@ class KalshiReversionScanner:
         self._resting_file = Path(__file__).parent / 'resting_orders.json'
         self._load_resting_orders()
         self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
+        self._pending_tg_raw = []  # raw text messages — flushed alongside _pending_tg
         self._theta_start_prices = {}  # ticker -> NO price (cents) at event start
 
     def _queue_tg(self, event_type, ticker, **kwargs):
@@ -2489,6 +2490,9 @@ class KalshiReversionScanner:
         while self._pending_tg:
             event_type, ticker, kwargs = self._pending_tg.pop(0)
             await self.notifier.send_order_event(event_type, ticker, **kwargs)
+        while self._pending_tg_raw:
+            msg = self._pending_tg_raw.pop(0)
+            await self.notifier._send(msg)
 
     def _load_resting_orders(self):
         """Load resting orders from disk (survives redeploys)."""
@@ -2670,6 +2674,7 @@ class KalshiReversionScanner:
             self._entered_this_cycle = set()  # Prevent any ticker from being entered twice per scan
             print(f"  Mention scan: fetching open mention markets...")
             mention_markets = self.client.get_open_mention_markets()
+            self._last_mention_market_count = len(mention_markets)
             print(f"  Mention markets found: {len(mention_markets)}")
 
             if mention_markets:
@@ -2772,6 +2777,7 @@ class KalshiReversionScanner:
                 n_with_start = sum(1 for s in mention_signals if s.get('event_start_ts'))
                 n_eligible = len(eligible)
                 mention_signals = eligible
+                self._last_mention_signal_stats = (n_total, n_with_start, n_eligible)
                 print(f"  Mention signals: {n_total} total, {n_with_start} with milestone, {n_eligible} in window")
 
                 for sig in mention_signals:
@@ -2942,6 +2948,28 @@ class KalshiReversionScanner:
         daily_pnl = self.trade_logger.daily_pnl()
         if daily_pnl != 0:
             print(f"  Daily P&L: ${daily_pnl:.2f}")
+
+        # Diagnostic Telegram: send scan summary every 30 min so we can debug without Railway logs
+        if not hasattr(self, '_last_diag_tg'):
+            self._last_diag_tg = 0
+        if now - self._last_diag_tg >= 1800:
+            self._last_diag_tg = now
+            bal = self.client.get_balance() if self.client.can_trade else None
+            bal_str = f"${bal/100:.2f}" if bal is not None else "N/A"
+            mkts = getattr(self, '_last_mention_market_count', '?')
+            sig_stats = getattr(self, '_last_mention_signal_stats', None)
+            sig_str = f"{sig_stats[0]} total, {sig_stats[1]} w/milestone, {sig_stats[2]} in window" if sig_stats else "no scan yet"
+            diag_lines = [
+                f"DIAG {now_str}",
+                f"can_trade: {self.client.can_trade}",
+                f"balance: {bal_str}",
+                f"low_balance: {low_balance}",
+                f"markets: {mkts}",
+                f"signals: {sig_str}",
+                f"positions: {self.positions.count()} ({', '.join(parts)})",
+                f"resting: {len(self._resting_premarket_orders)}",
+            ]
+            self._pending_tg_raw.append('\n'.join(diag_lines))
 
         # Daily P&L summary via Telegram — send once per day after 23:00 UTC
         now_utc = datetime.fromtimestamp(now, tz=timezone.utc)
