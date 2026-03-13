@@ -117,7 +117,7 @@ MENTION_MAX_MARKET_DOLLARS = 15   # Hard cap $ per individual market/ticker (sup
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
-PREMARKET_BET_DOLLARS = 12         # $ per resting maker order — no slippage on limits
+PREMARKET_BET_DOLLARS = 10         # $ per resting maker order — no slippage on limits
 PREMARKET_MAX_MARKET_DOLLARS = 15  # Hard cap $ per market for maker orders (matches taker cap)
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
@@ -5052,6 +5052,12 @@ class KalshiReversionScanner:
             mention_bet = CATEGORY_BET_OVERRIDE[maker_cat_name]
         else:
             mention_bet = PREMARKET_BET_DOLLARS
+
+        # Spread-based cap: narrow spreads get smaller orders
+        if spread < 10:
+            mention_bet = min(mention_bet, 5)
+        else:
+            mention_bet = min(mention_bet, 10)
 
         # New/unknown series cap
         event_ticker = sig.get('event_ticker', '')
