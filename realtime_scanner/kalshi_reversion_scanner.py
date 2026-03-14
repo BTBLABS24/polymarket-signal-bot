@@ -201,6 +201,29 @@ CATEGORY_KILL_LIST = {
     'KXHOCHULMENTION',        # Hochul: -90% ROI actual (1W/9L, 10% WR)
     'KXPSAKIMENTION',         # PSAKI: -49% ROI actual (5W/11L, 17% clean WR)
 }
+
+# --- Stable-Price NO Strategy ---
+# Backtest: when a word crosses 98c YES (trigger), snapshot all siblings.
+# 5 min later, if YES price stable (within 3c), buy NO as taker.
+# "Stubbornly overpriced" signal — market refuses to reprice after trigger.
+# Universal range 0.30-0.70: N=316, Edge=+17.3c, WR=72%, Sharpe=0.402, ROI=+32%
+# Media excluded (-11.6c edge, only 5 trades).
+STABLE_PRICE_ENABLED = True
+STABLE_PRICE_BET_DOLLARS = 5             # $5/bet (taker)
+STABLE_PRICE_MAX_POSITIONS = 30          # Independent position cap
+STABLE_PRICE_MAX_EVENT_DOLLARS = 20      # Per-event cap
+STABLE_PRICE_MAX_MARKET_DOLLARS = 5      # Per-market cap (no duplicates)
+STABLE_PRICE_TRIGGER_YES_CENTS = 98      # First word crossing this triggers the event
+STABLE_PRICE_DELAY_SECONDS = 300         # 5 min delay between trigger and entry check
+STABLE_PRICE_STABILITY_CENTS = 3         # Max |P_now - P_trigger| for "stable"
+STABLE_PRICE_TRIGGER_EXPIRY = 1800       # Discard triggers older than 30 min
+# Universal YES price range (cents). All categories use same range.
+# 0.30-0.70 is the sweet spot: Sharpe 0.402, ROI +32% on test.
+STABLE_PRICE_YES_MIN = 30               # Min YES price (cents)
+STABLE_PRICE_YES_MAX = 70               # Max YES price (cents)
+# Media excluded: -11.6c edge, -16% ROI (only 5 trades in test)
+STABLE_PRICE_EXCLUDE_MEDIA = True
+
 # --- Taker Adverse Selection Gating ---
 # Pre-event taker is -39% ROI from actual fills. Live taker is +13%.
 # Gate taker by category:
@@ -1710,6 +1733,229 @@ class PoliticalPctDetector:
         return signals
 
 
+class StablePriceDetector:
+    """Detects mention events where the first word just crossed 98c YES (trigger),
+    then after 5 min checks if remaining words' YES prices are stable (within 3c).
+    Stable = stubbornly overpriced → buy NO as taker.
+
+    Backtest (test set, taker pricing):
+    - YES 0.10-0.80: N=1091, Edge=+5.7c, Sharpe=0.128
+    - Best: Trump 0.30-0.50, Politician 0.60-0.90, Sports 0.20-0.70
+
+    State machine per event:
+    1. No trigger yet → scan for first word crossing 98c
+    2. Trigger detected → record trigger_ts + YES prices of all siblings
+    3. trigger_ts + 5min elapsed → check stability, emit signals, clear trigger
+    """
+
+    def __init__(self):
+        # event_ticker -> {trigger_ts, prices: {ticker: yes_cents}, event_title}
+        self._triggers = {}
+        self._cooldown = {}  # ticker -> timestamp (no duplicate market entries)
+
+    @staticmethod
+    def _classify_event(event_ticker):
+        """Classify event into a category for YES price range lookup."""
+        et = event_ticker.upper()
+        if 'TRUMPMENTION' in et:
+            return 'Trump'
+        if any(s in et for s in ('NBAMENTION', 'NFLMENTION', 'NCAAMENTION',
+                                  'NCAABMENTION', 'SNFMENTION', 'TNFMENTION',
+                                  'CFBMENTION', 'FIGHTMENTION', 'SBMENTION',
+                                  'NHLMENTION', 'SOCCERMENTION', 'GOLFMENTION',
+                                  'UFCMENTION', 'TENNISMENTION', 'CRICKETMENTION',
+                                  'WOMENTION')):
+            return 'Sports'
+        if 'EARNINGSMENTION' in et:
+            return 'Earnings'
+        if any(s in et for s in ('MADDOWMENTION', 'COLBERTMENTION', 'LASTWORDMENTION',
+                                  'FOXNEWSMENTION', 'HEGSETH', 'THEWEEKNIGHT')):
+            return 'Media'
+        if any(s in et for s in ('NEWSOMMENTION', 'HOCHULMENTION', 'SECPRESSMENTION',
+                                  'MAMDANIMENTION', 'BERNMENTION', 'POLITICS',
+                                  'GOVERNORMENTION', 'VANCEMENTION', 'PSAKIMENTION')):
+            return 'Politician'
+        return 'Other'
+
+    def detect(self, open_markets, client, now_ts):
+        """Scan open mention markets and manage trigger state.
+
+        Called every scan cycle (~2 min). Returns signals only when
+        a trigger has matured (5+ min old) and words are price-stable.
+        """
+        signals = []
+
+        # Group markets by event_ticker
+        events = {}
+        for m in open_markets:
+            et = m.get('event_ticker', '')
+            if not et or 'MENTION' not in et.upper():
+                continue
+            # Skip killed / prerecorded series
+            series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', et)
+            if series in CATEGORY_KILL_LIST or series in PRERECORDED_SERIES:
+                continue
+            events.setdefault(et, []).append(m)
+
+        # Expire old triggers (> 30 min)
+        stale = [et for et, t in self._triggers.items()
+                 if now_ts - t['trigger_ts'] > STABLE_PRICE_TRIGGER_EXPIRY]
+        for et in stale:
+            del self._triggers[et]
+
+        # Fetch milestones once (cached 10 min inside client)
+        milestones = client.get_milestones()
+
+        n_new_triggers = 0
+        n_mature = 0
+
+        for event_ticker, event_markets in events.items():
+            if len(event_markets) < 3:  # Need enough siblings for meaningful signal
+                continue
+
+            ms = milestones.get(event_ticker)
+            if not ms:
+                continue
+            event_start_ts = ms.get('start_ts', 0)
+            event_end_ts = ms.get('end_ts')
+            # Only look at live events (started and not ended)
+            if event_start_ts > now_ts:
+                continue
+            if event_end_ts and event_end_ts < now_ts:
+                continue
+
+            category = self._classify_event(event_ticker)
+            # Exclude Media (negative edge in backtest)
+            if STABLE_PRICE_EXCLUDE_MEDIA and category == 'Media':
+                continue
+            yes_min, yes_max = STABLE_PRICE_YES_MIN, STABLE_PRICE_YES_MAX
+
+            # Check if any word just crossed 98c (trigger)
+            has_trigger = event_ticker in self._triggers
+            if not has_trigger:
+                # Look for first word crossing 98c
+                for m in event_markets:
+                    last_price = _market_cents(m, 'last_price') or 0
+                    result = m.get('result', '')
+                    if result == 'yes' or last_price >= STABLE_PRICE_TRIGGER_YES_CENTS:
+                        # Trigger! Snapshot all sibling YES prices
+                        prices = {}
+                        for sib in event_markets:
+                            sib_ticker = sib.get('ticker', '')
+                            sib_result = sib.get('result', '')
+                            sib_lp = _market_cents(sib, 'last_price') or 0
+                            # Skip already resolved siblings
+                            if sib_result in ('yes', 'no') or sib_lp >= 98:
+                                continue
+                            # Get YES price in cents (mid or last)
+                            yb = _market_cents(sib, 'yes_bid')
+                            ya = _market_cents(sib, 'yes_ask')
+                            if yb is not None and ya is not None:
+                                yes_c = round((yb + ya) / 2)
+                            elif _market_cents(sib, 'last_price') is not None:
+                                yes_c = _market_cents(sib, 'last_price')
+                            else:
+                                continue
+                            prices[sib_ticker] = yes_c
+                        if prices:
+                            self._triggers[event_ticker] = {
+                                'trigger_ts': now_ts,
+                                'prices': prices,
+                                'event_title': ms.get('title', '')[:60],
+                            }
+                            n_new_triggers += 1
+                        break  # Only need one trigger word per event
+
+            # Check mature triggers (>= 5 min old)
+            trig = self._triggers.get(event_ticker)
+            if not trig:
+                continue
+            age = now_ts - trig['trigger_ts']
+            if age < STABLE_PRICE_DELAY_SECONDS:
+                continue
+
+            n_mature += 1
+
+            # Build current price map
+            current_prices = {}
+            market_map = {}
+            for m in event_markets:
+                t = m.get('ticker', '')
+                result = m.get('result', '')
+                lp = _market_cents(m, 'last_price') or 0
+                if result in ('yes', 'no') or lp >= 98:
+                    continue
+                yb = _market_cents(m, 'yes_bid')
+                ya = _market_cents(m, 'yes_ask')
+                if yb is not None and ya is not None:
+                    current_prices[t] = round((yb + ya) / 2)
+                elif _market_cents(m, 'last_price') is not None:
+                    current_prices[t] = _market_cents(m, 'last_price')
+                market_map[t] = m
+
+            # Check stability: |current - trigger| <= threshold
+            for ticker, trigger_yes_c in trig['prices'].items():
+                if ticker not in current_prices:
+                    continue
+                now_yes_c = current_prices[ticker]
+                delta = abs(now_yes_c - trigger_yes_c)
+                if delta > STABLE_PRICE_STABILITY_CENTS:
+                    continue  # Price moved — not stable
+
+                # YES price range filter (category-specific)
+                if now_yes_c < yes_min or now_yes_c > yes_max:
+                    continue
+
+                # Cooldown — 24h per ticker
+                if now_ts - self._cooldown.get(ticker, 0) < 24 * 3600:
+                    continue
+
+                m = market_map.get(ticker)
+                if not m:
+                    continue
+
+                no_cents = 100 - now_yes_c
+                no_price = no_cents / 100
+
+                signals.append({
+                    'ticker': ticker,
+                    'title': m.get('title', ticker),
+                    'event_ticker': event_ticker,
+                    'fade_action': 'SELL',
+                    'fade_side': 'no',
+                    'entry_price': round(now_yes_c / 100, 4),
+                    'pre_signal_price': round(trigger_yes_c / 100, 4),
+                    'price_move': now_yes_c - trigger_yes_c,
+                    'n_small_trades': 0,
+                    'retail_contracts': 0,
+                    'signal_time': now_ts,
+                    'signal_type': 'stable_price_no',
+                    'is_earnings': 'EARNINGSMENTION' in event_ticker.upper(),
+                    'no_price': round(no_price, 4),
+                    'no_price_cents': no_cents,
+                    'hours_before_close': 0,
+                    'hours_to_event': round((event_start_ts - now_ts) / 3600, 2),
+                    'close_ts': event_end_ts or (now_ts + 4 * 3600),
+                    'volume_24h': _market_count(m, 'volume_24h'),
+                    'open_interest': _market_count(m, 'open_interest'),
+                    'trigger_yes_cents': trigger_yes_c,
+                    'current_yes_cents': now_yes_c,
+                    'price_delta_cents': delta,
+                    'trigger_age_seconds': int(age),
+                    'event_title': trig['event_title'],
+                    'category': category,
+                })
+
+            # Clear mature trigger — it's been processed
+            del self._triggers[event_ticker]
+
+        if n_new_triggers or n_mature or signals:
+            print(f"  Stable-price: {n_new_triggers} new triggers, "
+                  f"{n_mature} mature, {len(signals)} signals, "
+                  f"{len(self._triggers)} pending")
+        return signals
+
+
 # =====================================================================
 # TRADE LOGGER
 # =====================================================================
@@ -2525,6 +2771,7 @@ class KalshiReversionScanner:
         self.client = KalshiClient()
         self.mention_detector = MentionBuyNoDetector()
         self.political_pct_detector = PoliticalPctDetector()
+        self.stable_price_detector = StablePriceDetector()
         self.positions = KalshiPositionTracker()
         self.notifier = KalshiNotifier()
         self.trade_logger = TradeLogger()
@@ -2969,6 +3216,10 @@ class KalshiReversionScanner:
                 # 3f. Political pct_words_said strategy — buy NO when >=50% of event words said
                 if POLITICAL_PCT_ENABLED and not low_balance:
                     await self._scan_political_pct(mention_markets, now)
+
+                # 3g. Stable-price strategy — buy NO when YES stubbornly stable after trigger
+                if STABLE_PRICE_ENABLED and not low_balance:
+                    await self._scan_stable_price(mention_markets, now)
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
@@ -2999,6 +3250,7 @@ class KalshiReversionScanner:
         yes_buy_count = self.positions.count('mention_buy_yes')
         theta_count = self.positions.count('ncaa_theta_reentry')
         pol_pct_count = self.positions.count('political_pct_no')
+        stable_count = self.positions.count('stable_price_no')
         fade_count = self.positions.count('ncaab_fade_yes')
         tennis_fade_count = self.positions.count('tennis_fade_yes')
         parts = [f"mention={mention_count}"]
@@ -3006,6 +3258,8 @@ class KalshiReversionScanner:
             parts.append(f"nba_ht={nba_ht_count}")
         if pol_pct_count:
             parts.append(f"pol_pct={pol_pct_count}")
+        if stable_count:
+            parts.append(f"stable={stable_count}")
         if yes_buy_count:
             parts.append(f"yes_buy={yes_buy_count}")
         if degrade_count:
@@ -5477,6 +5731,231 @@ class KalshiReversionScanner:
         except Exception:
             pass
         print(f"    Political taker not filled for {ticker}, canceled")
+        return None
+
+    async def _scan_stable_price(self, mention_markets, now):
+        """Stable-price strategy: buy NO when YES price hasn't moved 5 min
+        after first word in event crossed 98c.
+
+        Taker-only (event is live). $3/bet, category-specific YES range.
+        Backtest: YES 0.10-0.80 combined, Edge=+5.7c, Sharpe=0.128 on test.
+        """
+        sp_count = self.positions.count('stable_price_no')
+        if sp_count >= STABLE_PRICE_MAX_POSITIONS:
+            return
+
+        sp_signals = self.stable_price_detector.detect(mention_markets, self.client, now)
+        if not sp_signals:
+            return
+
+        for sig in sp_signals:
+            ticker = sig['ticker']
+
+            # Global scan-cycle dedup
+            if ticker in self._entered_this_cycle:
+                continue
+
+            # Skip if resting maker order on this ticker
+            if any(info['ticker'] == ticker for info in self._resting_premarket_orders.values()):
+                continue
+
+            # Position cap
+            if sp_count >= STABLE_PRICE_MAX_POSITIONS:
+                break
+
+            # Skip if already holding this ticker (any strategy)
+            if self.positions.has_open_ticker(ticker):
+                continue
+
+            # Per-event cap (includes resting orders; lower for new series)
+            event = sig.get('event_ticker', '')
+            if event:
+                sp_evt_cap = STABLE_PRICE_MAX_EVENT_DOLLARS
+                if self._is_new_series(event):
+                    sp_evt_cap = min(sp_evt_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
+                event_exp = self._total_event_exposure(event, signal_type='stable_price_no')
+                if event_exp >= sp_evt_cap:
+                    continue
+
+            cat = sig.get('category', 'Other')
+            trig_yes = sig.get('trigger_yes_cents', 0)
+            now_yes = sig.get('current_yes_cents', 0)
+            delta = sig.get('price_delta_cents', 0)
+            no_c = sig['no_price_cents']
+            evt_title = sig.get('event_title', '')[:40]
+            print(f"  STABLE: BUY NO @ {no_c}c '{sig['title'][:50]}' "
+                  f"(cat={cat}, YES {now_yes}c, Δ={delta}c, trigger_age={sig.get('trigger_age_seconds', 0)}s, "
+                  f"event='{evt_title}')")
+
+            order_info = None
+            if self.client.can_trade:
+                order_info = self._execute_stable_price_entry(sig)
+
+            if order_info:
+                await self.notifier.send_mention_signal(sig, order_info,
+                    trade_label=f"STABLE-PRICE ({cat}, YES={now_yes}c)")
+                self.positions.add(sig, order_info)
+                self._entered_this_cycle.add(ticker)
+                sp_count += 1
+                # Set cooldown on detector
+                self.stable_price_detector._cooldown[ticker] = now
+
+    def _execute_stable_price_entry(self, sig):
+        """Execute a stable-price BUY NO entry. Taker at the ask.
+        $3/bet, category-specific YES range, per-market cap $3."""
+        ticker = sig['ticker']
+        no_price_cents = sig['no_price_cents']
+
+        orderbook = self.client.get_orderbook(ticker)
+        if not orderbook:
+            print(f"    No orderbook for {ticker}, skipping")
+            return None
+
+        yes_bids_raw = orderbook.get('yes', [])
+        if not isinstance(yes_bids_raw, list):
+            yes_bids_raw = []
+        if not yes_bids_raw:
+            print(f"    No YES bids for {ticker}, skipping")
+            return None
+
+        best_yes_bid = max(b[0] for b in yes_bids_raw)
+        best_no_ask = 100 - best_yes_bid
+
+        # Re-check NO price range at execution time (may have moved since detection)
+        category = sig.get('category', 'Other')
+        yes_min, yes_max = STABLE_PRICE_YES_MIN, STABLE_PRICE_YES_MAX
+        current_yes = 100 - best_no_ask
+        if current_yes < yes_min or current_yes > yes_max:
+            print(f"    YES {current_yes}c outside [{yes_min}-{yes_max}c], skipping")
+            return None
+
+        # Slippage guard: 4c
+        max_slip = 4
+        if best_no_ask > no_price_cents + max_slip:
+            print(f"    Slippage: ask {best_no_ask}c > signal {no_price_cents}c + {max_slip}c, skipping")
+            return None
+
+        # Bet sizing: $3, capped by per-market and per-event
+        bet = STABLE_PRICE_BET_DOLLARS
+
+        # New series cap
+        event = sig.get('event_ticker', '')
+        if self._is_new_series(event):
+            bet = min(bet, PREMARKET_NEW_SERIES_BET)
+
+        # Per-market cap
+        ticker_exp = 0
+        for p in self.positions.positions:
+            if p.get('ticker') == ticker and p.get('status') == 'open':
+                ticker_exp += p.get('bet_dollars', 0)
+        remaining_market = STABLE_PRICE_MAX_MARKET_DOLLARS - ticker_exp
+        if remaining_market <= 0:
+            print(f"    Market cap reached (${ticker_exp:.2f}/${STABLE_PRICE_MAX_MARKET_DOLLARS}), skipping")
+            return None
+        bet = min(bet, remaining_market)
+
+        # Per-event cap
+        if event:
+            sp_evt_cap = STABLE_PRICE_MAX_EVENT_DOLLARS
+            if self._is_new_series(event):
+                sp_evt_cap = min(sp_evt_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
+            event_exp = self._total_event_exposure(event, signal_type='stable_price_no')
+            remaining_event = sp_evt_cap - event_exp
+            if remaining_event <= 0:
+                return None
+            bet = min(bet, remaining_event)
+
+        # Depth within slippage window
+        max_slip_price = no_price_cents + max_slip
+        min_yes_bid = 100 - max_slip_price
+        depth_contracts = sum(qty for bid_p, qty in yes_bids_raw if bid_p >= min_yes_bid)
+        depth_dollars = round(depth_contracts * best_no_ask / 100, 2) if depth_contracts > 0 else 0
+        if depth_dollars > 0 and bet > depth_dollars:
+            bet = depth_dollars
+
+        contracts = int(bet / (best_no_ask / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * best_no_ask / 100, 2)
+
+        order_price = max_slip_price
+        print(f"    Stable taker: {contracts} NO @ {best_no_ask}c (limit {order_price}c) = ${bet_dollars:.2f}")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-STABLE-{uuid.uuid4().hex[:8]}',
+                'fill_price': best_no_ask / 100,
+                'fill_count': contracts,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'stable_price_no',
+                'ticker': ticker, 'side': 'no', 'action': 'buy',
+                'contracts': contracts, 'price_cents': best_no_ask,
+                'bet_dollars': bet_dollars, 'dry_run': True,
+            })
+            print(f"    DRY RUN: {contracts} NO @ {best_no_ask}c (${bet_dollars:.2f})")
+            return order_info
+
+        order = self.client.create_order(
+            ticker=ticker, side='no', action='buy',
+            count=contracts, price_cents=order_price,
+        )
+        if not order:
+            print(f"    Stable order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    Stable taker order placed: {order_id}")
+        log_event('stable_price_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=order_price, bet_dollars=bet_dollars,
+                  category=sig.get('category'), trigger_yes=sig.get('trigger_yes_cents'),
+                  current_yes=sig.get('current_yes_cents'))
+
+        # Check fill
+        time.sleep(2)
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', best_no_ask)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'stable_price_no',
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'no', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': best_no_ask,
+                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                })
+                print(f"    FILLED: {filled}/{contracts} NO @ avg {avg_fill}c (${actual_dollars:.2f})")
+                log_event('stable_price_filled', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
+                          category=sig.get('category'))
+                self._queue_tg("STABLE-PRICE FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                               title=sig.get('title', '')[:60])
+                return info
+
+        # Not filled — cancel
+        try:
+            self.client.cancel_order(order_id)
+        except Exception:
+            pass
+        print(f"    Stable taker not filled for {ticker}, canceled")
         return None
 
     def _execute_mention_entry(self, sig):
