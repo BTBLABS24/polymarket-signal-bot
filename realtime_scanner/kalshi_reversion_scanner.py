@@ -3103,7 +3103,16 @@ class KalshiReversionScanner:
                 info['_recorded_fills'] = partial_fills
 
         self.client.cancel_order(order_id)
-        new_contracts = int(info['bet_dollars'] / (new_price / 100))
+        # Subtract dollars already filled from the budget before rebidding
+        recorded = info.get('_recorded_fills', 0)
+        avg_fill_so_far = info.get('signal', {}).get('no_price_cents', info['price_cents'])
+        filled_dollars = round(recorded * avg_fill_so_far / 100, 2)
+        remaining_budget = max(info['bet_dollars'] - filled_dollars, 0)
+        if remaining_budget < 0.50:
+            print(f"    REBID SKIP: {ticker} budget exhausted (${info['bet_dollars']:.2f} - ${filled_dollars:.2f} filled)")
+            to_remove.append(order_id)
+            return
+        new_contracts = int(remaining_budget / (new_price / 100))
         if new_contracts < 1:
             new_contracts = 1
         new_bet = round(new_contracts * new_price / 100, 2)
@@ -3160,6 +3169,12 @@ class KalshiReversionScanner:
                 min_no_c, max_no_c = get_no_range(ticker)
                 if (min_no_c <= best_no_ask <= max_no_c
                         and best_no_ask <= signal_cents + max_slip):
+                    # Guard: skip taker if we already have a position from partial fills
+                    if self.positions.has_open_ticker(ticker):
+                        print(f"    PREMARKET→TAKER SKIP: {ticker} already has open position from partial fills, cancelling resting only")
+                        self.client.cancel_order(order_id)
+                        to_remove.append(order_id)
+                        continue
                     print(f"    PREMARKET→TAKER: {ticker} ask now {best_no_ask}c (in range), cancelling resting @ {price_cents}c")
                     self.client.cancel_order(order_id)
                     to_remove.append(order_id)
@@ -4180,9 +4195,12 @@ class KalshiReversionScanner:
             if self.positions.has_open_ticker(ticker):
                 continue
 
-            # Per-market cap
+            # Per-market cap — include both open positions AND resting premarket orders
             ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
                              if p.get('ticker') == ticker and p.get('status') == 'open')
+            resting_exp = sum(v.get('bet_dollars', 0) for v in self._resting_premarket_orders.values()
+                              if v.get('ticker') == ticker)
+            ticker_exp += resting_exp
             if ticker_exp >= STALE_MAX_MARKET_DOLLARS:
                 continue
 
