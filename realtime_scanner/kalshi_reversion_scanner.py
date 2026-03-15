@@ -106,19 +106,20 @@ CATEGORY_NO_RANGE = {
     'Fight':    (5, 30),    # +28.2% ROI backtest, small sample
     'Earnings': (15, 50),   # disabled, kept for reference
 }
+GLOBAL_MAX_MARKET_DOLLARS = 10    # HARD CEILING — no single ticker can ever exceed this across ALL strategies
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (events live with 24h close)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
 MENTION_COOLDOWN_SECONDS = 300    # 5 min cooldown per ticker (24h in detector)
 MENTION_SCAN_INTERVAL_SECONDS = 120  # Check for new mention markets every 2 min
 MENTION_MAX_EVENT_DOLLARS = 50    # Max $ per event across all words (resting + filled) — raised for diversification
-MENTION_MAX_MARKET_DOLLARS = 15   # Hard cap $ per individual market/ticker (supports tier 1 $15 bets)
+MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker (capped by GLOBAL_MAX_MARKET_DOLLARS)
 # Pre-event resting orders — fade retail on wide-spread mention markets
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
 PREMARKET_BET_DOLLARS = 10         # $ per resting maker order — no slippage on limits
-PREMARKET_MAX_MARKET_DOLLARS = 15  # Hard cap $ per market for maker orders (matches taker cap)
+PREMARKET_MAX_MARKET_DOLLARS = 10  # Hard cap $ per market for maker orders (capped by GLOBAL_MAX_MARKET_DOLLARS)
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
 PREMARKET_NEW_SERIES_MIN = 3      # Min resolved events in series before full sizing
@@ -258,43 +259,41 @@ MENTION_SCAN_SERIES = [
     # Removed: KXROGANMENTION, KXCOOPERMENTION (no backtest data, cut for variance)
 ]
 
-# --- NBA Word Blacklist ---
-# Words with <15% NO win rate — almost always said, losing bet at any price.
-# Ticker suffix -> matched against last segment of ticker (e.g. KXNBAMENTION-...-ROOK)
-NBA_WORD_BLACKLIST = {'ROOK', 'INJU', 'CROW', 'ALL', 'ELBO', 'PLAY', 'TECH'}  # <50% NO WR: Rookie 3%, Injury 4%, Crowd 11%, All-Star 13%, Elbow 24%, Playoff 47%, Technical ~always said
-
-# --- NBA Arena/Venue Blacklist ---
-# Arena names, sponsors, venue words. Announcers almost always name the arena.
-# Aggregate ~30% NO WR — unprofitable noise.
-NBA_ARENA_BLACKLIST = {
+# --- NBA Master Blacklist ---
+# ONE list checked FIRST in every code path. These words NEVER trade, no exceptions.
+# Combines arena/venue names + words almost always said + known losers.
+NBA_BLACKLIST = {
+    # Words almost always said / unprofitable (<50% NO WR)
+    'ROOK', 'INJU', 'CROW', 'ALL', 'ELBO', 'PLAY', 'TECH',
+    'MVP', 'AIR', 'ANKL', 'BUZZ', 'DOUB',  # Losers in live trading
+    # Arena/venue/sponsor names (~30% NO WR)
     'MSG', 'TD', 'XFIN', 'SPEC', 'MODA', 'TARG', 'PAYC', 'INTU', 'TOYO',
     'KIA', 'AMER', 'CHAS', 'CRYP', 'ROCK', 'FROS', 'FEDE', 'LITT', 'BALL',
     'CAPI', 'GOLD', 'FISE', 'SCOT', 'DELT', 'STAT', 'GAIN', 'KASE',
-    'CENT', 'AREN', 'STAD',  # Generic venue words: Center, Arena, Stadium
+    'UNIT', 'BARC', 'SMOO', 'MORT', 'TMOB', 'FOOT',
+    'CENT', 'AREN', 'STAD',  # Generic venue words
 }
+# Legacy aliases — referenced in multiple code paths
+NBA_WORD_BLACKLIST = NBA_BLACKLIST
+NBA_ARENA_BLACKLIST = NBA_BLACKLIST
 
-# --- NCAAB Word Blacklist ---
-# Words with <20% NO win rate — almost always said, losing bet at any price.
-# Freshman 0% NO WR (33 trades), Safety 3% (32 trades), Transfer 17% (76 trades)
-NCAAB_WORD_BLACKLIST = {'FRES', 'SAFE', 'TRAN', 'OVER', 'AIRB', 'SCHE', 'ELBO', 'DRAF', 'RECO', 'MARC'}  # <45% NO WR
-
-# --- NCAAB Arena/Venue Blacklist ---
-# Arena names for college basketball. Announcers almost always name the venue.
-# Aggregate ~24% NO WR — unprofitable.
-NCAAB_ARENA_BLACKLIST = {
+# --- NCAAB Master Blacklist ---
+# ONE list checked FIRST in every code path. These words NEVER trade, no exceptions.
+NCAAB_BLACKLIST = {
+    # Words almost always said / unprofitable (<45% NO WR)
+    'FRES', 'SAFE', 'TRAN', 'OVER', 'AIRB', 'SCHE', 'ELBO', 'DRAF', 'RECO', 'MARC',
+    'DOUB', 'ANKL',  # Losers in live trading
+    # Arena/venue names (~24% NO WR)
     'MCKA', 'STEP', 'PINN', 'BRES', 'MACK', 'GALE', 'RUPP', 'HILT', 'KOHL',
     'ALLEN', 'COLE', 'SAND', 'CAPI', 'MEMO', 'UNIT', 'MSG', 'STAT', 'STEG',
     'NEVI', 'CRIS', 'MARR', 'WELS', 'LENO', 'CARV', 'MIZZ', 'DESE', 'CAME',
-    'BUD', 'FERT', 'MILL', 'PAUL',  # Pauley Pavilion (UCLA)
-    'PURC',  # Purcell Pavilion (Notre Dame)
-    'SIMO',  # Simon Skjodt Assembly Hall (Indiana)
-    'SMIT',  # Dean Smith Center (UNC)
-    'FOOD',  # Food sponsor venue names
-    'ALKE',  # Ahearn Field House / venue word
-    'PEOP',  # Peoples Bank Arena / venue word
-    'VALU',  # Value City Arena (Ohio State)
-    'CENT', 'AREN', 'STAD',  # Generic venue words: Center, Arena, Stadium
+    'BUD', 'FERT', 'MILL', 'PAUL', 'PURC', 'SIMO', 'SMIT', 'FOOD', 'ALKE',
+    'PEOP', 'VALU',
+    'CENT', 'AREN', 'STAD',  # Generic venue words
 }
+# Legacy aliases
+NCAAB_WORD_BLACKLIST = NCAAB_BLACKLIST
+NCAAB_ARENA_BLACKLIST = NCAAB_BLACKLIST
 
 # --- NBA YES Buy Strategy ---
 # Buy YES on words that are almost always said. Entry: pre-game to 30min into game.
@@ -325,13 +324,11 @@ NBA_HALFTIME_MIN_HOURS_LIVE = 1.3  # ~halftime (50% of game ≈ 1.3h after tipof
 NBA_HALFTIME_MAX_HOURS_LIVE = 3.0  # don't enter too late (game over)
 # High-confidence words only (train WR ≥ 65% AND EV ≥ 10c on corrected data)
 NBA_HALFTIME_WORD_ALLOWLIST = {
-    'ANKL',   # Ankle — 78% WR test, +22.6c EV
     'ALLE',   # Alley-oop — 70% WR test, +14.7c EV
-    'BUZZ',   # Buzzer — 75% WR test, +12.8c EV
     'TRIP',   # Triple Double — 60% WR test, +5.6c EV
-    'AIR',    # Airball — 83% WR test, +23.3c EV
     'DRAF',   # Draft — 56% WR test, +0.0c EV (strong on train: 73% WR)
     'RETI',   # Retire/Retirement — 100%/83% WR test
+    # REMOVED: ANKL, BUZZ, AIR — now in NBA_BLACKLIST (losers in live trading)
 }
 
 # --- NCAAB Halftime NO Strategy ---
@@ -348,12 +345,11 @@ NCAAB_HALFTIME_MAX_NO_CENTS = 70   # max NO price
 NCAAB_HALFTIME_MIN_HOURS_LIVE = 0.75  # ~halftime (NCAAB halves are 20min)
 NCAAB_HALFTIME_MAX_HOURS_LIVE = 2.5   # game over ~2h
 NCAAB_HALFTIME_WORD_ALLOWLIST = {
-    'ANKL',   # Ankle — 72% train, 67% test WR
     'ALLE',   # Alley-oop — 86% train WR
     'WALK',   # Walk On — 58% train, 83% test WR
-    'DOUB',   # Double Double — 61% train, 50% test WR
     'NIL',    # NIL — 67% train WR
     'RECR',   # Recruit — 67% train, 57% test WR
+    # REMOVED: ANKL, DOUB — now in NCAAB_BLACKLIST (losers in live trading)
 }
 
 # --- Degradation Curve Strategy (NBA only, layered on top of mention) ---
@@ -1266,24 +1262,18 @@ class MentionBuyNoDetector:
 
             # Word blacklist — skip words almost always said
             word_suffix = ticker.split('-')[-1].upper()
+            # Master blacklist — checked FIRST, overrides everything (including allowlists)
+            if is_nba and word_suffix in NBA_BLACKLIST:
+                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                continue
+            if is_ncaa and word_suffix in NCAAB_BLACKLIST:
+                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
+                continue
+            # NBA halftime allowlist (only matters for words NOT in master blacklist)
             if is_nba and NBA_HALFTIME_ENABLED:
-                # NBA halftime strategy: ALLOWLIST approach — only high-conf words
                 if word_suffix not in NBA_HALFTIME_WORD_ALLOWLIST:
                     cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                     continue
-            elif is_nba:
-                if word_suffix in NBA_WORD_BLACKLIST:
-                    cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
-                    continue
-                if word_suffix in NBA_ARENA_BLACKLIST:
-                    cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
-                    continue
-            if is_ncaa and word_suffix in NCAAB_WORD_BLACKLIST:
-                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
-                continue
-            if is_ncaa and word_suffix in NCAAB_ARENA_BLACKLIST:
-                cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
-                continue
             if word_suffix in EARNINGS_WORD_BLACKLIST:
                 cat_debug[_cat]['blacklist'] = cat_debug[_cat].get('blacklist', 0) + 1
                 continue
@@ -2851,6 +2841,15 @@ class KalshiReversionScanner:
         )
         return pos_exp + resting_exp
 
+    def _global_ticker_exposure(self, ticker):
+        """Total $ exposure on a single ticker across ALL strategies and resting orders.
+        Used to enforce GLOBAL_MAX_MARKET_DOLLARS — the hard ceiling."""
+        exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
+                  if p.get('ticker') == ticker and p.get('status') == 'open')
+        exp += sum(info.get('bet_dollars', 0) for info in self._resting_premarket_orders.values()
+                   if info.get('ticker') == ticker)
+        return exp
+
     async def run(self):
         mode = "DRY RUN" if DRY_RUN else "LIVE"
         print("=" * 60)
@@ -3282,7 +3281,7 @@ class KalshiReversionScanner:
         # Diagnostic Telegram: send scan summary every 30 min so we can debug without Railway logs
         if not hasattr(self, '_last_diag_tg'):
             self._last_diag_tg = 0
-        if now - self._last_diag_tg >= 300:  # every 5 min while debugging (revert to 1800 later)
+        if now - self._last_diag_tg >= 1800:  # every 30 min
             self._last_diag_tg = now
             bal = self.client.get_balance() if self.client.can_trade else None
             bal_str = f"${bal/100:.2f}" if bal is not None else "N/A"
@@ -4077,7 +4076,7 @@ class KalshiReversionScanner:
                 continue  # already cached
 
             word = ticker.split('-')[-1].upper()
-            if word in NCAAB_WORD_BLACKLIST or word in NCAAB_ARENA_BLACKLIST:
+            if word in NCAAB_BLACKLIST:
                 continue
 
             event_ticker = m.get('event_ticker', '')
@@ -4122,7 +4121,7 @@ class KalshiReversionScanner:
                 continue
 
             word = ticker.split('-')[-1].upper()
-            if word in NCAAB_WORD_BLACKLIST or word in NCAAB_ARENA_BLACKLIST:
+            if word in NCAAB_BLACKLIST:
                 continue
 
             event_ticker = m.get('event_ticker', '')
@@ -4390,11 +4389,11 @@ class KalshiReversionScanner:
             is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
             is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
 
-            # Word blacklist check (NBA/NCAAB only)
+            # Master blacklist check (NBA/NCAAB)
             word = ticker.split('-')[-1].upper()
-            if is_nba and (word in NBA_WORD_BLACKLIST or word in NBA_ARENA_BLACKLIST):
+            if is_nba and word in NBA_BLACKLIST:
                 continue
-            if is_ncaa and (word in NCAAB_WORD_BLACKLIST or word in NCAAB_ARENA_BLACKLIST):
+            if is_ncaa and word in NCAAB_BLACKLIST:
                 continue
 
             ms = milestones.get(event_ticker)
@@ -4450,12 +4449,8 @@ class KalshiReversionScanner:
                 continue
 
             # Per-market cap — include both open positions AND resting premarket orders
-            ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
-                             if p.get('ticker') == ticker and p.get('status') == 'open')
-            resting_exp = sum(v.get('bet_dollars', 0) for v in self._resting_premarket_orders.values()
-                              if v.get('ticker') == ticker)
-            ticker_exp += resting_exp
-            if ticker_exp >= STALE_MAX_MARKET_DOLLARS:
+            ticker_exp = self._global_ticker_exposure(ticker)
+            if ticker_exp >= min(STALE_MAX_MARKET_DOLLARS, GLOBAL_MAX_MARKET_DOLLARS):
                 continue
 
             # Fetch orderbook
@@ -4493,15 +4488,17 @@ class KalshiReversionScanner:
                 continue
 
             # Stale order found! Buy at exactly this price (no slippage).
-            # Cap to available quantity and $10
-            max_contracts = min(cheapest_qty, int(STALE_BET_DOLLARS / (cheapest_no / 100)))
+            # Cap to available quantity, strategy cap, and global cap
+            remaining_global = GLOBAL_MAX_MARKET_DOLLARS - ticker_exp
+            stale_cap = min(STALE_BET_DOLLARS, remaining_global)
+            max_contracts = min(cheapest_qty, int(stale_cap / (cheapest_no / 100)))
             if max_contracts < 1:
                 max_contracts = 1
             # Only buy what's at the stale level
             contracts = min(max_contracts, cheapest_qty)
             bet_dollars = round(contracts * cheapest_no / 100, 2)
-            if bet_dollars > STALE_BET_DOLLARS:
-                contracts = int(STALE_BET_DOLLARS / (cheapest_no / 100))
+            if bet_dollars > stale_cap:
+                contracts = int(stale_cap / (cheapest_no / 100))
                 bet_dollars = round(contracts * cheapest_no / 100, 2)
             if contracts < 1:
                 continue
@@ -4883,6 +4880,12 @@ class KalshiReversionScanner:
         trigger_c = NCAAB_FADE_TRIGGER_CENTS
         series = sig.get('series', '')
         bet_dollars = NCAAB_FADE_BET_BY_SERIES.get(series, NCAAB_FADE_BET_DOLLARS)
+
+        # Global per-market hard ceiling
+        global_exp = self._global_ticker_exposure(ticker)
+        if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
+            print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping {ticker}")
+            return None
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
@@ -5367,6 +5370,12 @@ class KalshiReversionScanner:
         no_price_cents = sig['no_price_cents']
         event_start_ts = sig.get('event_start_ts')
 
+        # Global per-market hard ceiling
+        global_exp = self._global_ticker_exposure(ticker)
+        if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
+            print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping maker {ticker}")
+            return None
+
         # Skip if we already have a resting order on this ticker
         for info in self._resting_premarket_orders.values():
             if info['ticker'] == ticker:
@@ -5425,17 +5434,14 @@ class KalshiReversionScanner:
             if resolved < PREMARKET_NEW_SERIES_MIN:
                 mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
 
-        # NBA halftime uses tighter per-market cap even for maker orders
+        # NBA halftime uses tighter per-market cap even for maker orders (also capped by global)
         is_nba_maker = 'NBAMENTION' in ticker.upper() or 'NBAFINALS' in ticker.upper()
         maker_market_cap = NBA_HALFTIME_MAX_MARKET_DOLLARS if (is_nba_maker and NBA_HALFTIME_ENABLED) else PREMARKET_MAX_MARKET_DOLLARS
+        maker_market_cap = min(maker_market_cap, GLOBAL_MAX_MARKET_DOLLARS)
         mention_bet = min(mention_bet, maker_market_cap)
 
         # Per-market exposure check (includes resting maker orders)
-        ticker_exp = sum(p.get('bet_dollars', 0) for p in self.positions.positions
-                         if p.get('ticker') == ticker and p.get('status') == 'open')
-        for info in self._resting_premarket_orders.values():
-            if info.get('ticker') == ticker:
-                ticker_exp += info.get('bet_dollars', 0)
+        ticker_exp = self._global_ticker_exposure(ticker)
         remaining_market_cap = maker_market_cap - ticker_exp
         if remaining_market_cap <= 0:
             return None
@@ -5586,6 +5592,12 @@ class KalshiReversionScanner:
         $5/bet, NO 5-70c, per-market cap $5."""
         ticker = sig['ticker']
         no_price_cents = sig['no_price_cents']
+
+        # Global per-market hard ceiling
+        global_exp = self._global_ticker_exposure(ticker)
+        if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
+            print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping {ticker}")
+            return None
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
@@ -5806,6 +5818,12 @@ class KalshiReversionScanner:
         ticker = sig['ticker']
         no_price_cents = sig['no_price_cents']
 
+        # Global per-market hard ceiling
+        global_exp = self._global_ticker_exposure(ticker)
+        if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
+            print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping {ticker}")
+            return None
+
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
             print(f"    No orderbook for {ticker}, skipping")
@@ -5964,20 +5982,20 @@ class KalshiReversionScanner:
         ticker = sig['ticker']
         no_price_cents = sig['no_price_cents']
 
+        # Global per-market hard ceiling — no ticker can exceed this across all strategies
+        global_exp = self._global_ticker_exposure(ticker)
+        if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
+            print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping {ticker}")
+            return None
+
         # Word blacklist — skip words that are almost always said (<20% NO win rate)
         ticker_upper = ticker.upper()
         word_suffix = ticker.split('-')[-1].upper()
-        if ('NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper) and word_suffix in NBA_WORD_BLACKLIST:
+        if ('NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper) and word_suffix in NBA_BLACKLIST:
             print(f"    Blacklisted NBA word: {word_suffix} ({ticker}), skipping")
             return None
-        if ('NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper) and word_suffix in NBA_ARENA_BLACKLIST:
-            print(f"    Blacklisted NBA arena: {word_suffix} ({ticker}), skipping")
-            return None
-        if ('NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper) and word_suffix in NCAAB_WORD_BLACKLIST:
+        if ('NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper) and word_suffix in NCAAB_BLACKLIST:
             print(f"    Blacklisted NCAAB word: {word_suffix} ({ticker}), skipping")
-            return None
-        if ('NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper) and word_suffix in NCAAB_ARENA_BLACKLIST:
-            print(f"    Blacklisted NCAAB arena: {word_suffix} ({ticker}), skipping")
             return None
         if word_suffix in EARNINGS_WORD_BLACKLIST:
             print(f"    Blacklisted always-said word: {word_suffix} ({ticker}), skipping")
@@ -6189,18 +6207,13 @@ class KalshiReversionScanner:
                 mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
                 print(f"    New series {series} ({resolved} resolved < {PREMARKET_NEW_SERIES_MIN}), capping at ${PREMARKET_NEW_SERIES_BET}")
 
-        # Per-market hard cap
+        # Per-market hard cap (strategy-specific AND global)
         market_cap = NBA_HALFTIME_MAX_MARKET_DOLLARS if (is_nba and NBA_HALFTIME_ENABLED) else MENTION_MAX_MARKET_DOLLARS
+        market_cap = min(market_cap, GLOBAL_MAX_MARKET_DOLLARS)
         mention_bet = min(mention_bet, market_cap)
 
         # Per-market exposure check (includes resting maker orders)
-        ticker_exp = 0
-        for p in self.positions.positions:
-            if p.get('ticker') == ticker and p.get('status') == 'open':
-                ticker_exp += p.get('bet_dollars', 0)
-        for info in self._resting_premarket_orders.values():
-            if info.get('ticker') == ticker:
-                ticker_exp += info.get('bet_dollars', 0)
+        ticker_exp = self._global_ticker_exposure(ticker)
         remaining_market_cap = market_cap - ticker_exp
         if remaining_market_cap <= 0:
             print(f"    Market cap reached (${ticker_exp:.2f}/${market_cap} incl resting), skipping")
