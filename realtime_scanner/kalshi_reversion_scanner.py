@@ -3406,6 +3406,20 @@ class KalshiReversionScanner:
             contracts = info['contracts']
             category = info['category']
 
+            # Cancel resting orders on blacklisted words (catches pre-deploy orders)
+            word_suffix = ticker.split('-')[-1].upper()
+            ticker_upper = ticker.upper()
+            is_nba = 'NBAMENTION' in ticker_upper or 'NBAFINALS' in ticker_upper
+            is_ncaa = 'NCAAMENTION' in ticker_upper or 'NCAABMENTION' in ticker_upper
+            if (is_nba and word_suffix in NBA_BLACKLIST) or (is_ncaa and word_suffix in NCAAB_BLACKLIST):
+                print(f"    CANCEL BLACKLISTED RESTING: {word_suffix} ({ticker}), cancelling order {order_id}")
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception as e:
+                    print(f"    Cancel failed: {e}")
+                to_remove.append(order_id)
+                continue
+
             # Fetch orderbook — used for taker retry, spread check, outbid
             ob = self.client.get_orderbook(ticker)
             if ob:
