@@ -57,7 +57,7 @@ KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 SCAN_INTERVAL_SECONDS = 300  # 5 min
 # Trading config
 DRY_RUN = False
-MAX_BET_DOLLARS = 15          # Max per signal
+MAX_BET_DOLLARS = 10          # Max per signal (matches GLOBAL_MAX_MARKET_DOLLARS)
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
 ORDER_WAIT_SECONDS = 5        # Wait for fill after placing order
@@ -75,10 +75,10 @@ MENTION_BET_NCAA = 1               # $1 for NCAAB/NCAA (-34% clean ROI, -25% act
 MENTION_BET_OTHER = 3              # $3 for "other" categories
 # Per-category overrides — 21-day actual + clean-trade ROI (2026-02-18 to 2026-03-11)
 CATEGORY_BET_OVERRIDE = {
-    # Tier 1: best clean ROI, sized up to $15
-    'HEGSETH':      15,   # +224% actual, +141% clean, 50% WR (16 clean trades)
-    'LASTWORD':     15,   # +98% actual, +131% clean, 40% WR (10 clean)
-    'Newsom':       15,   # +228% clean, 57% WR — overall -47% was oversized bug trades
+    # Tier 1: best clean ROI (capped at $10 global max)
+    'HEGSETH':      10,   # +224% actual, +141% clean, 50% WR (16 clean trades)
+    'LASTWORD':     10,   # +98% actual, +131% clean, 40% WR (10 clean)
+    'Newsom':       10,   # +228% clean, 57% WR — overall -47% was oversized bug trades
     # Tier 2: solid edge, $10
     'FOXNEWS':      10,   # +87% clean, 47% WR (17 clean) — overall -24% was bug trades
     'THEWEEKNIGHT': 10,   # +115% clean, 44% WR (9 clean)
@@ -387,7 +387,7 @@ EARNINGS_BET_DOLLARS = 2         # $2/bet — clean trades -43% ROI (21d), reduc
 EARNINGS_MIN_NO_PRICE = 0.15     # 15c (was 5c — cheap NOs are -62% ROI losers)
 EARNINGS_MAX_NO_PRICE = 0.50     # 50c (was 30c — 15-50c is +20.4% ROI, $0.31/d)
 EARNINGS_MAX_POSITIONS = 20      # independent cap
-EARNINGS_MAX_EVENT_DOLLARS = 30  # $30 per earnings call
+EARNINGS_MAX_EVENT_DOLLARS = 10  # $10 per earnings call (capped at global max)
 # Entry window: any time pre-event (maker rests until event start)
 # 0-4h: +13.5% ROI (896 mkts), 0-24h: +31.9% (1163 mkts)
 EARNINGS_WINDOW_HOURS_BEFORE = 720  # effectively unlimited — maker rests pre-event
@@ -433,16 +433,16 @@ THETA_REENTRY_MAX_POSITIONS = 20    # independent cap
 # Backtest (men): vel>=0.015, drop>=0.25, trigger @45c → 65% WR, +43% ROI (30d, $20/bet).
 # Backtest (women): same params → 70% WR, +75% ROI (6d sample, $15/bet).
 NCAAB_FADE_ENABLED = True
-NCAAB_FADE_BET_DOLLARS = 30           # $30 per trade (men's default)
+NCAAB_FADE_BET_DOLLARS = 10           # $10 per trade (capped at global max)
 NCAAB_FADE_TRIGGER_CENTS = 45        # Buy YES at this price (limit order)
 NCAAB_FADE_MIN_PREGAME_YES = 55      # Min pregame YES price (cents) — must be a favorite
 NCAAB_FADE_MIN_DROP_SIZE = 25        # Min drop in cents (pregame - trigger)
 NCAAB_FADE_MIN_VELOCITY = 1.5         # Min price drop velocity (cents/min). Backtest: 0.015 in dollars/min = 1.5c/min
 NCAAB_FADE_MAX_MINUTES = 50          # Only enter within first 50 min of game
 NCAAB_FADE_MAX_POSITIONS = 10        # Independent position cap
-NCAAB_FADE_MAX_MARKET_DOLLARS = 30   # Per-market cap (one bet per market)
+NCAAB_FADE_MAX_MARKET_DOLLARS = 10   # Per-market cap (capped at global max)
 NCAAB_FADE_SERIES = ['KXNCAAMBGAME', 'KXNCAAWBGAME']  # Men's + Women's
-NCAAB_FADE_BET_BY_SERIES = {'KXNCAAMBGAME': 30, 'KXNCAAWBGAME': 5}  # Per-series bet sizing
+NCAAB_FADE_BET_BY_SERIES = {'KXNCAAMBGAME': 10, 'KXNCAAWBGAME': 5}  # Per-series bet sizing (men capped at $10)
 NCAAB_FADE_GAME_DURATION_HOURS = 2.5 # Approximate game duration
 
 # --- Tennis Match Outcome Fade Strategy ---
@@ -452,7 +452,7 @@ TENNIS_FADE_ENABLED = True
 TENNIS_FADE_SERIES = ['KXATPMATCH', 'KXWTAMATCH']  # ATP + WTA
 TENNIS_FADE_MATCH_DURATION_HOURS = 2.0  # Best-of-3 estimate
 TENNIS_FADE_MAX_POSITIONS = 20        # Independent position cap
-TENNIS_FADE_BET_DOLLARS = 15          # $15 per trade
+TENNIS_FADE_BET_DOLLARS = 10          # $10 per trade (capped at global max)
 TENNIS_FADE_TRIGGER_CENTS = 50        # Buy YES at <=50c
 TENNIS_FADE_MIN_PREGAME_YES = 60      # Pregame YES >= 60c
 TENNIS_FADE_MAX_MINUTES = 45          # First 45 min only
