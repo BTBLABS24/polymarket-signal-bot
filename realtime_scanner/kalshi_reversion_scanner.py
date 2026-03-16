@@ -3420,6 +3420,17 @@ class KalshiReversionScanner:
                 to_remove.append(order_id)
                 continue
 
+            # Cancel resting orders where ticker already exceeds global cap
+            global_exp = self._global_ticker_exposure(ticker)
+            if global_exp > GLOBAL_MAX_MARKET_DOLLARS:
+                print(f"    CANCEL OVER-CAP RESTING: {ticker} exposure ${global_exp:.2f} > ${GLOBAL_MAX_MARKET_DOLLARS}, cancelling {order_id}")
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception as e:
+                    print(f"    Cancel failed: {e}")
+                to_remove.append(order_id)
+                continue
+
             # Fetch orderbook — used for taker retry, spread check, outbid
             ob = self.client.get_orderbook(ticker)
             if ob:
