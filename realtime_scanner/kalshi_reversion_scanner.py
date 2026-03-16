@@ -3431,6 +3431,18 @@ class KalshiReversionScanner:
                 to_remove.append(order_id)
                 continue
 
+            # Cancel resting orders once the event has started (belt-and-suspenders
+            # with Kalshi's expiration_ts, which may be None if milestone was missing)
+            event_start = info.get('signal', {}).get('event_start_ts')
+            if event_start and time.time() >= event_start:
+                print(f"    CANCEL EVENT-STARTED RESTING: {ticker} event started, cancelling {order_id}")
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception as e:
+                    print(f"    Cancel failed: {e}")
+                to_remove.append(order_id)
+                continue
+
             # Fetch orderbook — used for taker retry, spread check, outbid
             ob = self.client.get_orderbook(ticker)
             if ob:
@@ -5394,6 +5406,11 @@ class KalshiReversionScanner:
         ticker = sig['ticker']
         no_price_cents = sig['no_price_cents']
         event_start_ts = sig.get('event_start_ts')
+
+        # Require event_start_ts — without it, the order has no auto-cancel
+        if not event_start_ts:
+            print(f"    Maker skip: no event_start_ts for {ticker}, order would never auto-cancel")
+            return None
 
         # Global per-market hard ceiling
         global_exp = self._global_ticker_exposure(ticker)
