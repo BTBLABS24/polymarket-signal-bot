@@ -265,7 +265,7 @@ MENTION_SCAN_SERIES = [
 NBA_BLACKLIST = {
     # Words almost always said / unprofitable (<50% NO WR)
     'ROOK', 'INJU', 'CROW', 'ALL', 'ELBO', 'PLAY', 'TECH',
-    'MVP', 'AIR', 'ANKL', 'BUZZ', 'DOUB',  # Losers in live trading
+    'MVP', 'AIR', 'ANKL', 'BUZZ', 'DOUB', 'TRIP',  # Losers in live trading
     # Arena/venue/sponsor names (~30% NO WR)
     'MSG', 'TD', 'XFIN', 'SPEC', 'MODA', 'TARG', 'PAYC', 'INTU', 'TOYO',
     'KIA', 'AMER', 'CHAS', 'CRYP', 'ROCK', 'FROS', 'FEDE', 'LITT', 'BALL',
@@ -325,8 +325,8 @@ NBA_HALFTIME_MAX_HOURS_LIVE = 3.0  # don't enter too late (game over)
 # High-confidence words only (train WR ≥ 65% AND EV ≥ 10c on corrected data)
 NBA_HALFTIME_WORD_ALLOWLIST = {
     'ALLE',   # Alley-oop — 70% WR test, +14.7c EV
-    'TRIP',   # Triple Double — 60% WR test, +5.6c EV
     'DRAF',   # Draft — 56% WR test, +0.0c EV (strong on train: 73% WR)
+    # REMOVED: TRIP — now in NBA_BLACKLIST (Triple Double lost $20 in live trading)
     'RETI',   # Retire/Retirement — 100%/83% WR test
     # REMOVED: ANKL, BUZZ, AIR — now in NBA_BLACKLIST (losers in live trading)
 }
@@ -3742,6 +3742,12 @@ class KalshiReversionScanner:
         ticker = sig['ticker']
         max_buy_cents = sig['max_buy_cents']
 
+        # Global per-ticker cap
+        global_exp = self._global_ticker_exposure(ticker)
+        if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
+            print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping {ticker}")
+            return None
+
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
             print(f"    DEGRADE: no orderbook for {ticker}, skipping")
@@ -3985,6 +3991,12 @@ class KalshiReversionScanner:
         at the ask, capped at max_yes_cents from NBA_YES_BUY_WORDS."""
         ticker = sig['ticker']
         max_yes_c = sig['max_yes_cents']
+
+        # Global per-ticker cap
+        global_exp = self._global_ticker_exposure(ticker)
+        if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
+            print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping {ticker}")
+            return None
 
         orderbook = self.client.get_orderbook(ticker)
         if not orderbook:
@@ -4562,6 +4574,15 @@ class KalshiReversionScanner:
                     'is_live': True,
                     'stale_gap': gap,
                     'stale_next_no': next_no,
+                    # Required by positions.add()
+                    'signal_time': time.time(),
+                    'fade_action': 'BUY',
+                    'fade_side': 'no',
+                    'entry_price': cheapest_no / 100,
+                    'pre_signal_price': cheapest_no / 100,
+                    'price_move': 0,
+                    'n_small_trades': 0,
+                    'retail_contracts': 0,
                 }
                 self.positions.add(sig, order_info)
                 stale_count += 1
@@ -4609,6 +4630,15 @@ class KalshiReversionScanner:
                         'is_live': True,
                         'stale_gap': gap,
                         'stale_next_no': next_no,
+                        # Required by positions.add()
+                        'signal_time': time.time(),
+                        'fade_action': 'BUY',
+                        'fade_side': 'no',
+                        'entry_price': avg_fill / 100,
+                        'pre_signal_price': cheapest_no / 100,
+                        'price_move': 0,
+                        'n_small_trades': 0,
+                        'retail_contracts': 0,
                     }
                     info = {
                         'order_id': order_id,
