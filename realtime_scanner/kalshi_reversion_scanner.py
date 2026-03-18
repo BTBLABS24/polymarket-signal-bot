@@ -202,6 +202,16 @@ CATEGORY_KILL_LIST = {
     'KXHOCHULMENTION',        # Hochul: -90% ROI actual (1W/9L, 10% WR)
     'KXPSAKIMENTION',         # PSAKI: -49% ROI actual (5W/11L, 17% clean WR)
 }
+# Substring blocklist — any series whose ticker CONTAINS one of these is killed.
+# Catches new series variants (e.g. KXWBCBCST, KXWBCANNOUNCER, KXMLBBCST, etc.)
+SERIES_BLOCK_SUBSTRINGS = {'WBC', 'MLB', 'BASEBALL'}
+
+def _is_killed_series(series):
+    """Check if a series should be killed — exact match OR substring match."""
+    if series in CATEGORY_KILL_LIST:
+        return True
+    series_upper = series.upper()
+    return any(sub in series_upper for sub in SERIES_BLOCK_SUBSTRINGS)
 
 # --- Stable-Price NO Strategy ---
 # Backtest: when a word crosses 98c YES (trigger), snapshot all siblings.
@@ -1242,8 +1252,8 @@ class MentionBuyNoDetector:
             if series in PRERECORDED_SERIES:
                 debug_counts['prerecorded'] = debug_counts.get('prerecorded', 0) + 1
                 continue
-            # Kill categories with <10% actual WR — net losers
-            if series in CATEGORY_KILL_LIST:
+            # Kill categories with <10% actual WR — net losers (exact + substring)
+            if _is_killed_series(series):
                 debug_counts['killed_category'] = debug_counts.get('killed_category', 0) + 1
                 continue
             # Active series allowlist — skip anything not in the list
@@ -1605,9 +1615,9 @@ class PoliticalPctDetector:
             # Must be a mention market
             if 'MENTION' not in ticker.upper() and 'MENTION' not in event_ticker.upper():
                 continue
-            # Skip killed categories
+            # Skip killed categories (exact + substring)
             series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
-            if series in CATEGORY_KILL_LIST:
+            if _is_killed_series(series):
                 continue
             events.setdefault(event_ticker, []).append(m)
 
@@ -1781,9 +1791,9 @@ class StablePriceDetector:
             et = m.get('event_ticker', '')
             if not et or 'MENTION' not in et.upper():
                 continue
-            # Skip killed / prerecorded series
+            # Skip killed / prerecorded series (exact + substring)
             series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', et)
-            if series in CATEGORY_KILL_LIST or series in PRERECORDED_SERIES:
+            if _is_killed_series(series) or series in PRERECORDED_SERIES:
                 continue
             events.setdefault(et, []).append(m)
 
@@ -3711,7 +3721,15 @@ class KalshiReversionScanner:
                 'hours_live': round(hours_live, 2),
                 'hh_bucket': hh_key,
                 'signal_type': 'degrade_buy_no',
-                'signal_time': datetime.now(timezone.utc).isoformat(),
+                'signal_time': time.time(),
+                # Required by positions.add()
+                'fade_action': 'BUY',
+                'fade_side': 'no',
+                'entry_price': no_price_cents / 100,
+                'pre_signal_price': no_price_cents / 100,
+                'price_move': 0,
+                'n_small_trades': 0,
+                'retail_contracts': 0,
             })
 
         active_skips = {k: v for k, v in skip_reasons.items() if v > 0}
@@ -3962,7 +3980,15 @@ class KalshiReversionScanner:
                 'word': word,
                 'hours_to_event': round(hours_to_event, 2),
                 'signal_type': 'mention_buy_yes',
-                'signal_time': datetime.now(timezone.utc).isoformat(),
+                'signal_time': time.time(),
+                # Required by positions.add()
+                'fade_action': 'BUY',
+                'fade_side': 'yes',
+                'entry_price': yes_price,
+                'pre_signal_price': yes_price,
+                'price_move': 0,
+                'n_small_trades': 0,
+                'retail_contracts': 0,
             })
 
         active_skips = {k: v for k, v in skip_reasons.items() if v > 0}
@@ -4431,7 +4457,7 @@ class KalshiReversionScanner:
             # Skip killed categories and pre-recorded shows
             event_ticker = m.get('event_ticker', '')
             series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
-            if series in CATEGORY_KILL_LIST or series in PRERECORDED_SERIES:
+            if _is_killed_series(series) or series in PRERECORDED_SERIES:
                 continue
 
             # Detect category for blacklists and labeling
