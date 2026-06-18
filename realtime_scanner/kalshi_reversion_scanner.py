@@ -1090,25 +1090,34 @@ class KalshiClient:
         if MAKER_ONLY and action == 'buy' and not maker:
             print(f"  MAKER_ONLY: blocked taker buy {ticker} {count}@{price_cents}c (maker-only mode)")
             return None
-        path = '/trade-api/v2/portfolio/orders'
+        # V2 create-order endpoint. The legacy POST /portfolio/orders now
+        # returns HTTP 410 (deprecated_v1_order_endpoint). The v2 endpoint uses
+        # a YES-centric single book: side is 'bid' (buy YES) or 'ask' (sell YES),
+        # selling YES is economically buying NO at 1-price, and price is ALWAYS
+        # the YES price in fixed-point dollars.
+        path = '/trade-api/v2/portfolio/events/orders'
         headers = self._sign_request('POST', path)
         if not headers:
             return None
         headers['Content-Type'] = 'application/json'
+        yes_price_cents = price_cents if side == 'yes' else (100 - price_cents)
+        # buy YES or sell NO -> bid ; sell YES or buy NO -> ask
+        book_side = 'bid' if (side == 'yes') == (action == 'buy') else 'ask'
         body = {
             'ticker': ticker,
-            'side': side,
-            'action': action,
-            'type': 'limit',
-            'count': count,
-            'yes_price': price_cents if side == 'yes' else (100 - price_cents),
+            'side': book_side,
+            'count': f'{int(count)}',
+            'price': f'{yes_price_cents / 100:.4f}',
+            'time_in_force': 'good_till_canceled',
+            'self_trade_prevention_type': 'maker',
+            'post_only': bool(maker),
             'client_order_id': str(uuid.uuid4()),
         }
         if expiration_ts:
-            body['expiration_ts'] = int(expiration_ts)
+            body['expiration_time'] = int(expiration_ts)
         try:
             resp = self.session.post(
-                f'{KALSHI_BASE}/portfolio/orders',
+                f'{KALSHI_BASE}/portfolio/events/orders',
                 headers=headers, json=body, timeout=15,
             )
             if resp.status_code in (200, 201):
@@ -1121,14 +1130,14 @@ class KalshiClient:
         return None
 
     def cancel_order(self, order_id):
-        """DELETE /portfolio/orders/{order_id}"""
-        path = f'/trade-api/v2/portfolio/orders/{order_id}'
+        """DELETE /portfolio/events/orders/{order_id} (v2)"""
+        path = f'/trade-api/v2/portfolio/events/orders/{order_id}'
         headers = self._sign_request('DELETE', path)
         if not headers:
             return False
         try:
             resp = self.session.delete(
-                f'{KALSHI_BASE}/portfolio/orders/{order_id}',
+                f'{KALSHI_BASE}/portfolio/events/orders/{order_id}',
                 headers=headers, timeout=10,
             )
             return resp.status_code in (200, 204)
@@ -1137,18 +1146,19 @@ class KalshiClient:
         return False
 
     def get_order(self, order_id):
-        """GET /portfolio/orders/{order_id}"""
-        path = f'/trade-api/v2/portfolio/orders/{order_id}'
+        """GET /portfolio/events/orders/{order_id} (v2)"""
+        path = f'/trade-api/v2/portfolio/events/orders/{order_id}'
         headers = self._sign_request('GET', path)
         if not headers:
             return None
         try:
             resp = self.session.get(
-                f'{KALSHI_BASE}/portfolio/orders/{order_id}',
+                f'{KALSHI_BASE}/portfolio/events/orders/{order_id}',
                 headers=headers, timeout=10,
             )
             if resp.status_code == 200:
-                return resp.json().get('order', {})
+                data = resp.json()
+                return data.get('order', data)
         except Exception as e:
             print(f'  Get order error: {e}')
         return None
