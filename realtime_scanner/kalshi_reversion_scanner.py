@@ -1233,22 +1233,35 @@ class MentionBuyNoDetector:
                 debug_counts['skipped_cat'] += 1
                 continue
 
-            # Parse close_time — skip if too far out (capital efficiency)
-            close_time_str = m.get('close_time', '')
-            close_ts = now_ts + 24 * 3600  # default: 24h from now
-            if close_time_str:
-                try:
-                    close_dt = datetime.fromisoformat(
-                        close_time_str.replace('Z', '+00:00')
-                    )
-                    close_ts = close_dt.timestamp()
-                except Exception:
-                    pass
-
-            hours_to_close = (close_ts - now_ts) / 3600
-            if hours_to_close > MENTION_MAX_CLOSE_HOURS and not is_earnings:
-                debug_counts['too_far'] += 1
-                continue
+            # Skip if too far out. Mention markets set close_time to a
+            # far-future deadline (200-500h), so close_time is NOT a reliable
+            # "soon" signal — e.g. World Cup mention markets close ~2 weeks out
+            # even when the game is today. Prefer the milestone event-start
+            # time; fall back to close_time only when no milestone exists.
+            event_ticker = m.get('event_ticker', '')
+            ms_pre = milestone_map.get(event_ticker)
+            if ms_pre and ms_pre.get('start_ts'):
+                hours_to_event_pre = (ms_pre['start_ts'] - now_ts) / 3600
+                # >24h before start = too early; precise per-category window
+                # is enforced below. Earnings rest much earlier (own window).
+                if hours_to_event_pre > 24 and not is_earnings:
+                    debug_counts['too_early'] += 1
+                    continue
+            else:
+                close_time_str = m.get('close_time', '')
+                close_ts = now_ts + 24 * 3600  # default: 24h from now
+                if close_time_str:
+                    try:
+                        close_dt = datetime.fromisoformat(
+                            close_time_str.replace('Z', '+00:00')
+                        )
+                        close_ts = close_dt.timestamp()
+                    except Exception:
+                        pass
+                hours_to_close = (close_ts - now_ts) / 3600
+                if hours_to_close > MENTION_MAX_CLOSE_HOURS and not is_earnings:
+                    debug_counts['too_far'] += 1
+                    continue
 
             # Event start timing filter — per-category windows:
             # Earnings: live to +30min (backtest: best ROI 0-20min live)
@@ -5517,13 +5530,19 @@ class KalshiReversionScanner:
         resting_price = max(resting_price, min_no_c)
         resting_price = min(resting_price, max_no_c)
 
-        if resting_price >= best_no_ask:
-            return None  # Would cross the spread
-
-        spread = best_no_ask - best_no_bid if best_no_bid > 0 else best_no_ask
-        if spread < PREMARKET_MIN_SPREAD:
-            print(f"    Spread {spread}c too narrow (<{PREMARKET_MIN_SPREAD}c), skipping maker — taker may be better")
-            return None
+        # Empty book (no NO ask yet): rest at our computed floor price and let
+        # the penny-above refresh climb it as the book fills. There's no ask to
+        # cross and no spread to enforce.
+        empty_book = best_no_ask is None or best_no_ask < 1
+        if empty_book:
+            spread = max_no_c  # treat as wide for sizing purposes
+        else:
+            if resting_price >= best_no_ask:
+                return None  # Would cross the spread
+            spread = best_no_ask - best_no_bid if best_no_bid > 0 else best_no_ask
+            if spread < PREMARKET_MIN_SPREAD:
+                print(f"    Spread {spread}c too narrow (<{PREMARKET_MIN_SPREAD}c), skipping maker — taker may be better")
+                return None
 
         # Bet sizing — maker uses PREMARKET_BET_DOLLARS, with per-category override for winners
         maker_cat_name = get_mention_category(ticker)
@@ -6130,7 +6149,18 @@ class KalshiReversionScanner:
             best_yes_bid = max(b[0] for b in yes_bids_raw)
             best_no_ask = 100 - best_yes_bid
 
-        if best_no_ask is None or best_no_ask < 1:
+        # Empty book (no YES bids → no NO ask): normally skip. But in MAKER_ONLY
+        # mode a pre-event signal can still rest a NO bid at the category floor
+        # and climb via the penny-above refresh as the book fills — this is how
+        # we get queue position before retail arrives (the maker thesis).
+        _h2e_chk = sig.get('hours_to_event')
+        _allow_empty_book = (
+            MAKER_ONLY
+            and _h2e_chk is not None
+            and _h2e_chk > PREMARKET_CANCEL_HOURS
+            and 'MENTION' in ticker.upper()
+        )
+        if (best_no_ask is None or best_no_ask < 1) and not _allow_empty_book:
             print(f"    No NO ask for {ticker} (no YES bids in book), skipping")
             return None
 
