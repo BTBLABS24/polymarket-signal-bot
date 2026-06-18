@@ -57,6 +57,11 @@ KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 SCAN_INTERVAL_SECONDS = 300  # 5 min
 # Trading config
 DRY_RUN = False
+# MAKER_ONLY: when True, the bot NEVER takes (no crossing the spread). It only
+# rests NO limit orders (pre-event maker) and skips any signal it cannot rest.
+# Enforced as a hard guard inside KalshiClient.create_order (blocks non-maker buys)
+# AND by gating every taker strategy's dispatch below.
+MAKER_ONLY = True
 MAX_BET_DOLLARS = 10          # Max per signal (matches GLOBAL_MAX_MARKET_DOLLARS)
 MIN_BET_DOLLARS = 1           # Skip if depth too thin
 DEPTH_FRACTION = 0.50         # Use 50% of 3-level depth
@@ -106,7 +111,7 @@ CATEGORY_NO_RANGE = {
     'Fight':    (5, 30),    # +28.2% ROI backtest, small sample
     'Earnings': (15, 50),   # disabled, kept for reference
 }
-GLOBAL_MAX_MARKET_DOLLARS = 10    # HARD CEILING — no single ticker can ever exceed this across ALL strategies
+GLOBAL_MAX_MARKET_DOLLARS = 2     # HARD CEILING — total $ per ticker across ALL strategies (maker-only: $2/market)
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (events live with 24h close)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
@@ -1069,7 +1074,7 @@ class KalshiClient:
             print(f'  Orderbook error ({ticker}): {e}')
         return {}
 
-    def create_order(self, ticker, side, action, count, price_cents, expiration_ts=None):
+    def create_order(self, ticker, side, action, count, price_cents, expiration_ts=None, maker=False):
         """
         POST /portfolio/orders
         side: 'yes' or 'no'
@@ -1077,8 +1082,14 @@ class KalshiClient:
         count: number of contracts
         price_cents: limit price in cents (1-99)
         expiration_ts: optional Unix timestamp — order auto-cancels at this time
+        maker: True only for resting pre-event limit orders. When MAKER_ONLY is
+               set, any non-maker BUY is blocked here as a hard safety net so no
+               taker entry can ever execute, regardless of calling strategy.
         Returns order dict or None.
         """
+        if MAKER_ONLY and action == 'buy' and not maker:
+            print(f"  MAKER_ONLY: blocked taker buy {ticker} {count}@{price_cents}c (maker-only mode)")
+            return None
         path = '/trade-api/v2/portfolio/orders'
         headers = self._sign_request('POST', path)
         if not headers:
@@ -3207,37 +3218,38 @@ class KalshiReversionScanner:
                             mention_count += 1
                             mention_allowed = mention_count < MENTION_MAX_POSITIONS
 
-                # 3b. Degradation curve strategy (NBA, paused)
-                if DEGRADE_ENABLED:
+                # 3b. Degradation curve strategy (NBA, paused) — TAKER, off in maker-only
+                if DEGRADE_ENABLED and not MAKER_ONLY:
                     await self._scan_degradation_curve(mention_markets, milestones, now)
 
-                # 3c. NCAA theta re-entry: buy NO again at T+20min if still cheap
-                if not low_balance:
+                # 3c. NCAA theta re-entry — TAKER, off in maker-only
+                if not low_balance and not MAKER_ONLY:
                     await self._scan_theta_reentry(mention_markets, milestones, now)
 
-                # 3d. YES-buy strategy: buy YES on always-said NBA words
-                await self._scan_yes_buys(mention_markets, milestones, now)
+                # 3d. YES-buy strategy — TAKER, off in maker-only
+                if not MAKER_ONLY:
+                    await self._scan_yes_buys(mention_markets, milestones, now)
 
-                # 3e. Stale order strategy: buy forgotten limit orders 1h+ into game
-                if not low_balance:
+                # 3e. Stale order strategy — TAKER, off in maker-only
+                if not low_balance and not MAKER_ONLY:
                     await self._scan_stale_orders(mention_markets, milestones, now)
 
-                # 3f. Political pct_words_said strategy — buy NO when >=50% of event words said
-                if POLITICAL_PCT_ENABLED and not low_balance:
+                # 3f. Political pct_words_said strategy — TAKER, off in maker-only
+                if POLITICAL_PCT_ENABLED and not low_balance and not MAKER_ONLY:
                     await self._scan_political_pct(mention_markets, now)
 
-                # 3g. Stable-price strategy — buy NO when YES stubbornly stable after trigger
-                if STABLE_PRICE_ENABLED and not low_balance:
+                # 3g. Stable-price strategy — TAKER, off in maker-only
+                if STABLE_PRICE_ENABLED and not low_balance and not MAKER_ONLY:
                     await self._scan_stable_price(mention_markets, now)
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
-        # NCAAB fade strategy — runs independently from mention scan (different series)
-        if NCAAB_FADE_ENABLED and not low_balance:
+        # NCAAB fade strategy — TAKER, off in maker-only
+        if NCAAB_FADE_ENABLED and not low_balance and not MAKER_ONLY:
             await self._scan_ncaab_fade(now)
 
-        # Tennis fade strategy — ATP + WTA match outcomes
-        if TENNIS_FADE_ENABLED and not low_balance:
+        # Tennis fade strategy — TAKER, off in maker-only
+        if TENNIS_FADE_ENABLED and not low_balance and not MAKER_ONLY:
             await self._scan_tennis_fade(now)
 
         # Check positions for settlement
@@ -3383,6 +3395,7 @@ class KalshiReversionScanner:
             ticker=ticker, side='no', action='buy',
             count=new_contracts, price_cents=new_price,
             expiration_ts=info.get('signal', {}).get('event_start_ts'),
+            maker=True,
         )
         if new_order:
             new_oid = new_order.get('order_id', '')
@@ -3467,7 +3480,8 @@ class KalshiReversionScanner:
                 signal_cents = sig.get('no_price_cents', price_cents)
                 max_slip = 4
                 min_no_c, max_no_c = get_no_range(ticker)
-                if (min_no_c <= best_no_ask <= max_no_c
+                if (not MAKER_ONLY
+                        and min_no_c <= best_no_ask <= max_no_c
                         and best_no_ask <= signal_cents + max_slip):
                     # Guard: skip taker if we already have a position from partial fills
                     if self.positions.has_open_ticker(ticker):
@@ -5590,7 +5604,7 @@ class KalshiReversionScanner:
         order = self.client.create_order(
             ticker=ticker, side='no', action='buy',
             count=contracts, price_cents=resting_price,
-            expiration_ts=event_start_ts,
+            expiration_ts=event_start_ts, maker=True,
         )
         if not order:
             print(f"    Maker order failed for {ticker}")
@@ -6150,6 +6164,15 @@ class KalshiReversionScanner:
                 # Derive category from ticker
                 prefix = ticker_upper.split('MENTION')[0].replace('KX', '')
                 maker_cat = prefix if prefix else 'Other'
+
+        # MAKER_ONLY: never take. Pre-event signals rest a NO limit; anything that
+        # can't rest (live / inside the cancel window) is skipped entirely.
+        if MAKER_ONLY:
+            if can_rest_maker:
+                print(f"    MAKER_ONLY: resting maker [{maker_cat}] for {ticker} (h2e={h2e})")
+                return self._execute_premarket_maker(sig, orderbook, yes_bids_raw, best_no_ask, category=maker_cat)
+            print(f"    MAKER_ONLY: cannot rest {ticker} (h2e={h2e}), skipping (no taker)")
+            return None
 
         # NBA halftime strategy: taker only from halftime (~1.3h into game) onward.
         # Pre-game: maker only. Pre-halftime live: skip taker entirely.
