@@ -1426,6 +1426,26 @@ class MentionBuyNoDetector:
                 if last is not None:
                     yes_price = last / 100
             if yes_price is None:
+                # Kalshi's /markets summary fields (yes_bid/ask/last_price) are
+                # sometimes None even when the orderbook has real resting
+                # liquidity — observed on World Cup mention markets, which were
+                # being silently dropped here as "no_price". We've already passed
+                # the timing gate (only in-window milestoned markets reach this
+                # point), so fetch the orderbook directly and derive YES from
+                # top-of-book: best_yes_bid = max yes bids; yes_ask = 100 - best_no_bid.
+                ob = client.get_orderbook(ticker)
+                yb_raw = ob.get('yes', []) if ob else []
+                nb_raw = ob.get('no', []) if ob else []
+                ob_yes_bid = max((b[0] for b in yb_raw), default=None)
+                ob_no_bid = max((b[0] for b in nb_raw), default=None)
+                ob_yes_ask = (100 - ob_no_bid) if ob_no_bid is not None else None
+                if ob_yes_bid is not None and ob_yes_ask is not None:
+                    yes_price = (ob_yes_bid + ob_yes_ask) / 2 / 100
+                elif ob_yes_ask is not None:
+                    yes_price = ob_yes_ask / 100
+                elif ob_yes_bid is not None:
+                    yes_price = ob_yes_bid / 100
+            if yes_price is None:
                 debug_counts['no_price'] += 1
                 cat_debug[_cat]['price'] += 1
                 continue
