@@ -1240,6 +1240,20 @@ class MentionBuyNoDetector:
             # time; fall back to close_time only when no milestone exists.
             event_ticker = m.get('event_ticker', '')
             ms_pre = milestone_map.get(event_ticker)
+            # Always parse close_ts up front: the milestone branch below does not
+            # touch it, but the signal dict (hours_before_close / close_ts) needs
+            # it in every path. Leaving it unset crashed detect() with an
+            # UnboundLocalError for any market that has a milestone.
+            close_time_str = m.get('close_time', '')
+            close_ts = now_ts + 24 * 3600  # default: 24h from now
+            if close_time_str:
+                try:
+                    close_dt = datetime.fromisoformat(
+                        close_time_str.replace('Z', '+00:00')
+                    )
+                    close_ts = close_dt.timestamp()
+                except Exception:
+                    pass
             if ms_pre and ms_pre.get('start_ts'):
                 hours_to_event_pre = (ms_pre['start_ts'] - now_ts) / 3600
                 # >24h before start = too early; precise per-category window
@@ -1248,16 +1262,6 @@ class MentionBuyNoDetector:
                     debug_counts['too_early'] += 1
                     continue
             else:
-                close_time_str = m.get('close_time', '')
-                close_ts = now_ts + 24 * 3600  # default: 24h from now
-                if close_time_str:
-                    try:
-                        close_dt = datetime.fromisoformat(
-                            close_time_str.replace('Z', '+00:00')
-                        )
-                        close_ts = close_dt.timestamp()
-                    except Exception:
-                        pass
                 hours_to_close = (close_ts - now_ts) / 3600
                 if hours_to_close > MENTION_MAX_CLOSE_HOURS and not is_earnings:
                     debug_counts['too_far'] += 1
