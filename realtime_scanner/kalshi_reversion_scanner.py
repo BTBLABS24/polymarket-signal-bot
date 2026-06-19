@@ -3498,6 +3498,27 @@ class KalshiReversionScanner:
                 to_remove.append(order_id)
                 continue
 
+            # Cancel resting orders on de-vetted series. The maker-eligibility
+            # gate only stops NEW rests; orders rested before the gate deployed
+            # stay live on the book and can still fill (e.g. the James Corden
+            # "FOX After Hours" / Obama Presidential Center novelty events).
+            # This purges them. Mirrors the executor gate predicate exactly.
+            maker_series = ticker_upper.split('-')[0]
+            series_vetted = maker_series in MENTION_MAKER_SERIES
+            is_trump = 'TRUMPMENTION' in ticker_upper
+            is_mamdani = 'MAMDANIMENTION' in ticker_upper
+            is_newsom = 'NEWSOMMENTION' in ticker_upper
+            vetted = (series_vetted or is_nba or is_ncaa
+                      or is_trump or is_mamdani or is_newsom)
+            if 'MENTION' in ticker_upper and not vetted:
+                print(f"    CANCEL DE-VETTED RESTING: {maker_series} not in vetted maker series, cancelling {order_id}")
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception as e:
+                    print(f"    Cancel failed: {e}")
+                to_remove.append(order_id)
+                continue
+
             # Cancel resting orders where ticker already exceeds global cap
             global_exp = self._global_ticker_exposure(ticker)
             if global_exp > GLOBAL_MAX_MARKET_DOLLARS:
