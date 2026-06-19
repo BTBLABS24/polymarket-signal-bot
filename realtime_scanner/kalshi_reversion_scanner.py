@@ -258,6 +258,7 @@ MENTION_SCAN_SERIES = [
     'KXNCAAMENTION', 'KXNCAABMENTION',                 # NCAA 5-30c
     'KXSNFMENTION', 'KXTNFMENTION', 'KXCFBMENTION',
     'KXNBAMENTION',                                      # NBA 20-70c (halftime+ high-conf words)
+    'KXWCMENTION',                                      # World Cup 5-30c (backtest +51% maker ROI)
     'KXFIGHTMENTION', 'KXSBMENTION',                   # Fight 5-30c
     # Politics/Gov — per-category NO ranges
     'KXTRUMPMENTION', 'KXTRUMPMENTIONB',               # Trump 15-50c
@@ -273,6 +274,13 @@ MENTION_SCAN_SERIES = [
     # Removed: KXLEAVITTMENTION, KXKIMMELMENTION (net losers → CATEGORY_KILL_LIST)
     # Removed: KXROGANMENTION, KXCOOPERMENTION (no backtest data, cut for variance)
 ]
+
+# Series that pre-event maker resting is ALLOWED on. The bot discovers ~400
+# mention series, but only these vetted ones may rest NO bids. Without this
+# gate the bot shorted trivially-predictable words on novelty events (e.g. NO
+# on "Chicago"/"Hope" during "Hope Comes Home: Inside the Obama Presidential
+# Center"), which are near-certain to be said and price NO at a few cents.
+MENTION_MAKER_SERIES = {s.upper() for s in MENTION_SCAN_SERIES}
 
 # --- NBA Master Blacklist ---
 # ONE list checked FIRST in every code path. These words NEVER trade, no exceptions.
@@ -6210,9 +6218,17 @@ class KalshiReversionScanner:
         is_mamdani = 'MAMDANIMENTION' in ticker_upper
         is_newsom = 'NEWSOMMENTION' in ticker_upper
         pre_event = h2e is not None and h2e > PREMARKET_CANCEL_HOURS
-        can_rest_maker = pre_event and (is_ncaa or is_nba or is_trump or is_mamdani or is_newsom)
-        if not can_rest_maker and pre_event and 'MENTION' in ticker_upper:
-            can_rest_maker = True  # all other mention markets too
+        # Only rest maker on vetted series. Previously this fell through to a
+        # blanket "all other mention markets too" catch-all, which made the bot
+        # short obvious words on novelty events. Now a market must either match a
+        # hardcoded category or have its series in the vetted allowlist.
+        maker_series = ticker_upper.split('-')[0]
+        series_vetted = maker_series in MENTION_MAKER_SERIES
+        can_rest_maker = pre_event and (
+            series_vetted or is_ncaa or is_nba or is_trump or is_mamdani or is_newsom
+        )
+        if pre_event and not can_rest_maker and 'MENTION' in ticker_upper:
+            print(f"    Skip maker: {maker_series} not in vetted maker series")
         if can_rest_maker:
             if is_ncaa:
                 maker_cat = 'NCAA'
