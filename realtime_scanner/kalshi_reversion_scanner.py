@@ -3585,17 +3585,16 @@ class KalshiReversionScanner:
                                   taker_ask=best_no_ask, category=category)
                     continue
 
-                # Check if spread has narrowed too much
-                if spread < PREMARKET_MIN_SPREAD:
-                    print(f"    PREMARKET CANCEL: {ticker} spread narrowed to {spread}c (<{PREMARKET_MIN_SPREAD}c), cancelling")
-                    self.client.cancel_order(order_id)
-                    log_event('premarket_cancel_spread', ticker=ticker, order_id=order_id,
-                              spread=spread, no_bid=best_no_bid, no_ask=best_no_ask)
-                    to_remove.append(order_id)
-                    continue
+                # NOTE: we no longer cancel when the gap narrows to <5c. Instead
+                # we climb toward the ask (below) until the bid-ask gap is <5c and
+                # then HOLD the order resting so it is positioned to fill.
 
-                # --- Penny-above bid management ---
-                # Rule: always be exactly 1c above the next highest bidder, no more.
+                # --- Penny-above + climb-to-ask hybrid ---
+                # Two goals each cycle: (1) stay 1c above the next real bidder so
+                # we hold queue priority, and (2) climb toward the ask until the
+                # bid-ask gap is <PREMARKET_MIN_SPREAD so the order is positioned
+                # to fill. Whichever price is higher wins. Once we reach ask-4 the
+                # ideal price stops moving, so we naturally HOLD (no more rebids).
                 # Find highest OTHER bid (excluding our own price level)
                 other_bids = [b[0] for b in no_bids if b[0] != price_cents]
                 # Exclude dust bids (<$1.50 total size at that level)
@@ -3606,11 +3605,15 @@ class KalshiReversionScanner:
                         other_bids_filtered.append(lvl)
                 next_best_bid = max(other_bids_filtered) if other_bids_filtered else 0
 
-                # Compute ideal price: 1c above next best, or min_no_c if alone
-                if next_best_bid > 0:
-                    ideal_price = next_best_bid + 1
+                # (1) Penny-above next best, or floor if we're alone
+                penny_price = next_best_bid + 1 if next_best_bid > 0 else min_no_c
+                # (2) Climb price: sit just inside the ask so the gap closes to
+                #     <PREMARKET_MIN_SPREAD. Only when a real ask exists.
+                if yes_bids and best_no_ask < 99:
+                    climb_price = best_no_ask - (PREMARKET_MIN_SPREAD - 1)
                 else:
-                    ideal_price = min_no_c  # We're alone — sit at floor
+                    climb_price = 0
+                ideal_price = max(penny_price, climb_price)
 
                 # Clamp to valid range
                 ideal_price = max(ideal_price, min_no_c)
