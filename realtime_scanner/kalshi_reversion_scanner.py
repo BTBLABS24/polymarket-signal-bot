@@ -75,21 +75,20 @@ MAX_SLIPPAGE_PCT = 15.0       # Skip if NO price > 15% worse than signal
 # 11,104 trades, 232 active days. Only 50 negative days out of 232.
 # Kalshi uses can_close_early with far-future deadline, so close_time
 # is NOT the event time. We filter by price range only.
-MENTION_BET_DOLLARS = 3            # $3 default for named categories
+MENTION_BET_DOLLARS = 2            # $2 fixed (taker path; inactive under MAKER_ONLY)
 MENTION_BET_NCAA = 1               # $1 for NCAAB/NCAA (-34% clean ROI, -25% actual 21d)
-MENTION_BET_OTHER = 3              # $3 for "other" categories
-# Per-category overrides — 21-day actual + clean-trade ROI (2026-02-18 to 2026-03-11)
-CATEGORY_BET_OVERRIDE = {
-    # Tier 1: best clean ROI (capped at $10 global max)
-    'HEGSETH':      10,   # +224% actual, +141% clean, 50% WR (16 clean trades)
-    'LASTWORD':     10,   # +98% actual, +131% clean, 40% WR (10 clean)
-    'Newsom':       10,   # +228% clean, 57% WR — overall -47% was oversized bug trades
-    # Tier 2: solid edge, $10
-    'FOXNEWS':      10,   # +87% clean, 47% WR (17 clean) — overall -24% was bug trades
-    'THEWEEKNIGHT': 10,   # +115% clean, 44% WR (9 clean)
-    'POLITICS':     10,   # +56% clean, 44% WR (18 clean)
-    'Trump':        10,   # +41% clean, 29% WR — highest volume (187 trades)
-}
+MENTION_BET_OTHER = 2              # $2 fixed for "other" categories
+# Per-category bet overrides DISABLED. The prior $10 escalations (Trump, Hegseth,
+# LastWord, etc.) drove the oversized live losses (e.g. Trump $1,466 over 132
+# markets ~$11/bet). Every maker order now uses the fixed small PREMARKET_BET_DOLLARS.
+CATEGORY_BET_OVERRIDE = {}
+# --- Hard risk caps (single chokepoint enforcement in create_order) ---
+# Fill-conditioned backtest: conditional ROI turns <= 0 above ~38c NO; the
+# profitable resting zone is ~15-30c. CLAUDE.md clean-trade rule: cost < $4,
+# NO price <= 30c. These are enforced as a hard net inside create_order so no
+# strategy/sizing bug can place an oversized or out-of-range maker entry.
+MAX_TRADE_DOLLARS = 4             # Max cost ($) of any single maker NO-buy
+MAX_MAKER_NO_PRICE_CENTS = 30     # Max NO entry price (cents) for any maker buy
 MENTION_MAX_NO_PRICE = 0.30       # Global fallback max — conservative for unmapped categories
 MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides below)
 # Per-category NO price ranges — backtest-optimized (60 days, taker +4c slippage).
@@ -123,7 +122,8 @@ MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker (cap
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
-PREMARKET_BET_DOLLARS = 10         # $ per resting maker order — no slippage on limits
+PREMARKET_BET_DOLLARS = 2          # $ per resting maker order — fixed small size
+PREMARKET_MAX_TOTAL_RESTING_DOLLARS = 30  # Cap on total $ across ALL resting maker orders
 PREMARKET_MAX_MARKET_DOLLARS = 10  # Hard cap $ per market for maker orders (capped by GLOBAL_MAX_MARKET_DOLLARS)
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
 PREMARKET_MAX_NO_PRICE = 70       # Max NO price for resting orders (fallback; per-category via get_no_range)
@@ -275,12 +275,25 @@ MENTION_SCAN_SERIES = [
     # Removed: KXROGANMENTION, KXCOOPERMENTION (no backtest data, cut for variance)
 ]
 
-# Series that pre-event maker resting is ALLOWED on. The bot discovers ~400
-# mention series, but only these vetted ones may rest NO bids. Without this
-# gate the bot shorted trivially-predictable words on novelty events (e.g. NO
-# on "Chicago"/"Hope" during "Hope Comes Home: Inside the Obama Presidential
-# Center"), which are near-certain to be said and price NO at a few cents.
-MENTION_MAKER_SERIES = {s.upper() for s in MENTION_SCAN_SERIES}
+# Series that pre-event maker resting is ALLOWED on. PRUNED to only those with a
+# POSITIVE fill-conditioned (adverse-selection-adjusted) backtest edge plus an
+# adequate fill sample. The fill-conditioned backtest (backtest_fill_conditioned.py)
+# showed ~60 mention series collapse to a 0% conditional win rate (you only fill
+# when the word is about to be said), so the prior "all scanned series" allowlist
+# was the core driver of the live -38% ROI. Only these survive:
+#   KXTRUMPMENTION    142 fills, 30% cond WR, +78% cond ROI  (largest sample)
+#   KXTRUMPMENTIONB    31 fills, 19% cond WR, +14% cond ROI  (Trump family)
+#   KXNBAMENTION      142 fills, 35% cond WR, +57% cond ROI  (largest sample)
+#   KXNCAABMENTION    best live WR (44%); profitable once cost/price-capped
+#   KXLASTWORDMENTION  20% cond WR, +186% cond ROI (small sample, tier-1)
+# All other discovered series are still scanned but may NOT rest a maker bid.
+MENTION_MAKER_SERIES = {
+    'KXTRUMPMENTION',
+    'KXTRUMPMENTIONB',
+    'KXNBAMENTION',
+    'KXNCAABMENTION',
+    'KXLASTWORDMENTION',
+}
 
 # --- NBA Master Blacklist ---
 # ONE list checked FIRST in every code path. These words NEVER trade, no exceptions.
@@ -1093,11 +1106,26 @@ class KalshiClient:
         maker: True only for resting pre-event limit orders. When MAKER_ONLY is
                set, any non-maker BUY is blocked here as a hard safety net so no
                taker entry can ever execute, regardless of calling strategy.
+               In MAKER_ONLY mode EVERY order (buy AND sell) is also forced
+               post_only below, so the exchange itself rejects any price that
+               would cross the spread — no order can ever fill as a taker.
         Returns order dict or None.
         """
         if MAKER_ONLY and action == 'buy' and not maker:
             print(f"  MAKER_ONLY: blocked taker buy {ticker} {count}@{price_cents}c (maker-only mode)")
             return None
+        # Hard risk caps on maker NO-buy entries (single chokepoint). Reject
+        # oversized bets and out-of-range entry prices that the fill-conditioned
+        # backtest shows are unprofitable (conditional ROI <= 0 above ~38c).
+        if maker and action == 'buy' and side == 'no':
+            if price_cents > MAX_MAKER_NO_PRICE_CENTS:
+                print(f"  RISK CAP: blocked {ticker} NO buy @ {price_cents}c "
+                      f"> {MAX_MAKER_NO_PRICE_CENTS}c max")
+                return None
+            if count * price_cents / 100.0 > MAX_TRADE_DOLLARS + 1e-9:
+                print(f"  RISK CAP: blocked {ticker} {count}@{price_cents}c = "
+                      f"${count * price_cents / 100:.2f} > ${MAX_TRADE_DOLLARS} max")
+                return None
         # V2 create-order endpoint. The legacy POST /portfolio/orders now
         # returns HTTP 410 (deprecated_v1_order_endpoint). The v2 endpoint uses
         # a YES-centric single book: side is 'bid' (buy YES) or 'ask' (sell YES),
@@ -1118,7 +1146,13 @@ class KalshiClient:
             'price': f'{yes_price_cents / 100:.4f}',
             'time_in_force': 'good_till_canceled',
             'self_trade_prevention_type': 'maker',
-            'post_only': bool(maker),
+            # MAKER_ONLY: force post_only on EVERY order (buys and sells alike).
+            # The exchange rejects any post_only order that would cross the
+            # spread, so nothing can ever execute as a taker — this is the single
+            # hard chokepoint, regardless of which strategy/price computed it.
+            # Crossing exit-sells (execute_exit) get rejected and the position
+            # simply holds to settlement, which is the intended maker thesis.
+            'post_only': True if MAKER_ONLY else bool(maker),
             'client_order_id': str(uuid.uuid4()),
         }
         if expiration_ts:
@@ -3504,12 +3538,10 @@ class KalshiReversionScanner:
             # "FOX After Hours" / Obama Presidential Center novelty events).
             # This purges them. Mirrors the executor gate predicate exactly.
             maker_series = ticker_upper.split('-')[0]
-            series_vetted = maker_series in MENTION_MAKER_SERIES
-            is_trump = 'TRUMPMENTION' in ticker_upper
-            is_mamdani = 'MAMDANIMENTION' in ticker_upper
-            is_newsom = 'NEWSOMMENTION' in ticker_upper
-            vetted = (series_vetted or is_nba or is_ncaa
-                      or is_trump or is_mamdani or is_newsom)
+            # Pure allowlist: the pruned MENTION_MAKER_SERIES is authoritative.
+            # (Trump/NBA/NCAAB winners are in that set; de-vetted series' stale
+            # resting orders are cancelled here.)
+            vetted = maker_series in MENTION_MAKER_SERIES
             if 'MENTION' in ticker_upper and not vetted:
                 print(f"    CANCEL DE-VETTED RESTING: {maker_series} not in vetted maker series, cancelling {order_id}")
                 try:
@@ -3585,16 +3617,13 @@ class KalshiReversionScanner:
                                   taker_ask=best_no_ask, category=category)
                     continue
 
-                # NOTE: we no longer cancel when the gap narrows to <5c. Instead
-                # we climb toward the ask (below) until the bid-ask gap is <5c and
-                # then HOLD the order resting so it is positioned to fill.
-
-                # --- Penny-above + climb-to-ask hybrid ---
-                # Two goals each cycle: (1) stay 1c above the next real bidder so
-                # we hold queue priority, and (2) climb toward the ask until the
-                # bid-ask gap is <PREMARKET_MIN_SPREAD so the order is positioned
-                # to fill. Whichever price is higher wins. Once we reach ask-4 the
-                # ideal price stops moving, so we naturally HOLD (no more rebids).
+                # --- Penny-above only (climb-to-ask DISABLED) ---
+                # Rest-and-hold at the bid: stay 1c above the next real bidder for
+                # queue priority, but NEVER chase the ask. Climbing toward the ask
+                # filled us exactly when informed YES flow was crossing into our
+                # bid (adverse selection) and at worse prices where the
+                # fill-conditioned backtest shows conditional ROI <= 0. We only
+                # fill when a YES-taker crosses DOWN to our resting bid.
                 # Find highest OTHER bid (excluding our own price level)
                 other_bids = [b[0] for b in no_bids if b[0] != price_cents]
                 # Exclude dust bids (<$1.50 total size at that level)
@@ -3605,15 +3634,9 @@ class KalshiReversionScanner:
                         other_bids_filtered.append(lvl)
                 next_best_bid = max(other_bids_filtered) if other_bids_filtered else 0
 
-                # (1) Penny-above next best, or floor if we're alone
+                # Penny-above next best, or floor if we're alone. No climb price.
                 penny_price = next_best_bid + 1 if next_best_bid > 0 else min_no_c
-                # (2) Climb price: sit just inside the ask so the gap closes to
-                #     <PREMARKET_MIN_SPREAD. Only when a real ask exists.
-                if yes_bids and best_no_ask < 99:
-                    climb_price = best_no_ask - (PREMARKET_MIN_SPREAD - 1)
-                else:
-                    climb_price = 0
-                ideal_price = max(penny_price, climb_price)
+                ideal_price = penny_price
 
                 # Clamp to valid range
                 ideal_price = max(ideal_price, min_no_c)
@@ -5567,6 +5590,12 @@ class KalshiReversionScanner:
             print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping maker {ticker}")
             return None
 
+        # Total resting-exposure ceiling across ALL open maker orders
+        total_resting = sum(o.get('bet_dollars', 0) for o in self._resting_premarket_orders.values())
+        if total_resting >= PREMARKET_MAX_TOTAL_RESTING_DOLLARS:
+            print(f"    TOTAL RESTING cap reached (${total_resting:.2f}/${PREMARKET_MAX_TOTAL_RESTING_DOLLARS}), skipping maker {ticker}")
+            return None
+
         # Skip if we already have a resting order on this ticker
         for info in self._resting_premarket_orders.values():
             if info['ticker'] == ticker:
@@ -6247,10 +6276,12 @@ class KalshiReversionScanner:
         # short obvious words on novelty events. Now a market must either match a
         # hardcoded category or have its series in the vetted allowlist.
         maker_series = ticker_upper.split('-')[0]
+        # Pure allowlist gate: only the pruned MENTION_MAKER_SERIES may rest a
+        # maker bid. The is_trump/is_mamdani/is_newsom bypasses were removed —
+        # Mamdani/Newsom are net losers (kill list) and the proven Trump/NBA/NCAAB
+        # winners are already in the allowlist.
         series_vetted = maker_series in MENTION_MAKER_SERIES
-        can_rest_maker = pre_event and (
-            series_vetted or is_ncaa or is_nba or is_trump or is_mamdani or is_newsom
-        )
+        can_rest_maker = pre_event and series_vetted
         if pre_event and not can_rest_maker and 'MENTION' in ticker_upper:
             print(f"    Skip maker: {maker_series} not in vetted maker series")
         if can_rest_maker:
