@@ -110,7 +110,7 @@ CATEGORY_NO_RANGE = {
     'Fight':    (5, 30),    # +28.2% ROI backtest, small sample
     'Earnings': (15, 50),   # disabled, kept for reference
 }
-GLOBAL_MAX_MARKET_DOLLARS = 2     # HARD CEILING — total $ per ticker across ALL strategies (maker-only: $2/market)
+GLOBAL_MAX_MARKET_DOLLARS = 4     # HARD CEILING — total $ per ticker across ALL strategies (maker-only: $4/market)
 MENTION_HOLD_UNTIL_SETTLE = True  # Hold until settlement (no early exit)
 MENTION_MAX_CLOSE_HOURS = 48      # Wide filter — close_time unreliable (events live with 24h close)
 MENTION_MAX_POSITIONS = 40        # Max concurrent mention positions
@@ -122,7 +122,7 @@ MENTION_MAX_MARKET_DOLLARS = 10   # Hard cap $ per individual market/ticker (cap
 PREMARKET_MAX_RESTING = 500       # Effectively unlimited — most won't fill
 PREMARKET_CANCEL_HOURS = 0.5      # Stop new signals 30min before event start
 PREMARKET_MAX_HOURS = 168         # Look up to 7 days before event for maker orders
-PREMARKET_BET_DOLLARS = 2          # $ per resting maker order — fixed small size
+PREMARKET_BET_DOLLARS = 4          # $ per resting maker order — fixed small size
 PREMARKET_MAX_TOTAL_RESTING_DOLLARS = 30  # Cap on total $ across ALL resting maker orders
 PREMARKET_MAX_MARKET_DOLLARS = 10  # Hard cap $ per market for maker orders (capped by GLOBAL_MAX_MARKET_DOLLARS)
 PREMARKET_MIN_SPREAD = 5          # Min spread (cents) to place resting order
