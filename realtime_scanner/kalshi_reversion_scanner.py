@@ -16,6 +16,7 @@ Uses RSA-PSS signing for Kalshi API authentication.
 import asyncio
 import base64
 import csv
+import html as _html
 import json
 import os
 import re
@@ -24,6 +25,7 @@ import uuid
 import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from xml.etree import ElementTree as ET
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from telegram import Bot
@@ -502,6 +504,27 @@ MENTION_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_mention_signal_history.json'
 TRADE_HISTORY_CSV = STATE_DIR / 'kalshi_trade_history.csv'
 EVENT_LOG_FILE = STATE_DIR / 'kalshi_event_log.jsonl'
 
+# --- Truth-Social cheap-word YES-buy strategy ---
+# Thesis: when Trump posts a word on Truth Social within TRUTH_YES_WINDOW_H before
+# one of his mention events, and YES is still priced <= TRUTH_YES_MAX_CENTS, buy YES
+# as a taker. Backtest (24h window, <30c): +45.9% ROI on n=73, spread over 47 words,
+# robust to leave-one-out; OOS time-split test half +71-78%. Underpowered (CI grazes
+# zero) so sizing is tiny. Some words are "podium-avoided" (posted-but-never-said) —
+# excluded via TRUTH_YES_AVOID_WORDS.
+TRUTH_YES_ENABLED = True
+TRUTH_YES_BET_DOLLARS = 5           # $5/trade (user-specified)
+TRUTH_YES_MAX_CENTS = 30            # only buy YES priced <= 30c
+TRUTH_YES_WINDOW_H = 24             # word must be posted within 24h before event start
+TRUTH_YES_MAX_POSITIONS = 20        # independent cap across the strategy
+TRUTH_YES_MAX_EVENT_DOLLARS = 40    # per-event cap
+TRUTH_YES_AVOID_WORDS = {'epstein', 'shutdown', 'shut down', 'border'}
+# Trump's real spellings that differ from Kalshi's listed strike word
+TRUTH_YES_SYNONYMS = {'Dumbocrat / Dumacrat': ['dumocrat', 'dumbocrat', 'dumacrat']}
+TRUTH_FEED_URL = 'https://trumpstruth.org/feed'
+TRUTH_POSTS_CACHE = STATE_DIR / 'truth_social_recent.json'
+TRUTH_TRADED_LEDGER = STATE_DIR / 'truth_yes_traded.json'  # per-word-per-event dedup (by ticker)
+TRUTH_FEED_REFRESH_S = 600          # re-fetch feed at most every 10 min
+
 
 # =====================================================================
 # STRUCTURED EVENT LOG — append-only JSONL for post-hoc analysis
@@ -519,6 +542,107 @@ def log_event(event_type, **kwargs):
             f.write(json.dumps(entry) + '\n')
     except Exception:
         pass  # never crash the bot for logging
+
+
+# =====================================================================
+# TRUTH SOCIAL FEED — recent Trump posts for the cheap-word YES strategy
+# =====================================================================
+
+class TruthSocialFeed:
+    """Fetches Trump's recent Truth Social posts from the trumpstruth.org RSS
+    feed and answers 'was WORD posted in [lo, hi]?' with prefix/synonym matching.
+
+    The feed is date-filtered and capped at the newest 100 items per day, so we
+    query day-by-day over a short lookback and cache the result on disk. Never
+    raises — on any failure it keeps the last good cache so the bot keeps running.
+    """
+
+    _TAG = re.compile(r'<[^>]+>')
+
+    def __init__(self):
+        self.posts = []          # list of {'ts': float, 'low': str}
+        self._last_fetch = 0.0
+        self._rx_cache = {}
+        self._load()
+
+    def _load(self):
+        try:
+            if TRUTH_POSTS_CACHE.exists():
+                data = json.loads(TRUTH_POSTS_CACHE.read_text())
+                self.posts = data.get('posts', [])
+                self._last_fetch = data.get('fetched_ts', 0.0)
+        except Exception:
+            self.posts = []
+
+    def _save(self):
+        try:
+            TRUTH_POSTS_CACHE.write_text(json.dumps(
+                {'fetched_ts': self._last_fetch, 'posts': self.posts[-1000:]}))
+        except Exception:
+            pass
+
+    def refresh(self, lookback_h):
+        """Re-fetch the last lookback_h hours of posts, at most every
+        TRUTH_FEED_REFRESH_S seconds. Safe to call every scan cycle."""
+        now = time.time()
+        if now - self._last_fetch < TRUTH_FEED_REFRESH_S and self.posts:
+            return
+        cutoff = now - lookback_h * 3600
+        today = datetime.now(timezone.utc).date()
+        days = int(lookback_h // 24) + 2
+        merged = {p['ts']: p for p in self.posts if p['ts'] >= cutoff}
+        sess = requests.Session()
+        sess.headers.update({'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0'})
+        for i in range(days):
+            dd = today - timedelta(days=i)
+            try:
+                r = sess.get(TRUTH_FEED_URL,
+                             params={'start_date': dd.isoformat(), 'end_date': dd.isoformat()},
+                             timeout=25)
+                if r.status_code != 200:
+                    continue
+                root = ET.fromstring(r.text)
+            except (requests.RequestException, ET.ParseError):
+                continue
+            for it in root.iter('item'):
+                try:
+                    dt = datetime.strptime(it.findtext('pubDate') or '',
+                                           '%a, %d %b %Y %H:%M:%S %z')
+                except ValueError:
+                    continue
+                ts = dt.timestamp()
+                if ts < cutoff:
+                    continue
+                txt = _html.unescape(self._TAG.sub(
+                    ' ', it.findtext('description') or it.findtext('title') or ''))
+                merged[ts] = {'ts': ts, 'low': re.sub(r'\s+', ' ', txt).strip().lower()}
+            time.sleep(0.2)
+        self.posts = sorted(merged.values(), key=lambda p: p['ts'])
+        self._last_fetch = now
+        self._save()
+
+    def _rx(self, word):
+        if word in self._rx_cache:
+            return self._rx_cache[word]
+        alts = TRUTH_YES_SYNONYMS.get(word) or [a.strip() for a in word.split('/') if a.strip()]
+        pats = [re.escape(a.lower()) if ' ' in a else re.escape(a.lower()) + r'[a-z]*' for a in alts]
+        rx = re.compile(r'\b(?:' + '|'.join(pats) + r')\b') if pats else None
+        self._rx_cache[word] = rx
+        return rx
+
+    def posted(self, word, lo, hi):
+        """True if `word` appears in any post with lo <= ts <= hi."""
+        rx = self._rx(word)
+        if rx is None:
+            return False
+        for p in self.posts:
+            if p['ts'] < lo:
+                continue
+            if p['ts'] > hi:
+                break
+            if rx.search(p['low']):
+                return True
+        return False
 
 
 def get_mention_category(ticker):
@@ -1095,7 +1219,7 @@ class KalshiClient:
             print(f'  Orderbook error ({ticker}): {e}')
         return {}
 
-    def create_order(self, ticker, side, action, count, price_cents, expiration_ts=None, maker=False):
+    def create_order(self, ticker, side, action, count, price_cents, expiration_ts=None, maker=False, force_taker=False):
         """
         POST /portfolio/orders
         side: 'yes' or 'no'
@@ -1109,9 +1233,14 @@ class KalshiClient:
                In MAKER_ONLY mode EVERY order (buy AND sell) is also forced
                post_only below, so the exchange itself rejects any price that
                would cross the spread — no order can ever fill as a taker.
+        force_taker: SCOPED carve-out — only the Truth-Social cheap-word YES-buy
+               strategy passes this. When True, this single order is allowed to
+               cross the spread (post_only off) even under MAKER_ONLY. The resting
+               NO maker strategy never sets this, so its post_only behaviour is
+               completely unchanged.
         Returns order dict or None.
         """
-        if MAKER_ONLY and action == 'buy' and not maker:
+        if MAKER_ONLY and action == 'buy' and not maker and not force_taker:
             print(f"  MAKER_ONLY: blocked taker buy {ticker} {count}@{price_cents}c (maker-only mode)")
             return None
         # Hard risk caps on maker NO-buy entries (single chokepoint). Reject
@@ -1152,7 +1281,9 @@ class KalshiClient:
             # hard chokepoint, regardless of which strategy/price computed it.
             # Crossing exit-sells (execute_exit) get rejected and the position
             # simply holds to settlement, which is the intended maker thesis.
-            'post_only': True if MAKER_ONLY else bool(maker),
+            # force_taker (Truth cheap-word YES buy only) opts THIS order out of
+            # post_only so it can cross and fill as a taker.
+            'post_only': False if force_taker else (True if MAKER_ONLY else bool(maker)),
             'client_order_id': str(uuid.uuid4()),
         }
         if expiration_ts:
@@ -2301,7 +2432,7 @@ class KalshiPositionTracker:
                 result = market.get('result', '')
                 fill_price = pos.get('fill_price', pos.get('no_price', 0))
                 fill_count = pos.get('fill_count', 0)
-                is_yes_buy = pos.get('signal_type') in ('mention_buy_yes', 'ncaab_fade_yes', 'tennis_fade_yes')
+                is_yes_buy = pos.get('signal_type') in ('mention_buy_yes', 'ncaab_fade_yes', 'tennis_fade_yes', 'truth_cheap_yes')
 
                 if is_yes_buy:
                     # YES-buy position: wins when result='yes'
@@ -2887,6 +3018,8 @@ class KalshiReversionScanner:
         self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
         self._pending_tg_raw = []  # raw text messages — flushed alongside _pending_tg
         self._theta_start_prices = {}  # ticker -> NO price (cents) at event start
+        self.truth_feed = TruthSocialFeed()  # Trump Truth Social posts (cheap-word YES strat)
+        self._truth_traded = self._load_truth_ledger()  # set of tickers already YES-bought
 
     def _queue_tg(self, event_type, ticker, **kwargs):
         """Queue a telegram notification from sync code. Flushed in async main loop."""
@@ -3330,6 +3463,12 @@ class KalshiReversionScanner:
                 # 3g. Stable-price strategy — TAKER, off in maker-only
                 if STABLE_PRICE_ENABLED and not low_balance and not MAKER_ONLY:
                     await self._scan_stable_price(mention_markets, now)
+
+                # 3h. Truth-Social cheap-word YES buy — TAKER via scoped
+                # force_taker carve-out; intentionally runs even in MAKER_ONLY
+                # mode (does NOT touch the resting NO maker strategy).
+                if TRUTH_YES_ENABLED and not low_balance:
+                    await self._scan_truth_cheap_words(mention_markets, milestones, now)
         else:
             print(f"  Mention scan: next in {int(MENTION_SCAN_INTERVAL_SECONDS - (now - self._last_mention_scan))}s")
 
@@ -4244,6 +4383,244 @@ class KalshiReversionScanner:
             pass
         print(f"    YES-BUY taker not filled for {ticker}, canceled")
         log_event('yes_buy_unfilled', ticker=ticker, order_id=order_id)
+        return None
+
+    # --- Truth-Social cheap-word YES buy -----------------------------------
+    def _load_truth_ledger(self):
+        """Persistent per-word-per-event dedup: set of tickers already bought."""
+        try:
+            if TRUTH_TRADED_LEDGER.exists():
+                return set(json.loads(TRUTH_TRADED_LEDGER.read_text()))
+        except Exception:
+            pass
+        return set()
+
+    def _truth_mark_traded(self, ticker):
+        self._truth_traded.add(ticker)
+        try:
+            TRUTH_TRADED_LEDGER.write_text(json.dumps(sorted(self._truth_traded)))
+        except Exception:
+            pass
+
+    async def _scan_truth_cheap_words(self, mention_markets, milestones, now):
+        """Buy YES on a Trump mention word AFTER he posts it on Truth Social
+        within TRUTH_YES_WINDOW_H before the event, only while YES ask is still
+        <= TRUTH_YES_MAX_CENTS. Taker entry, $5/trade, one position per
+        word-per-event (ticker) forever. Runs alongside — and never touches —
+        the resting NO maker strategy."""
+        if not TRUTH_YES_ENABLED:
+            return
+        count = self.positions.count('truth_cheap_yes')
+        if count >= TRUTH_YES_MAX_POSITIONS:
+            return
+
+        trump_mkts = [m for m in mention_markets
+                      if m.get('strike_type') == 'custom'
+                      and 'TRUMPMENTION' in m.get('ticker', '').upper()
+                      and m.get('status') in ('open', 'active')]
+        if not trump_mkts:
+            return
+
+        # Refresh the feed once per cycle (self-throttled to every 10 min).
+        try:
+            self.truth_feed.refresh(TRUTH_YES_WINDOW_H + 24)
+        except Exception as e:
+            print(f"  TRUTH-YES: feed refresh failed ({e}); using cached posts")
+
+        skip = {'no_word': 0, 'avoid': 0, 'no_milestone': 0, 'ended': 0,
+                'not_posted': 0, 'dup': 0, 'no_price': 0, 'too_expensive': 0,
+                'event_cap': 0}
+        signals = []
+        for m in trump_mkts:
+            ticker = m.get('ticker', '')
+            event_ticker = m.get('event_ticker', '')
+            word = (m.get('custom_strike') or {}).get('Word')
+            if not word:
+                skip['no_word'] += 1
+                continue
+            wl = word.lower()
+            if wl in TRUTH_YES_AVOID_WORDS or any(a.strip() in TRUTH_YES_AVOID_WORDS
+                                                  for a in wl.split('/')):
+                skip['avoid'] += 1
+                continue
+            ms = milestones.get(event_ticker)
+            if not ms or not ms.get('start_ts'):
+                skip['no_milestone'] += 1
+                continue
+            T = ms['start_ts']
+            if ms.get('end_ts') and ms['end_ts'] <= now:
+                skip['ended'] += 1
+                continue
+            # Word must have been posted within the window before event start.
+            if not self.truth_feed.posted(word, T - TRUTH_YES_WINDOW_H * 3600, now):
+                skip['not_posted'] += 1
+                continue
+            # Dedup: one YES buy per word-per-event (ticker), ever.
+            if ticker in self._truth_traded or \
+                    self.positions.has_open_ticker(ticker, signal_type='truth_cheap_yes'):
+                skip['dup'] += 1
+                continue
+            # Price: YES ask = 100 - best NO bid.
+            ob = self.client.get_orderbook(ticker)
+            no_bids = ob.get('no', []) if ob else []
+            if not no_bids:
+                skip['no_price'] += 1
+                continue
+            yes_ask = 100 - max(b[0] for b in no_bids)
+            if yes_ask < 1:
+                skip['no_price'] += 1
+                continue
+            if yes_ask > TRUTH_YES_MAX_CENTS:
+                skip['too_expensive'] += 1
+                continue
+            if event_ticker and self.positions.event_exposure(
+                    event_ticker, signal_type='truth_cheap_yes') >= TRUTH_YES_MAX_EVENT_DOLLARS:
+                skip['event_cap'] += 1
+                continue
+
+            yes_price = yes_ask / 100.0
+            signals.append({
+                'ticker': ticker,
+                'event_ticker': event_ticker,
+                'title': m.get('title', ''),
+                'word': word,
+                'yes_ask_cents': yes_ask,
+                'yes_price': yes_price,
+                'hours_to_event': round((T - now) / 3600, 2),
+                'signal_type': 'truth_cheap_yes',
+                'signal_time': time.time(),
+                # Required by positions.add()
+                'fade_action': 'BUY',
+                'fade_side': 'yes',
+                'entry_price': yes_price,
+                'pre_signal_price': yes_price,
+                'price_move': 0,
+                'n_small_trades': 0,
+                'retail_contracts': 0,
+            })
+
+        active = {k: v for k, v in skip.items() if v}
+        if signals or active:
+            print(f"  TRUTH-YES scan: {len(signals)} signals from {len(trump_mkts)} Trump mkts, "
+                  f"{count}/{TRUTH_YES_MAX_POSITIONS} pos, skips: {active}")
+
+        for sig in signals:
+            if count >= TRUTH_YES_MAX_POSITIONS:
+                print(f"    TRUTH-YES CAP: {count}/{TRUTH_YES_MAX_POSITIONS}, stopping")
+                break
+            print(f"  TRUTH-YES: '{sig['word']}' YES ask {sig['yes_ask_cents']}c <= "
+                  f"{TRUTH_YES_MAX_CENTS}c h2e={sig['hours_to_event']:.1f}h '{sig['title'][:40]}'")
+            order_info = None
+            if self.client.can_trade:
+                order_info = self._execute_truth_yes_entry(sig)
+            if order_info:
+                await self.notifier.send_mention_signal(sig, order_info, trade_label="TRUTH YES TAKER")
+                self.positions.add(sig, order_info)
+                self._truth_mark_traded(sig['ticker'])
+                count += 1
+
+    def _execute_truth_yes_entry(self, sig):
+        """Taker YES buy for the Truth cheap-word strategy: $5, price = best YES
+        ask, hard-capped at TRUTH_YES_MAX_CENTS. Uses create_order(force_taker=True)
+        so this single order may cross the spread even under MAKER_ONLY."""
+        ticker = sig['ticker']
+
+        global_exp = self._global_ticker_exposure(ticker)
+        if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
+            print(f"    TRUTH-YES: global market cap ${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}, skip {ticker}")
+            return None
+
+        orderbook = self.client.get_orderbook(ticker)
+        no_bids = orderbook.get('no', []) if orderbook else []
+        if not no_bids:
+            print(f"    TRUTH-YES: no YES ask for {ticker} (no NO bids), skip")
+            return None
+        best_yes_ask = 100 - max(b[0] for b in no_bids)
+        if best_yes_ask < 1 or best_yes_ask > TRUTH_YES_MAX_CENTS:
+            print(f"    TRUTH-YES: ask {best_yes_ask}c outside 1-{TRUTH_YES_MAX_CENTS}c, skip")
+            return None
+
+        taker_price = best_yes_ask
+        contracts = int(TRUTH_YES_BET_DOLLARS / (taker_price / 100))
+        if contracts < 1:
+            contracts = 1
+        bet_dollars = round(contracts * taker_price / 100, 2)
+        print(f"    TRUTH-YES taker: {contracts} YES @ {taker_price}c = ${bet_dollars:.2f}")
+
+        if DRY_RUN:
+            order_info = {
+                'order_id': f'DRY-TRUTH-{uuid.uuid4().hex[:8]}',
+                'fill_price': taker_price / 100,
+                'fill_count': contracts,
+                'bet_dollars': bet_dollars,
+                'dry_run': True,
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'truth_cheap_yes',
+                'ticker': ticker, 'side': 'yes', 'action': 'buy',
+                'contracts': contracts, 'price_cents': taker_price,
+                'bet_dollars': bet_dollars, 'word': sig.get('word'), 'dry_run': True,
+            })
+            print(f"    TRUTH-YES DRY RUN: {contracts} YES @ {taker_price}c (${bet_dollars:.2f})")
+            return order_info
+
+        order = self.client.create_order(
+            ticker=ticker, side='yes', action='buy',
+            count=contracts, price_cents=taker_price, force_taker=True,
+        )
+        if not order:
+            print(f"    TRUTH-YES: order failed for {ticker}")
+            return None
+
+        order_id = order.get('order_id', '')
+        print(f"    TRUTH-YES placed: {order_id} ({contracts} YES @ {taker_price}c, ${bet_dollars:.2f})")
+        log_event('truth_yes_placed', ticker=ticker, order_id=order_id,
+                  contracts=contracts, price_cents=taker_price, bet_dollars=bet_dollars,
+                  word=sig.get('word'), hours_to_event=sig.get('hours_to_event'))
+
+        time.sleep(2)
+        status = self.client.get_order(order_id)
+        if status:
+            filled = status.get('quantity_filled', 0)
+            if filled > 0:
+                remaining = status.get('remaining_count', 0)
+                if remaining > 0:
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception:
+                        pass
+                avg_fill = status.get('average_fill_price', taker_price)
+                actual_dollars = round(filled * avg_fill / 100, 2)
+                info = {
+                    'order_id': order_id,
+                    'fill_price': avg_fill / 100,
+                    'fill_count': filled,
+                    'bet_dollars': actual_dollars,
+                    'dry_run': False,
+                }
+                self.trade_logger.record({
+                    'type': 'entry', 'strategy': 'truth_cheap_yes',
+                    'ticker': ticker, 'order_id': order_id,
+                    'side': 'yes', 'action': 'buy',
+                    'contracts_filled': filled, 'price_cents': taker_price,
+                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                    'word': sig.get('word'),
+                })
+                print(f"    TRUTH-YES FILLED: {filled}/{contracts} YES @ avg {avg_fill}c (${actual_dollars:.2f})")
+                log_event('truth_yes_filled', ticker=ticker, order_id=order_id,
+                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
+                          word=sig.get('word'))
+                self._queue_tg("TRUTH YES FILLED", ticker,
+                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                               title=sig.get('title', '')[:60])
+                return info
+
+        try:
+            self.client.cancel_order(order_id)
+        except Exception:
+            pass
+        print(f"    TRUTH-YES taker not filled for {ticker}, canceled")
+        log_event('truth_yes_unfilled', ticker=ticker, order_id=order_id)
         return None
 
     async def _scan_theta_reentry(self, mention_markets, milestones, now):
