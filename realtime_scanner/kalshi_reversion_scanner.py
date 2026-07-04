@@ -289,12 +289,12 @@ MENTION_SCAN_SERIES = [
 #   KXNCAABMENTION    best live WR (44%); profitable once cost/price-capped
 #   KXLASTWORDMENTION  20% cond WR, +186% cond ROI (small sample, tier-1)
 # All other discovered series are still scanned but may NOT rest a maker bid.
+# Restricted to Trump only (per operator directive). NBA/NCAAB/LastWord were
+# removed from resting-maker eligibility; their stale resting orders will be
+# cancelled by the de-vetted purge at line ~3683. Each order is capped $4.
 MENTION_MAKER_SERIES = {
     'KXTRUMPMENTION',
     'KXTRUMPMENTIONB',
-    'KXNBAMENTION',
-    'KXNCAABMENTION',
-    'KXLASTWORDMENTION',
 }
 
 # --- NBA Master Blacklist ---
