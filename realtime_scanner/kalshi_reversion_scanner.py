@@ -512,6 +512,9 @@ EVENT_LOG_FILE = STATE_DIR / 'kalshi_event_log.jsonl'
 # zero) so sizing is tiny. Some words are "podium-avoided" (posted-but-never-said) —
 # excluded via TRUTH_YES_AVOID_WORDS.
 TRUTH_YES_ENABLED = True
+# Alert-only mode: when True, detect YES-buy signals and fire a Telegram alert
+# but DO NOT place the order on Kalshi (no execution, no position tracked).
+TRUTH_YES_ALERT_ONLY = True
 TRUTH_YES_BET_DOLLARS = 5           # $5/trade (user-specified)
 TRUTH_YES_MAX_CENTS = 30            # only buy YES priced <= 30c
 TRUTH_YES_WINDOW_H = 24             # word must be posted within 24h before event start
@@ -1184,6 +1187,36 @@ class KalshiClient:
             print(f'  Positions error: {e}')
         return []
 
+    def get_orders(self, status='resting'):
+        """GET /portfolio/orders — list orders (default: resting/open on the book).
+        Paginates via cursor. Used to reconcile live resting orders after a
+        redeploy, since local order tracking is ephemeral on Railway."""
+        path = '/trade-api/v2/portfolio/orders'
+        headers = self._sign_request('GET', path)
+        if not headers:
+            return []
+        orders = []
+        cursor = None
+        for _ in range(20):
+            params = {'status': status, 'limit': 200}
+            if cursor:
+                params['cursor'] = cursor
+            try:
+                resp = self.session.get(f'{KALSHI_BASE}/portfolio/orders',
+                                        headers=headers, params=params, timeout=15)
+                if resp.status_code != 200:
+                    print(f'  Orders error {resp.status_code}: {resp.text[:200]}')
+                    break
+                data = resp.json()
+                orders += data.get('orders', [])
+                cursor = data.get('cursor', '')
+                if not cursor:
+                    break
+            except Exception as e:
+                print(f'  Orders error: {e}')
+                break
+        return orders
+
     def get_orderbook(self, ticker):
         """GET /markets/{ticker}/orderbook — returns yes/no bids as [[price_cents, qty], ...].
 
@@ -1254,6 +1287,15 @@ class KalshiClient:
             if count * price_cents / 100.0 > MAX_TRADE_DOLLARS + 1e-9:
                 print(f"  RISK CAP: blocked {ticker} {count}@{price_cents}c = "
                       f"${count * price_cents / 100:.2f} > ${MAX_TRADE_DOLLARS} max")
+                return None
+        # Per-order dollar ceiling for the force_taker (Truth cheap-word YES buy)
+        # path, which bypasses the maker-NO cap above. Prevents any single Truth
+        # order from ever exceeding its budget — a miscomputed contract count can
+        # never place an oversized bet. Other strategies keep their own caps.
+        elif action == 'buy' and force_taker:
+            if count * price_cents / 100.0 > TRUTH_YES_BET_DOLLARS + 1e-9:
+                print(f"  RISK CAP: blocked {ticker} {side} {count}@{price_cents}c = "
+                      f"${count * price_cents / 100:.2f} > ${TRUTH_YES_BET_DOLLARS} max (truth)")
                 return None
         # V2 create-order endpoint. The legacy POST /portfolio/orders now
         # returns HTTP 410 (deprecated_v1_order_endpoint). The v2 endpoint uses
@@ -2858,6 +2900,29 @@ class KalshiNotifier:
         )
         await self._send(msg)
 
+    async def send_truth_yes_alert(self, sig):
+        """Alert-only notification for a Truth-Social cheap-word YES-buy signal.
+        Fired when a YES-buy opportunity is detected but NOT executed on Kalshi."""
+        url = f"\nhttps://kalshi.com/markets/{sig['ticker']}"
+        yes_c = sig.get('yes_ask_cents', 0)
+        contracts = int(TRUTH_YES_BET_DOLLARS / (yes_c / 100)) if yes_c else 0
+        contracts = max(1, contracts)
+        cost = round(contracts * yes_c / 100, 2)
+        msg = (
+            f"KALSHI TRUTH YES ALERT (not executed)\n\n"
+            f"{sig.get('title', '')}\n"
+            f"Ticker: {sig['ticker']}\n"
+            f"Word: {sig.get('word', '')}\n\n"
+            f"SIGNAL: BUY YES at {yes_c}c\n"
+            f"Would buy: {contracts} YES (~${cost:.2f})\n"
+            f"Hours to event: {sig.get('hours_to_event', 0):.1f}h\n\n"
+            f"Why: Trump posted '{sig.get('word', '')}' on Truth Social within "
+            f"{TRUTH_YES_WINDOW_H}h before event; YES still <= {TRUTH_YES_MAX_CENTS}c.\n"
+            f"ALERT ONLY -- no order placed on Kalshi."
+            f"{url}"
+        )
+        await self._send(msg)
+
     async def send_startup(self, n_open, balance=None, mode='LIVE'):
         bal_line = f"Balance: ${balance/100:.2f}\n" if balance else ""
         msg = (
@@ -3020,6 +3085,7 @@ class KalshiReversionScanner:
         self._theta_start_prices = {}  # ticker -> NO price (cents) at event start
         self.truth_feed = TruthSocialFeed()  # Trump Truth Social posts (cheap-word YES strat)
         self._truth_traded = self._load_truth_ledger()  # set of tickers already YES-bought
+        self._truth_alerted = set()  # alert-only mode: tickers already alerted this session
 
     def _queue_tg(self, event_type, ticker, **kwargs):
         """Queue a telegram notification from sync code. Flushed in async main loop."""
@@ -3060,6 +3126,98 @@ class KalshiReversionScanner:
             self._resting_file.write_text(json.dumps(saveable, indent=2))
         except Exception as e:
             print(f"  WARNING: Failed to save resting orders: {e}")
+
+    @staticmethod
+    def _order_price_cents(o):
+        """Extract an order's limit price in cents, side-appropriately.
+        Handles both fixed-point (_dollars strings) and legacy integer-cent
+        fields. Returns None if it can't be determined (never guesses)."""
+        side = (o.get('side') or '').lower()
+        if side == 'no':
+            dollar_keys, cent_keys = ('no_price_dollars',), ('no_price',)
+        else:
+            dollar_keys, cent_keys = ('yes_price_dollars',), ('yes_price',)
+        for k in dollar_keys:
+            v = o.get(k)
+            if v is not None:
+                try:
+                    return int(round(float(v) * 100))
+                except (TypeError, ValueError):
+                    pass
+        for k in cent_keys:
+            v = o.get(k)
+            if v is not None:
+                try:
+                    return int(round(float(v)))
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    def _reconcile_resting_orders(self):
+        """Rebuild resting-order tracking from the exchange. Local order state
+        is ephemeral on Railway, so after a redeploy legacy resting orders are
+        invisible to the in-loop over-cap / de-vetted sweep and can (a) fill
+        untracked and (b) let the maker scan double-rest the same ticker (the
+        "resting order > $5" problem). This directly cancels any order that
+        exceeds the per-order cap or sits on a de-vetted series, and re-registers
+        the rest so the normal sweep / rebid / dedup manages them."""
+        orders = self.client.get_orders(status='resting')
+        if not orders:
+            return
+        kept = cancelled = 0
+        for o in orders:
+            oid = o.get('order_id') or o.get('client_order_id') or ''
+            ticker = o.get('ticker', '')
+            if not oid or not ticker:
+                continue
+            remaining = o.get('remaining_count', o.get('count', 0)) or 0
+            if remaining <= 0:
+                continue
+            price_c = self._order_price_cents(o)
+            size = (remaining * price_c / 100.0) if price_c else None
+            tu = ticker.upper()
+            series = tu.split('-')[0]
+            devetted = ('MENTION' in tu and series not in MENTION_MAKER_SERIES)
+            oversized = size is not None and size > MAX_TRADE_DOLLARS + 1e-9
+            if devetted or oversized:
+                reason = 'de-vetted series' if devetted else f'${size:.2f} > ${MAX_TRADE_DOLLARS}'
+                print(f"    RECONCILE CANCEL: {ticker} {remaining}@{price_c}c ({reason}) order {oid}")
+                log_event('reconcile_cancel_resting', ticker=ticker, order_id=oid,
+                          remaining=remaining, price_cents=price_c,
+                          size_dollars=round(size, 2) if size is not None else None,
+                          reason=reason)
+                try:
+                    self.client.cancel_order(oid)
+                    cancelled += 1
+                except Exception as e:
+                    print(f"    cancel failed: {e}")
+                continue
+            # Re-register (idempotent). Preserve the exchange's own expiration so
+            # a later rebid still auto-cancels at event start.
+            if oid not in self._resting_premarket_orders and price_c:
+                exp = o.get('expiration_time') or o.get('expiration_ts')
+                try:
+                    exp = int(exp) if exp else None
+                except (TypeError, ValueError):
+                    exp = None
+                self._resting_premarket_orders[oid] = {
+                    'ticker': ticker,
+                    'price_cents': price_c,
+                    'contracts': remaining,
+                    'bet_dollars': round(size, 2) if size is not None else 0,
+                    'placed_ts': time.time(),
+                    'category': 'Reconciled',
+                    'signal': {
+                        'ticker': ticker,
+                        'event_ticker': re.sub(r'-[^-]+$', '', ticker),
+                        'event_start_ts': exp,
+                        'no_price_cents': price_c,
+                    },
+                }
+                kept += 1
+        if kept or cancelled:
+            self._save_resting_orders()
+        print(f"  Resting-order reconcile: {len(orders)} on book, kept {kept}, cancelled {cancelled}")
 
     def _is_new_series(self, event_ticker):
         """Check if an event belongs to a new/unknown series (<3 resolved events)."""
@@ -3192,6 +3350,14 @@ class KalshiReversionScanner:
             if reconciled:
                 self.positions._save()
                 print(f"  Reconciled {reconciled} positions from API (per-market caps restored)")
+
+            # Reconcile resting orders from the exchange and purge legacy
+            # oversized / de-vetted ones (local order tracking is ephemeral on
+            # Railway, so prior-deploy resting orders are otherwise invisible).
+            try:
+                self._reconcile_resting_orders()
+            except Exception as e:
+                print(f"  Resting-order reconcile failed: {e}")
 
         await self.notifier.send_startup(self.positions.count(), balance)
 
@@ -4510,6 +4676,16 @@ class KalshiReversionScanner:
                 break
             print(f"  TRUTH-YES: '{sig['word']}' YES ask {sig['yes_ask_cents']}c <= "
                   f"{TRUTH_YES_MAX_CENTS}c h2e={sig['hours_to_event']:.1f}h '{sig['title'][:40]}'")
+            # Alert-only mode: fire Telegram alert, do NOT execute on Kalshi.
+            # Dedup on an in-memory session set so we don't spam every scan cycle,
+            # and don't touch _truth_traded (that would block a future live buy).
+            if TRUTH_YES_ALERT_ONLY:
+                if sig['ticker'] in self._truth_alerted:
+                    continue
+                await self.notifier.send_truth_yes_alert(sig)
+                self._truth_alerted.add(sig['ticker'])
+                count += 1
+                continue
             order_info = None
             if self.client.can_trade:
                 order_info = self._execute_truth_yes_entry(sig)
@@ -4573,6 +4749,13 @@ class KalshiReversionScanner:
             return None
 
         order_id = order.get('order_id', '')
+        # Mark this ticker traded IMMEDIATELY on acceptance — BEFORE polling for
+        # a fill. A force_taker YES buy on a thin cheap book can fill after our
+        # poll window or partially rest and fill later; if we only marked traded
+        # on a confirmed fill, the next scan cycle re-bought the same word and
+        # stacked $5 orders (the "$25 on Radical Left" bug). Marking here caps us
+        # at exactly one order per word-per-event regardless of fill timing.
+        self._truth_mark_traded(ticker)
         print(f"    TRUTH-YES placed: {order_id} ({contracts} YES @ {taker_price}c, ${bet_dollars:.2f})")
         log_event('truth_yes_placed', ticker=ticker, order_id=order_id,
                   contracts=contracts, price_cents=taker_price, bet_dollars=bet_dollars,
@@ -4580,46 +4763,45 @@ class KalshiReversionScanner:
 
         time.sleep(2)
         status = self.client.get_order(order_id)
-        if status:
-            filled = status.get('quantity_filled', 0)
-            if filled > 0:
-                remaining = status.get('remaining_count', 0)
-                if remaining > 0:
-                    try:
-                        self.client.cancel_order(order_id)
-                    except Exception:
-                        pass
-                avg_fill = status.get('average_fill_price', taker_price)
-                actual_dollars = round(filled * avg_fill / 100, 2)
-                info = {
-                    'order_id': order_id,
-                    'fill_price': avg_fill / 100,
-                    'fill_count': filled,
-                    'bet_dollars': actual_dollars,
-                    'dry_run': False,
-                }
-                self.trade_logger.record({
-                    'type': 'entry', 'strategy': 'truth_cheap_yes',
-                    'ticker': ticker, 'order_id': order_id,
-                    'side': 'yes', 'action': 'buy',
-                    'contracts_filled': filled, 'price_cents': taker_price,
-                    'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
-                    'word': sig.get('word'),
-                })
-                print(f"    TRUTH-YES FILLED: {filled}/{contracts} YES @ avg {avg_fill}c (${actual_dollars:.2f})")
-                log_event('truth_yes_filled', ticker=ticker, order_id=order_id,
-                          filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
-                          word=sig.get('word'))
-                self._queue_tg("TRUTH YES FILLED", ticker,
-                               price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
-                               title=sig.get('title', '')[:60])
-                return info
+        # Cancel any unfilled remainder so nothing rests and fills later
+        # untracked, then RE-READ the definitive fill count (the cancel can race
+        # a late fill).
+        remaining = status.get('remaining_count', 0) if status else 0
+        if remaining > 0:
+            try:
+                self.client.cancel_order(order_id)
+            except Exception:
+                pass
+            status = self.client.get_order(order_id) or status
+        filled = status.get('quantity_filled', 0) if status else 0
+        if filled > 0:
+            avg_fill = status.get('average_fill_price', taker_price)
+            actual_dollars = round(filled * avg_fill / 100, 2)
+            info = {
+                'order_id': order_id,
+                'fill_price': avg_fill / 100,
+                'fill_count': filled,
+                'bet_dollars': actual_dollars,
+                'dry_run': False,
+            }
+            self.trade_logger.record({
+                'type': 'entry', 'strategy': 'truth_cheap_yes',
+                'ticker': ticker, 'order_id': order_id,
+                'side': 'yes', 'action': 'buy',
+                'contracts_filled': filled, 'price_cents': taker_price,
+                'avg_fill_price': avg_fill, 'bet_dollars': actual_dollars,
+                'word': sig.get('word'),
+            })
+            print(f"    TRUTH-YES FILLED: {filled}/{contracts} YES @ avg {avg_fill}c (${actual_dollars:.2f})")
+            log_event('truth_yes_filled', ticker=ticker, order_id=order_id,
+                      filled=filled, avg_fill_cents=avg_fill, bet_dollars=actual_dollars,
+                      word=sig.get('word'))
+            self._queue_tg("TRUTH YES FILLED", ticker,
+                           price_cents=avg_fill, contracts=filled, bet_dollars=actual_dollars,
+                           title=sig.get('title', '')[:60])
+            return info
 
-        try:
-            self.client.cancel_order(order_id)
-        except Exception:
-            pass
-        print(f"    TRUTH-YES taker not filled for {ticker}, canceled")
+        print(f"    TRUTH-YES taker not filled for {ticker}, canceled (ticker already marked traded, will not re-fire)")
         log_event('truth_yes_unfilled', ticker=ticker, order_id=order_id)
         return None
 
