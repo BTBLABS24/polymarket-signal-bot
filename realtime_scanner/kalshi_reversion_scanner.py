@@ -1266,14 +1266,18 @@ class KalshiClient:
                In MAKER_ONLY mode EVERY order (buy AND sell) is also forced
                post_only below, so the exchange itself rejects any price that
                would cross the spread — no order can ever fill as a taker.
-        force_taker: SCOPED carve-out — only the Truth-Social cheap-word YES-buy
-               strategy passes this. When True, this single order is allowed to
-               cross the spread (post_only off) even under MAKER_ONLY. The resting
-               NO maker strategy never sets this, so its post_only behaviour is
-               completely unchanged.
+        force_taker: legacy carve-out used only by the Truth-Social cheap-word
+               YES-buy strategy. It is NEUTERED under MAKER_ONLY: a force_taker
+               buy is blocked exactly like any other taker buy and post_only stays
+               forced on, so no YES order can ever cross the spread while
+               MAKER_ONLY is on. It only permits a taker fill when MAKER_ONLY is
+               off. The resting NO maker strategy never sets this.
         Returns order dict or None.
         """
-        if MAKER_ONLY and action == 'buy' and not maker and not force_taker:
+        # Hard chokepoint: under MAKER_ONLY, block EVERY non-maker buy — including
+        # force_taker. No YES (or any) taker order can cross the spread while
+        # MAKER_ONLY is on, regardless of calling strategy or the alert-only flag.
+        if MAKER_ONLY and action == 'buy' and not maker:
             print(f"  MAKER_ONLY: blocked taker buy {ticker} {count}@{price_cents}c (maker-only mode)")
             return None
         # Hard risk caps on maker NO-buy entries (single chokepoint). Reject
@@ -1323,9 +1327,11 @@ class KalshiClient:
             # hard chokepoint, regardless of which strategy/price computed it.
             # Crossing exit-sells (execute_exit) get rejected and the position
             # simply holds to settlement, which is the intended maker thesis.
-            # force_taker (Truth cheap-word YES buy only) opts THIS order out of
-            # post_only so it can cross and fill as a taker.
-            'post_only': False if force_taker else (True if MAKER_ONLY else bool(maker)),
+            # Under MAKER_ONLY, post_only is forced on for EVERY order regardless
+            # of force_taker, so the exchange itself rejects anything that would
+            # cross the spread. force_taker only relaxes post_only when MAKER_ONLY
+            # is off (its intended taker use).
+            'post_only': True if MAKER_ONLY else (False if force_taker else bool(maker)),
             'client_order_id': str(uuid.uuid4()),
         }
         if expiration_ts:
