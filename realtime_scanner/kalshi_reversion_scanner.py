@@ -83,7 +83,15 @@ MENTION_BET_OTHER = 2              # $2 fixed for "other" categories
 # Per-category bet overrides DISABLED. The prior $10 escalations (Trump, Hegseth,
 # LastWord, etc.) drove the oversized live losses (e.g. Trump $1,466 over 132
 # markets ~$11/bet). Every maker order now uses the fixed small PREMARKET_BET_DOLLARS.
-CATEGORY_BET_OVERRIDE = {}
+CATEGORY_BET_OVERRIDE = {
+    # Maker-only additions vetted by ≥100-fill backtest (Wilson LB positive).
+    # Sized at $2/bet — their live LOSSES (VANCE -55%, Earnings -43%) were on the
+    # TAKER path, which is globally dead under MAKER_ONLY; the resting-maker
+    # profile is untested live, so start small.
+    'VANCE': 2,
+    'Earnings': 2,
+    'HEARING': 2,
+}
 # --- Hard risk caps (single chokepoint enforcement in create_order) ---
 # Fill-conditioned backtest: conditional ROI turns <= 0 above ~38c NO; the
 # profitable resting zone is ~15-30c. CLAUDE.md clean-trade rule: cost < $4,
@@ -187,7 +195,7 @@ POLITICAL_EXCLUDE_SPORTS = {
 POLITICAL_EXCLUDE_RALLY = True
 # Categories with <10% actual WR from live fills — net losers, skip entirely
 CATEGORY_KILL_LIST = {
-    'KXVANCEMENTION',         # VANCE: -55% ROI actual (3W/15L)
+    # KXVANCEMENTION removed: the -55% (3W/15L) was TAKER; re-added as maker-only.
     'KXGOVERNORMENTION',      # GOVERNOR: -99% ROI actual (1W/11L)
     'KXSPANBERGERMENTION',    # SPANBERGER: -100% ROI actual
     'KXBERNIEMENTION',        # BERNIE: -100% ROI actual (1W/8L)
@@ -295,7 +303,24 @@ MENTION_SCAN_SERIES = [
 MENTION_MAKER_SERIES = {
     'KXTRUMPMENTION',
     'KXTRUMPMENTIONB',
+    'KXVANCEMENTION',      # maker-only add ($2); live -55% was taker, maker untested
+    'KXHEARINGMENTION',    # maker-only add ($2); +73.6% backtest (151 fills)
 }
+# Prefix-matched maker series — for families whose ticker is per-instance
+# (e.g. earnings series are per-company: KXEARNINGSMENTIONAAPL, ...NVDA, ...).
+# A series is maker-vetted if it exactly matches MENTION_MAKER_SERIES OR
+# starts with any prefix here. Total resting exposure is still globally capped.
+MENTION_MAKER_SERIES_PREFIXES = {
+    'KXEARNINGSMENTION',   # maker-only add ($2); live -43% was taker, maker untested
+}
+
+
+def _is_maker_vetted(series):
+    """True if a series may rest a NO maker bid (exact allowlist OR prefix match)."""
+    s = series.upper()
+    if s in MENTION_MAKER_SERIES:
+        return True
+    return any(s.startswith(p) for p in MENTION_MAKER_SERIES_PREFIXES)
 
 # --- NBA Master Blacklist ---
 # ONE list checked FIRST in every code path. These words NEVER trade, no exceptions.
@@ -3183,7 +3208,7 @@ class KalshiReversionScanner:
             size = (remaining * price_c / 100.0) if price_c else None
             tu = ticker.upper()
             series = tu.split('-')[0]
-            devetted = ('MENTION' in tu and series not in MENTION_MAKER_SERIES)
+            devetted = ('MENTION' in tu and not _is_maker_vetted(series))
             oversized = size is not None and size > MAX_TRADE_DOLLARS + 1e-9
             if devetted or oversized:
                 reason = 'de-vetted series' if devetted else f'${size:.2f} > ${MAX_TRADE_DOLLARS}'
@@ -3852,7 +3877,7 @@ class KalshiReversionScanner:
             # Pure allowlist: the pruned MENTION_MAKER_SERIES is authoritative.
             # (Trump/NBA/NCAAB winners are in that set; de-vetted series' stale
             # resting orders are cancelled here.)
-            vetted = maker_series in MENTION_MAKER_SERIES
+            vetted = _is_maker_vetted(maker_series)
             if 'MENTION' in ticker_upper and not vetted:
                 print(f"    CANCEL DE-VETTED RESTING: {maker_series} not in vetted maker series, cancelling {order_id}")
                 try:
@@ -6845,7 +6870,7 @@ class KalshiReversionScanner:
         # maker bid. The is_trump/is_mamdani/is_newsom bypasses were removed —
         # Mamdani/Newsom are net losers (kill list) and the proven Trump/NBA/NCAAB
         # winners are already in the allowlist.
-        series_vetted = maker_series in MENTION_MAKER_SERIES
+        series_vetted = _is_maker_vetted(maker_series)
         can_rest_maker = pre_event and series_vetted
         if pre_event and not can_rest_maker and 'MENTION' in ticker_upper:
             print(f"    Skip maker: {maker_series} not in vetted maker series")
