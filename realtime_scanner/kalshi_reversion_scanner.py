@@ -558,6 +558,12 @@ TRUTH_FEED_URL = 'https://trumpstruth.org/feed'
 TRUTH_POSTS_CACHE = STATE_DIR / 'truth_social_recent.json'
 TRUTH_TRADED_LEDGER = STATE_DIR / 'truth_yes_traded.json'  # per-word-per-event dedup (by ticker)
 TRUTH_FEED_REFRESH_S = 600          # re-fetch feed at most every 10 min
+# Paper-trade tracking for the alert-only Truth-Social YES strat. Records the
+# simulated fill (at the same YES ask the alert reports) and settles it via the
+# normal position-tracker check(), so we get real would-be PnL with ZERO risk.
+# Kept in separate files so paper trades never touch live positions or caps.
+PAPER_TRUTH_POSITIONS_FILE = STATE_DIR / 'truth_yes_paper_positions.json'
+PAPER_TRUTH_CSV = STATE_DIR / 'truth_yes_paper_history.csv'
 
 
 # =====================================================================
@@ -2359,21 +2365,25 @@ def calculate_bet_size(orderbook, side, entry_price_cents):
 # =====================================================================
 
 class KalshiPositionTracker:
-    def __init__(self):
+    def __init__(self, positions_file=None, csv_file=None):
+        # Default to the live state files; a paper tracker passes its own paths
+        # so simulated trades stay fully isolated from live positions/caps.
+        self.positions_file = positions_file or POSITIONS_FILE
+        self.csv_file = csv_file or TRADE_HISTORY_CSV
         self.positions = []
         self.closed = []
         self._load()
 
     def _load(self):
         try:
-            with open(POSITIONS_FILE, 'r') as f:
+            with open(self.positions_file, 'r') as f:
                 data = json.load(f)
                 self.positions = data.get('open', [])
                 self.closed = data.get('closed', [])
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         # One-time backfill: write existing positions to CSV if the file doesn't exist yet
-        if not TRADE_HISTORY_CSV.exists() and (self.positions or self.closed):
+        if not self.csv_file.exists() and (self.positions or self.closed):
             for pos in self.closed:
                 exit_type = 'EXIT_SETTLED' if pos.get('status') == 'settled' else 'EXIT_CLOSED'
                 self._log_trade_csv(pos, exit_type)
@@ -2381,7 +2391,7 @@ class KalshiPositionTracker:
                 self._log_trade_csv(pos, 'ENTRY')
 
     def _save(self):
-        with open(POSITIONS_FILE, 'w') as f:
+        with open(self.positions_file, 'w') as f:
             json.dump({'open': self.positions, 'closed': self.closed[-100:]}, f, indent=2)
 
     def _log_trade_csv(self, pos, event_type):
@@ -2394,8 +2404,8 @@ class KalshiPositionTracker:
             'roi_pct', 'pnl_dollars', 'status', 'entry_time', 'close_time',
             'is_live',
         ]
-        file_exists = TRADE_HISTORY_CSV.exists()
-        with open(TRADE_HISTORY_CSV, 'a', newline='') as f:
+        file_exists = self.csv_file.exists()
+        with open(self.csv_file, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=csv_headers, extrasaction='ignore')
             if not file_exists:
                 writer.writeheader()
@@ -2442,7 +2452,7 @@ class KalshiPositionTracker:
                 'is_live': pos.get('is_live', False),
             })
 
-    def add(self, signal, order_info=None):
+    def add(self, signal, order_info=None, is_paper=False):
         signal_type = signal.get('signal_type', 'mention_buy_no')
 
         # All positions hold until settlement
@@ -2472,9 +2482,11 @@ class KalshiPositionTracker:
             pos['fill_price'] = order_info.get('fill_price', 0)
             pos['fill_count'] = order_info.get('fill_count', 0)
             pos['bet_dollars'] = order_info.get('bet_dollars', 0)
-            pos['is_live'] = True
+            pos['is_live'] = not is_paper
         else:
             pos['is_live'] = False
+        if is_paper:
+            pos['is_paper'] = True
         self.positions.append(pos)
         self._save()
         self._log_trade_csv(pos, 'ENTRY')
@@ -3107,6 +3119,8 @@ class KalshiReversionScanner:
         self.political_pct_detector = PoliticalPctDetector()
         self.stable_price_detector = StablePriceDetector()
         self.positions = KalshiPositionTracker()
+        # Isolated paper-trade book for the alert-only Truth-Social YES strat.
+        self.paper_truth = KalshiPositionTracker(PAPER_TRUTH_POSITIONS_FILE, PAPER_TRUTH_CSV)
         self.notifier = KalshiNotifier()
         self.trade_logger = TradeLogger()
         self.executor = OrderExecutor(self.client, self.trade_logger)
@@ -3695,6 +3709,17 @@ class KalshiReversionScanner:
                           signal_type=pos.get('signal_type'), pnl=pnl, result=result,
                           entry_price=pos.get('entry_price'), fill_price=pos.get('fill_price'),
                           fill_count=pos.get('fill_count'), is_live=pos.get('is_live'))
+
+        # Settle the isolated paper Truth-Social book (would-be PnL, no risk).
+        paper_alerts = self.paper_truth.check(self.client)
+        for atype, pos in paper_alerts:
+            if atype == 'settled':
+                pnl = pos.get('settle_pnl', 0)
+                result = "WIN" if pnl > 0 else "LOSS"
+                print(f"  PAPER SETTLED ({result}): '{pos['title'][:50]}' would-be P&L: ${pnl:+.2f}")
+                log_event('truth_yes_paper_settled', ticker=pos.get('ticker'), title=pos.get('title'),
+                          pnl=pnl, result=result, fill_price=pos.get('fill_price'),
+                          fill_count=pos.get('fill_count'), is_live=False)
 
         mention_count = self.positions.count('mention_buy_no')
         nba_ht_count = self.positions.count('nba_halftime_no')
@@ -4722,6 +4747,8 @@ class KalshiReversionScanner:
                     continue
                 await self.notifier.send_truth_yes_alert(sig)
                 self._truth_alerted.add(sig['ticker'])
+                # Paper-track the would-be trade (restart-safe dedup inside).
+                self._record_paper_truth_yes(sig)
                 count += 1
                 continue
             order_info = None
@@ -4732,6 +4759,38 @@ class KalshiReversionScanner:
                 self.positions.add(sig, order_info)
                 self._truth_mark_traded(sig['ticker'])
                 count += 1
+
+    def _record_paper_truth_yes(self, sig):
+        """Record a PAPER (simulated) Truth-Social YES buy — no order placed.
+
+        Fill is modelled at the YES ask reported in the alert (the price it would
+        have paid as a taker), $5/trade, hard-capped at TRUTH_YES_MAX_CENTS. The
+        position lands in the isolated paper book and is later settled to real
+        would-be PnL by paper_truth.check(). Restart-safe: skips if a paper
+        position for this ticker already exists (open or already settled)."""
+        ticker = sig['ticker']
+        yes_c = sig.get('yes_ask_cents', 0)
+        if not yes_c or yes_c > TRUTH_YES_MAX_CENTS:
+            return
+        # Dedup across restarts: one paper entry per ticker (open or closed).
+        if self.paper_truth.has_open_ticker(ticker, signal_type='truth_cheap_yes'):
+            return
+        if any(p.get('ticker') == ticker for p in self.paper_truth.closed):
+            return
+        contracts = max(1, int(TRUTH_YES_BET_DOLLARS / (yes_c / 100)))
+        bet_dollars = round(contracts * yes_c / 100, 2)
+        order_info = {
+            'order_id': f'PAPER-TRUTH-{uuid.uuid4().hex[:8]}',
+            'fill_price': yes_c / 100.0,
+            'fill_count': contracts,
+            'bet_dollars': bet_dollars,
+        }
+        self.paper_truth.add(sig, order_info, is_paper=True)
+        print(f"    TRUTH-YES PAPER: {contracts} YES @ {yes_c}c (${bet_dollars:.2f}) "
+              f"'{sig.get('word', '')}' {ticker}")
+        log_event('truth_yes_paper', ticker=ticker, word=sig.get('word'),
+                  contracts=contracts, price_cents=yes_c, bet_dollars=bet_dollars,
+                  hours_to_event=sig.get('hours_to_event'))
 
     def _execute_truth_yes_entry(self, sig):
         """Taker YES buy for the Truth cheap-word strategy: $5, price = best YES
