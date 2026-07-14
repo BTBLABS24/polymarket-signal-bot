@@ -91,13 +91,19 @@ CATEGORY_BET_OVERRIDE = {
     'VANCE': 2,
     'Earnings': 2,
     'HEARING': 2,
+    # Trump NO maker strat is the account's proven winner (+$129 over 3wk on
+    # NO-only, WR 36%, avg +$1.01/mkt; +$236 on the clean subset). User bump
+    # to $6/bet. Trump-scoped caps below lift ONLY Trump above the $4 net.
+    'Trump': 6,
 }
 # --- Hard risk caps (single chokepoint enforcement in create_order) ---
 # Fill-conditioned backtest: conditional ROI turns <= 0 above ~38c NO; the
 # profitable resting zone is ~15-30c. CLAUDE.md clean-trade rule: cost < $4,
 # NO price <= 30c. These are enforced as a hard net inside create_order so no
 # strategy/sizing bug can place an oversized or out-of-range maker entry.
-MAX_TRADE_DOLLARS = 4             # Max cost ($) of any single maker NO-buy
+MAX_TRADE_DOLLARS = 4             # Max cost ($) of any single maker NO-buy (non-Trump)
+TRUMP_MAKER_BET_DOLLARS = 6       # Trump NO maker size & per-order cap (user-set, proven winner)
+TRUMP_MAX_MARKET_DOLLARS = 6      # per-ticker ceiling for Trump maker NO (lifts the $4 global for Trump only)
 MAX_MAKER_NO_PRICE_CENTS = 30     # Max NO entry price (cents) for any maker buy
 MENTION_MAX_NO_PRICE = 0.30       # Global fallback max — conservative for unmapped categories
 MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides below)
@@ -1313,9 +1319,10 @@ class KalshiClient:
                 print(f"  RISK CAP: blocked {ticker} NO buy @ {price_cents}c "
                       f"> {MAX_MAKER_NO_PRICE_CENTS}c max")
                 return None
-            if count * price_cents / 100.0 > MAX_TRADE_DOLLARS + 1e-9:
+            per_order_cap = TRUMP_MAKER_BET_DOLLARS if get_mention_category(ticker) == 'Trump' else MAX_TRADE_DOLLARS
+            if count * price_cents / 100.0 > per_order_cap + 1e-9:
                 print(f"  RISK CAP: blocked {ticker} {count}@{price_cents}c = "
-                      f"${count * price_cents / 100:.2f} > ${MAX_TRADE_DOLLARS} max")
+                      f"${count * price_cents / 100:.2f} > ${per_order_cap} max")
                 return None
         # Per-order dollar ceiling for the force_taker (Truth cheap-word YES buy)
         # path, which bypasses the maker-NO cap above. Prevents any single Truth
@@ -6238,7 +6245,8 @@ class KalshiReversionScanner:
 
         # Spread-based cap: narrow spreads get smaller orders
         if spread < 10:
-            mention_bet = min(mention_bet, 5)
+            narrow_cap = TRUMP_MAKER_BET_DOLLARS if maker_cat_name == 'Trump' else 5
+            mention_bet = min(mention_bet, narrow_cap)
         else:
             mention_bet = min(mention_bet, 10)
 
@@ -6254,6 +6262,8 @@ class KalshiReversionScanner:
         is_nba_maker = 'NBAMENTION' in ticker.upper() or 'NBAFINALS' in ticker.upper()
         maker_market_cap = NBA_HALFTIME_MAX_MARKET_DOLLARS if (is_nba_maker and NBA_HALFTIME_ENABLED) else PREMARKET_MAX_MARKET_DOLLARS
         maker_market_cap = min(maker_market_cap, GLOBAL_MAX_MARKET_DOLLARS)
+        if maker_cat_name == 'Trump':
+            maker_market_cap = max(maker_market_cap, TRUMP_MAX_MARKET_DOLLARS)
         mention_bet = min(mention_bet, maker_market_cap)
 
         # Per-market exposure check (includes resting maker orders)
