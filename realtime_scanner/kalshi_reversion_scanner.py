@@ -89,7 +89,10 @@ CATEGORY_BET_OVERRIDE = {
     # TAKER path, which is globally dead under MAKER_ONLY; the resting-maker
     # profile is untested live, so start small.
     'VANCE': 2,
-    'Earnings': 2,
+    # Earnings bumped to $5/bet (user). Live Jul 14 bank cluster settled +52.7%
+    # ROI (+$20.02 on $37.98, 27 mkts). Earnings-scoped caps below lift ONLY
+    # Earnings to a $5/market ceiling; all other non-Trump caps stay at $4.
+    'Earnings': 5,
     'HEARING': 2,
     # Trump NO maker strat is the account's proven winner (+$129 over 3wk on
     # NO-only, WR 36%, avg +$1.01/mkt; +$236 on the clean subset). User bump
@@ -104,6 +107,8 @@ CATEGORY_BET_OVERRIDE = {
 MAX_TRADE_DOLLARS = 4             # Max cost ($) of any single maker NO-buy (non-Trump)
 TRUMP_MAKER_BET_DOLLARS = 6       # Trump NO maker size & per-order cap (user-set, proven winner)
 TRUMP_MAX_MARKET_DOLLARS = 6      # per-ticker ceiling for Trump maker NO (lifts the $4 global for Trump only)
+EARNINGS_MAKER_BET_DOLLARS = 5    # Earnings NO maker size & per-order cap (user-set)
+EARNINGS_MAX_MARKET_DOLLARS = 5   # per-ticker ceiling for Earnings maker NO (lifts the $4 global for Earnings only)
 MAX_MAKER_NO_PRICE_CENTS = 30     # Max NO entry price (cents) for any maker buy
 MENTION_MAX_NO_PRICE = 0.30       # Global fallback max — conservative for unmapped categories
 MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides below)
@@ -1325,7 +1330,13 @@ class KalshiClient:
                 print(f"  RISK CAP: blocked {ticker} NO buy @ {price_cents}c "
                       f"> {MAX_MAKER_NO_PRICE_CENTS}c max")
                 return None
-            per_order_cap = TRUMP_MAKER_BET_DOLLARS if get_mention_category(ticker) == 'Trump' else MAX_TRADE_DOLLARS
+            _cap_cat = get_mention_category(ticker)
+            if _cap_cat == 'Trump':
+                per_order_cap = TRUMP_MAKER_BET_DOLLARS
+            elif _cap_cat == 'Earnings':
+                per_order_cap = EARNINGS_MAKER_BET_DOLLARS
+            else:
+                per_order_cap = MAX_TRADE_DOLLARS
             if count * price_cents / 100.0 > per_order_cap + 1e-9:
                 print(f"  RISK CAP: blocked {ticker} {count}@{price_cents}c = "
                       f"${count * price_cents / 100:.2f} > ${per_order_cap} max")
@@ -6323,6 +6334,8 @@ class KalshiReversionScanner:
         maker_market_cap = min(maker_market_cap, GLOBAL_MAX_MARKET_DOLLARS)
         if maker_cat_name == 'Trump':
             maker_market_cap = max(maker_market_cap, TRUMP_MAX_MARKET_DOLLARS)
+        elif maker_cat_name == 'Earnings':
+            maker_market_cap = max(maker_market_cap, EARNINGS_MAX_MARKET_DOLLARS)
         mention_bet = min(mention_bet, maker_market_cap)
 
         # Per-market exposure check (includes resting maker orders)
