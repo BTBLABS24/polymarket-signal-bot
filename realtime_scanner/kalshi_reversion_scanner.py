@@ -532,8 +532,18 @@ TENNIS_FADE_MIN_PREGAME_YES = 60      # Pregame YES >= 60c
 TENNIS_FADE_MAX_MINUTES = 45          # First 45 min only
 TENNIS_FADE_MIN_DROP_SIZE = 10        # Min drop 10c
 
-# State files
-STATE_DIR = Path(__file__).parent
+# State files — persist to a Railway volume so state (positions, event log,
+# signal history, paper book) survives redeploys. Uses $STATE_DIR if set, else
+# /data (the mounted volume). Falls back to the script dir for local/dev runs
+# or if the volume isn't writable.
+_STATE_DIR_ENV = os.environ.get('STATE_DIR', '/data')
+try:
+    _candidate = Path(_STATE_DIR_ENV)
+    _candidate.mkdir(parents=True, exist_ok=True)
+    STATE_DIR = _candidate if os.access(_candidate, os.W_OK) else Path(__file__).parent
+except Exception:
+    STATE_DIR = Path(__file__).parent
+print(f"STATE_DIR = {STATE_DIR}")
 POSITIONS_FILE = STATE_DIR / 'kalshi_positions.json'
 TRADE_LOG_FILE = STATE_DIR / 'kalshi_trade_log.json'
 MENTION_SIGNAL_HISTORY_FILE = STATE_DIR / 'kalshi_mention_signal_history.json'
