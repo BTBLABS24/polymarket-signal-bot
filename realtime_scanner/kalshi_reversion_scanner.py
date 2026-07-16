@@ -6330,10 +6330,14 @@ class KalshiReversionScanner:
         else:
             mention_bet = min(mention_bet, 10)
 
-        # New/unknown series cap
+        # New/unknown series cap. Earnings is exempt: each issuer (TSLA, INTC, …)
+        # is its own per-issuer series and never in MENTION_SCAN_SERIES, so this
+        # otherwise clamped every earnings order to $1 regardless of the $5
+        # CATEGORY_BET_OVERRIDE. Earnings is a vetted maker series (user-set $5),
+        # still bounded by the $5/market and $50/event caps below.
         event_ticker = sig.get('event_ticker', '')
         series = re.sub(r'-\d{2}[A-Z]{3}\d{0,2}.*$', '', event_ticker)
-        if series not in MENTION_SCAN_SERIES:
+        if series not in MENTION_SCAN_SERIES and maker_cat_name != 'Earnings':
             resolved = getattr(self.client, '_series_resolved_counts', {}).get(series, 0)
             if resolved < PREMARKET_NEW_SERIES_MIN:
                 mention_bet = min(mention_bet, PREMARKET_NEW_SERIES_BET)
@@ -6358,7 +6362,10 @@ class KalshiReversionScanner:
         # Per-event exposure cap (includes resting maker orders)
         if event_ticker:
             evt_cap = MENTION_MAX_EVENT_DOLLARS
-            if self._is_new_series(event_ticker):
+            # Earnings exempt from the $10 new-series event cap (each issuer is a
+            # per-issuer "new" series); use the standard $50/event backstop so the
+            # $5/market size isn't throttled to ~2 words per issuer.
+            if self._is_new_series(event_ticker) and maker_cat_name != 'Earnings':
                 evt_cap = min(evt_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
             event_exp = self._total_event_exposure(event_ticker, signal_type='mention_buy_no')
             remaining_cap = evt_cap - event_exp
