@@ -96,8 +96,8 @@ CATEGORY_BET_OVERRIDE = {
     'HEARING': 2,
     # Trump NO maker strat is the account's proven winner (+$129 over 3wk on
     # NO-only, WR 36%, avg +$1.01/mkt; +$236 on the clean subset). User bump
-    # to $6/bet. Trump-scoped caps below lift ONLY Trump above the $4 net.
-    'Trump': 6,
+    # to $8/bet. Trump-scoped caps below lift ONLY Trump above the $4 net.
+    'Trump': 8,
 }
 # --- Hard risk caps (single chokepoint enforcement in create_order) ---
 # Fill-conditioned backtest: conditional ROI turns <= 0 above ~38c NO; the
@@ -105,9 +105,11 @@ CATEGORY_BET_OVERRIDE = {
 # NO price <= 30c. These are enforced as a hard net inside create_order so no
 # strategy/sizing bug can place an oversized or out-of-range maker entry.
 MAX_TRADE_DOLLARS = 4             # Max cost ($) of any single maker NO-buy (non-Trump)
-TRUMP_MAKER_BET_DOLLARS = 6       # Trump NO maker size & per-order cap (user-set, proven winner)
-TRUMP_MAX_MARKET_DOLLARS = 6      # per-ticker ceiling for Trump maker NO (lifts the $4 global for Trump only)
+TRUMP_MAKER_BET_DOLLARS = 8       # Trump NO maker size & per-order cap (user-set, proven winner)
+TRUMP_MAKER_MIN_DOLLARS = 7       # Trump NO maker FLOOR — skip if caps can't fit >=$7
+TRUMP_MAX_MARKET_DOLLARS = 8      # per-ticker ceiling for Trump maker NO (lifts the $4 global for Trump only)
 EARNINGS_MAKER_BET_DOLLARS = 5    # Earnings NO maker size & per-order cap (user-set)
+EARNINGS_MAKER_MIN_DOLLARS = 4    # Earnings NO maker FLOOR — skip if caps can't fit >=$4
 EARNINGS_MAX_MARKET_DOLLARS = 5   # per-ticker ceiling for Earnings maker NO (lifts the $4 global for Earnings only)
 MAX_MAKER_NO_PRICE_CENTS = 30     # Max NO entry price (cents) for any maker buy
 MENTION_MAX_NO_PRICE = 0.30       # Global fallback max — conservative for unmapped categories
@@ -3271,8 +3273,8 @@ class KalshiReversionScanner:
             tu = ticker.upper()
             series = tu.split('-')[0]
             devetted = ('MENTION' in tu and not _is_maker_vetted(series))
-            # Per-category ceiling: Trump $6, Earnings $5, everything else $4.
-            # A flat MAX_TRADE_DOLLARS check would wrongly cancel every legit $5/$6
+            # Per-category ceiling: Trump $8, Earnings $5, everything else $4.
+            # A flat MAX_TRADE_DOLLARS check would wrongly cancel every legit $5/$8
             # order on startup, emptying the tracking dict and defeating re-quote.
             cat_cap = max(CATEGORY_BET_OVERRIDE.get(get_mention_category(ticker), 0),
                           MAX_TRADE_DOLLARS)
@@ -6415,14 +6417,19 @@ class KalshiReversionScanner:
             contracts = 1
         bet_dollars = round(contracts * resting_price / 100, 2)
 
-        # Earnings: enforce a fixed ~$5 bet. The ceiling is already guaranteed by
-        # the $5 per-market / per-order caps (int() rounds down, so bet_dollars is
-        # always <= $5). Here we enforce the FLOOR: if the market/event caps can't
-        # fit a full ~$5 (best achievable within 5-30c is ~$4.76-$5.00), skip the
-        # word entirely rather than resting a fractional sub-$5 stub. $4.50 clears
-        # all legitimate full-size fills while rejecting cap-throttled remainders.
-        if maker_cat_name == 'Earnings' and bet_dollars < 4.50:
-            print(f"    Earnings skip: {ticker} can only fit ${bet_dollars:.2f} (<$5 floor)")
+        # Min-size FLOOR (Trump/Earnings). The max is already guaranteed by the
+        # per-market / per-order caps (int() rounds down, so bet_dollars <= target).
+        # Here we enforce the FLOOR: if the market/event caps can't fit a full-size
+        # bet, skip the word entirely rather than resting a fractional stub.
+        #   Trump    -> $7 floor ($8 target)
+        #   Earnings -> $4 floor ($5 target)
+        maker_min_floor = None
+        if maker_cat_name == 'Trump':
+            maker_min_floor = TRUMP_MAKER_MIN_DOLLARS
+        elif maker_cat_name == 'Earnings':
+            maker_min_floor = EARNINGS_MAKER_MIN_DOLLARS
+        if maker_min_floor is not None and bet_dollars < maker_min_floor:
+            print(f"    {maker_cat_name} skip: {ticker} can only fit ${bet_dollars:.2f} (<${maker_min_floor} floor)")
             return None
 
         # Dedup / re-quote decision. If a resting order already exists on this
