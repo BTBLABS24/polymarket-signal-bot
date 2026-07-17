@@ -6261,22 +6261,32 @@ class KalshiReversionScanner:
             print(f"    Maker skip: no event_start_ts for {ticker}, order would never auto-cancel")
             return None
 
-        # Global per-market hard ceiling
-        global_exp = self._global_ticker_exposure(ticker)
+        # Existing resting order(s) on this ticker. Historically the bot skipped
+        # the market outright if any resting order existed, which meant a stale
+        # undersized order (e.g. a pre-$5 $1 stub) would never be upsized. We now
+        # keep the existing order UNLESS the freshly-computed target is materially
+        # larger (decision made below, after sizing), in which case we cancel and
+        # re-quote at full size. Its own exposure is excluded from the caps so a
+        # re-quote can reclaim the room it already occupies. Collecting all matches
+        # also consolidates duplicate stubs left behind by prior restarts.
+        existing_oids = []
+        existing_bet = 0.0
+        for oid, info in self._resting_premarket_orders.items():
+            if info['ticker'] == ticker:
+                existing_oids.append(oid)
+                existing_bet += info.get('bet_dollars', 0) or 0.0
+
+        # Global per-market hard ceiling (exclude our own resting order's exposure)
+        global_exp = self._global_ticker_exposure(ticker) - existing_bet
         if global_exp >= GLOBAL_MAX_MARKET_DOLLARS:
             print(f"    GLOBAL market cap reached (${global_exp:.2f}/${GLOBAL_MAX_MARKET_DOLLARS}), skipping maker {ticker}")
             return None
 
-        # Total resting-exposure ceiling across ALL open maker orders
-        total_resting = sum(o.get('bet_dollars', 0) for o in self._resting_premarket_orders.values())
+        # Total resting-exposure ceiling across ALL open maker orders (exclude our own)
+        total_resting = sum(o.get('bet_dollars', 0) for o in self._resting_premarket_orders.values()) - existing_bet
         if total_resting >= PREMARKET_MAX_TOTAL_RESTING_DOLLARS:
             print(f"    TOTAL RESTING cap reached (${total_resting:.2f}/${PREMARKET_MAX_TOTAL_RESTING_DOLLARS}), skipping maker {ticker}")
             return None
-
-        # Skip if we already have a resting order on this ticker
-        for info in self._resting_premarket_orders.values():
-            if info['ticker'] == ticker:
-                return None
 
         # Get best NO bid from orderbook
         no_bids_raw = orderbook.get('no', [])
@@ -6352,8 +6362,10 @@ class KalshiReversionScanner:
             maker_market_cap = max(maker_market_cap, EARNINGS_MAX_MARKET_DOLLARS)
         mention_bet = min(mention_bet, maker_market_cap)
 
-        # Per-market exposure check (includes resting maker orders)
-        ticker_exp = self._global_ticker_exposure(ticker)
+        # Per-market exposure check (includes resting maker orders). Exclude our
+        # own existing resting order — if we re-quote it up, that room is freed
+        # when we cancel it below, so it must not count against the cap here.
+        ticker_exp = self._global_ticker_exposure(ticker) - existing_bet
         remaining_market_cap = maker_market_cap - ticker_exp
         if remaining_market_cap <= 0:
             return None
@@ -6367,7 +6379,7 @@ class KalshiReversionScanner:
             # $5/market size isn't throttled to ~2 words per issuer.
             if self._is_new_series(event_ticker) and maker_cat_name != 'Earnings':
                 evt_cap = min(evt_cap, PREMARKET_NEW_SERIES_EVENT_CAP)
-            event_exp = self._total_event_exposure(event_ticker, signal_type='mention_buy_no')
+            event_exp = self._total_event_exposure(event_ticker, signal_type='mention_buy_no') - existing_bet
             remaining_cap = evt_cap - event_exp
             if remaining_cap <= 0:
                 return None
@@ -6377,6 +6389,27 @@ class KalshiReversionScanner:
         if contracts < 1:
             contracts = 1
         bet_dollars = round(contracts * resting_price / 100, 2)
+
+        # Dedup / re-quote decision. If a resting order already exists on this
+        # ticker, keep it unless the new target is materially larger (>25% AND
+        # >=$0.50 bigger) — this upsizes stale stubs (e.g. $1 -> $5) while
+        # avoiding churn when the size is essentially unchanged. On upsize we
+        # cancel ALL existing resting orders for the ticker (consolidating any
+        # duplicates) and fall through to place one correctly-sized order.
+        if existing_oids:
+            if bet_dollars <= existing_bet * 1.25 or (bet_dollars - existing_bet) < 0.50:
+                return None  # existing order already adequately sized — keep it
+            if not DRY_RUN:
+                for oid in existing_oids:
+                    try:
+                        self.client.cancel_order(oid)
+                    except Exception as e:
+                        print(f"    Re-quote cancel failed for {ticker} {oid}: {e}")
+            for oid in existing_oids:
+                self._resting_premarket_orders.pop(oid, None)
+            self._save_resting_orders()
+            print(f"    RE-QUOTE: {ticker} upsizing ${existing_bet:.2f} -> ${bet_dollars:.2f} "
+                  f"(canceled {len(existing_oids)} stale)")
 
         h2e = sig.get('hours_to_event', 0)
         print(f"    OB: NO_BIDS={no_bids_raw[:5]} YES_BIDS={yes_bids_raw[:5] if isinstance(yes_bids_raw, list) else []} "
