@@ -6390,6 +6390,16 @@ class KalshiReversionScanner:
             contracts = 1
         bet_dollars = round(contracts * resting_price / 100, 2)
 
+        # Earnings: enforce a fixed ~$5 bet. The ceiling is already guaranteed by
+        # the $5 per-market / per-order caps (int() rounds down, so bet_dollars is
+        # always <= $5). Here we enforce the FLOOR: if the market/event caps can't
+        # fit a full ~$5 (best achievable within 5-30c is ~$4.76-$5.00), skip the
+        # word entirely rather than resting a fractional sub-$5 stub. $4.50 clears
+        # all legitimate full-size fills while rejecting cap-throttled remainders.
+        if maker_cat_name == 'Earnings' and bet_dollars < 4.50:
+            print(f"    Earnings skip: {ticker} can only fit ${bet_dollars:.2f} (<$5 floor)")
+            return None
+
         # Dedup / re-quote decision. If a resting order already exists on this
         # ticker, keep it unless the new target is materially larger (>25% AND
         # >=$0.50 bigger) — this upsizes stale stubs (e.g. $1 -> $5) while
