@@ -3151,7 +3151,7 @@ class KalshiReversionScanner:
         self._last_daily_summary_date = ''  # YYYY-MM-DD of last daily summary sent
         self._resting_premarket_orders = {}  # order_id -> {ticker, price_cents, contracts, bet_dollars, placed_ts, category, signal}
         self._entered_this_cycle = set()  # tickers entered this scan cycle (reset each cycle)
-        self._resting_file = Path(__file__).parent / 'resting_orders.json'
+        self._resting_file = STATE_DIR / 'resting_orders.json'
         self._load_resting_orders()
         self._pending_tg = []  # (event_type, ticker, kwargs) — flushed in async main loop
         self._pending_tg_raw = []  # raw text messages — flushed alongside _pending_tg
@@ -3251,9 +3251,14 @@ class KalshiReversionScanner:
             tu = ticker.upper()
             series = tu.split('-')[0]
             devetted = ('MENTION' in tu and not _is_maker_vetted(series))
-            oversized = size is not None and size > MAX_TRADE_DOLLARS + 1e-9
+            # Per-category ceiling: Trump $6, Earnings $5, everything else $4.
+            # A flat MAX_TRADE_DOLLARS check would wrongly cancel every legit $5/$6
+            # order on startup, emptying the tracking dict and defeating re-quote.
+            cat_cap = max(CATEGORY_BET_OVERRIDE.get(get_mention_category(ticker), 0),
+                          MAX_TRADE_DOLLARS)
+            oversized = size is not None and size > cat_cap + 1e-9
             if devetted or oversized:
-                reason = 'de-vetted series' if devetted else f'${size:.2f} > ${MAX_TRADE_DOLLARS}'
+                reason = 'de-vetted series' if devetted else f'${size:.2f} > ${cat_cap}'
                 print(f"    RECONCILE CANCEL: {ticker} {remaining}@{price_c}c ({reason}) order {oid}")
                 log_event('reconcile_cancel_resting', ticker=ticker, order_id=oid,
                           remaining=remaining, price_cents=price_c,
