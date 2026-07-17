@@ -3243,10 +3243,30 @@ class KalshiReversionScanner:
             ticker = o.get('ticker', '')
             if not oid or not ticker:
                 continue
-            remaining = o.get('remaining_count', o.get('count', 0)) or 0
+            # v2 schema: counts are fixed-point strings (remaining_count_fp);
+            # legacy integer fields (remaining_count/count) are absent -> None.
+            remaining_raw = o.get('remaining_count_fp')
+            if remaining_raw is None:
+                remaining_raw = o.get('remaining_count', o.get('count', 0))
+            try:
+                remaining = int(round(float(remaining_raw or 0)))
+            except (TypeError, ValueError):
+                remaining = 0
             if remaining <= 0:
                 continue
-            price_c = self._order_price_cents(o)
+            # These maker NO-buys appear as action=sell / side=yes in the
+            # YES-centric v2 book, so _order_price_cents would return the YES
+            # price (e.g. 76c) not the NO cost (24c). Use the NO cost basis so
+            # size ($) = contracts x NO price is correct and legit orders aren't
+            # flagged oversized.
+            npx = o.get('no_price_dollars')
+            if (o.get('outcome_side') or '').lower() == 'no' and npx is not None:
+                try:
+                    price_c = int(round(float(npx) * 100))
+                except (TypeError, ValueError):
+                    price_c = self._order_price_cents(o)
+            else:
+                price_c = self._order_price_cents(o)
             size = (remaining * price_c / 100.0) if price_c else None
             tu = ticker.upper()
             series = tu.split('-')[0]
