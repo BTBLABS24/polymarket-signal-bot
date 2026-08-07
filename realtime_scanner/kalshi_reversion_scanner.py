@@ -464,9 +464,10 @@ EARNINGS_MIN_NO_PRICE = 0.15     # 15c (was 5c — cheap NOs are -62% ROI losers
 EARNINGS_MAX_NO_PRICE = 0.50     # 50c (was 30c — 15-50c is +20.4% ROI, $0.31/d)
 EARNINGS_MAX_POSITIONS = 20      # independent cap
 EARNINGS_MAX_EVENT_DOLLARS = 10  # $10 per earnings call (capped at global max)
-# Entry window: any time pre-event (maker rests until event start)
-# 0-4h: +13.5% ROI (896 mkts), 0-24h: +31.9% (1163 mkts)
-EARNINGS_WINDOW_HOURS_BEFORE = 720  # effectively unlimited — maker rests pre-event
+# Entry window: only the final 3h before event start (maker rests in-window).
+# Reverts c33b2ff which expanded this to 720h and caused orders to rest days out.
+# 0-4h: +13.5% ROI (896 mkts).
+EARNINGS_WINDOW_HOURS_BEFORE = 3  # only rest NO orders within 3h of event start
 # Hot words to exclude — too common/misleading on earnings calls
 # 0% NO WR words: INTE, TOKE, GUID, RETE, OPEN, DELI, WAYM, LOYA, DIGI, OMNI, EXPN
 EARNINGS_WORD_BLACKLIST = {
