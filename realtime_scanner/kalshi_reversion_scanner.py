@@ -93,10 +93,11 @@ CATEGORY_BET_OVERRIDE = {
     # ROI (+$20.02 on $37.98, 27 mkts). Earnings-scoped caps below lift ONLY
     # Earnings to a $5/market ceiling; all other non-Trump caps stay at $4.
     'Earnings': 5,
-    'HEARING': 2,
+    'HEARING': 8,   # user bump $2->$8: only non-lottery edge (52% WR, +282% 45d). Scoped cap-lift below.
     # Trump NO maker strat is the account's proven winner (+$129 over 3wk on
     # NO-only, WR 36%, avg +$1.01/mkt; +$236 on the clean subset). User bump
     # to $8/bet. Trump-scoped caps below lift ONLY Trump above the $4 net.
+    # Trump DISABLED (removed from MENTION_MAKER_SERIES + ACTIVE_SERIES): -58.7% ROI last 45d.
     'Trump': 8,
 }
 # --- Hard risk caps (single chokepoint enforcement in create_order) ---
@@ -111,6 +112,8 @@ TRUMP_MAX_MARKET_DOLLARS = 8      # per-ticker ceiling for Trump maker NO (lifts
 EARNINGS_MAKER_BET_DOLLARS = 5    # Earnings NO maker size & per-order cap (user-set)
 EARNINGS_MAKER_MIN_DOLLARS = 4    # Earnings NO maker FLOOR — skip if caps can't fit >=$4
 EARNINGS_MAX_MARKET_DOLLARS = 5   # per-ticker ceiling for Earnings maker NO (lifts the $4 global for Earnings only)
+HEARING_MAKER_BET_DOLLARS = 8     # HEARING NO maker size & per-order cap (user-set; only non-lottery edge)
+HEARING_MAX_MARKET_DOLLARS = 8    # per-ticker ceiling for HEARING maker NO (lifts the $4 global for HEARING only)
 MAX_MAKER_NO_PRICE_CENTS = 30     # Max NO entry price (cents) for any maker buy
 MENTION_MAX_NO_PRICE = 0.30       # Global fallback max — conservative for unmapped categories
 MENTION_MIN_NO_PRICE = 0.05       # Global fallback min (per-category overrides below)
@@ -273,7 +276,7 @@ STABLE_PRICE_EXCLUDE_MEDIA = True
 #   Newsom: h2e-based (reliable timing)
 TAKER_MIN_EVENT_VELOCITY = 5.0    # trades/min — volume surge threshold for taker gating
 # Active series allowlist — only these get signals. Set to None to allow all.
-ACTIVE_SERIES = None              # All categories active
+ACTIVE_SERIES = {'KXVANCEMENTION', 'KXHEARINGMENTION'}  # ONLY these get signals (user: kill all else)
 # Series to scan (NBA for degradation, others for mention strategy)
 MENTION_SCAN_SERIES = [
     # Sports — per-category NO ranges (see CATEGORY_NO_RANGE)
@@ -314,18 +317,15 @@ MENTION_SCAN_SERIES = [
 # removed from resting-maker eligibility; their stale resting orders will be
 # cancelled by the de-vetted purge at line ~3683. Each order is capped $4.
 MENTION_MAKER_SERIES = {
-    'KXTRUMPMENTION',
-    'KXTRUMPMENTIONB',
-    'KXVANCEMENTION',      # maker-only add ($2); live -55% was taker, maker untested
-    'KXHEARINGMENTION',    # maker-only add ($2); +73.6% backtest (151 fills)
+    # Trump family REMOVED (user): -58.7% ROI last 45d, -$298 all-time.
+    'KXVANCEMENTION',      # maker-only ($2); +42% ROI 45d (lottery profile, ~28% WR)
+    'KXHEARINGMENTION',    # maker-only ($8 user bump); 52% WR, +282% ROI 45d — only non-lottery edge
 }
 # Prefix-matched maker series — for families whose ticker is per-instance
 # (e.g. earnings series are per-company: KXEARNINGSMENTIONAAPL, ...NVDA, ...).
 # A series is maker-vetted if it exactly matches MENTION_MAKER_SERIES OR
 # starts with any prefix here. Total resting exposure is still globally capped.
-MENTION_MAKER_SERIES_PREFIXES = {
-    'KXEARNINGSMENTION',   # maker-only add ($2); live -43% was taker, maker untested
-}
+MENTION_MAKER_SERIES_PREFIXES = set()  # Earnings prefix REMOVED (user): no realizable edge (11% fill, -56% 30d)
 
 
 def _is_maker_vetted(series):
@@ -1348,6 +1348,8 @@ class KalshiClient:
                 per_order_cap = TRUMP_MAKER_BET_DOLLARS
             elif _cap_cat == 'Earnings':
                 per_order_cap = EARNINGS_MAKER_BET_DOLLARS
+            elif _cap_cat == 'HEARING':
+                per_order_cap = HEARING_MAKER_BET_DOLLARS
             else:
                 per_order_cap = MAX_TRADE_DOLLARS
             if count * price_cents / 100.0 > per_order_cap + 1e-9:
@@ -6363,7 +6365,12 @@ class KalshiReversionScanner:
 
         # Spread-based cap: narrow spreads get smaller orders
         if spread < 10:
-            narrow_cap = TRUMP_MAKER_BET_DOLLARS if maker_cat_name == 'Trump' else 5
+            if maker_cat_name == 'Trump':
+                narrow_cap = TRUMP_MAKER_BET_DOLLARS
+            elif maker_cat_name == 'HEARING':
+                narrow_cap = HEARING_MAKER_BET_DOLLARS
+            else:
+                narrow_cap = 5
             mention_bet = min(mention_bet, narrow_cap)
         else:
             mention_bet = min(mention_bet, 10)
@@ -6388,6 +6395,8 @@ class KalshiReversionScanner:
             maker_market_cap = max(maker_market_cap, TRUMP_MAX_MARKET_DOLLARS)
         elif maker_cat_name == 'Earnings':
             maker_market_cap = max(maker_market_cap, EARNINGS_MAX_MARKET_DOLLARS)
+        elif maker_cat_name == 'HEARING':
+            maker_market_cap = max(maker_market_cap, HEARING_MAX_MARKET_DOLLARS)
         mention_bet = min(mention_bet, maker_market_cap)
 
         # Per-market exposure check (includes resting maker orders). Exclude our
