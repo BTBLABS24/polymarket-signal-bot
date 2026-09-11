@@ -458,7 +458,7 @@ DEGRADE_BUY_BELOW = {
 # Buy NO on earnings call mention markets.
 # Original 0-0.5h window: +9% ROI (thin edge). Wider 0-24h: +25.5% ROI.
 # With word blacklist (0% WR words removed): +23.6% ROI on 1106 markets.
-EARNINGS_ENABLED = True          # maker-only under MAKER_ONLY: detector emits signals, execution rests NO (no taker)
+EARNINGS_ENABLED = False         # DISABLED: no realizable edge live (11% maker fill rate + adverse selection, -55.9% ROI last 30d)
 EARNINGS_BET_DOLLARS = 2         # $2/bet — clean trades -43% ROI (21d), reduce exposure
 EARNINGS_MIN_NO_PRICE = 0.15     # 15c (was 5c — cheap NOs are -62% ROI losers)
 EARNINGS_MAX_NO_PRICE = 0.50     # 50c (was 30c — 15-50c is +20.4% ROI, $0.31/d)
